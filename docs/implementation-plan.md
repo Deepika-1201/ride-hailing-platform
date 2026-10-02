@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Phase | 5 — Implementation plan |
-| Status | Approved 2026-10-02, with the [LLD](low-level-design.md) and the [architecture review](architecture-review.md). Current phase: 1 (scaffolding) |
+| Status | Approved 2026-10-02, with the [LLD](low-level-design.md) and the [architecture review](architecture-review.md). Current phase: 2 (platform) |
 | Builds | [Requirements](requirements.md) §8 (V1–V8), designed in the [HLD](architecture.md) and [LLD](low-level-design.md) |
 
 ## Working agreement
@@ -27,7 +27,7 @@
 | # | Phase | Scope (LLD sections) | Tests added | Exit criteria |
 |---|---|---|---|---|
 | 0 | Design | Requirements, spikes S-1 to S-3, HLD, three deep dives, LLD, OpenAPI, schemas, ADR-001 to ADR-022, architecture review | — | Final design approval: **done 2026-10-02** |
-| 1 | Scaffolding | Gradle (Kotlin DSL), Java 25, Spring Boot 4.1; the 14 module packages with allowed dependencies; roles and `@ConditionalOnRole`; configuration; problem details and request IDs; health; JSON logs; per-module Flyway with empty schemas; PostgreSQL + PostGIS image; `docker compose`; GitHub Actions (§1, §2.1, §4.9, §13.1) | Spring Modulith verification; a fixture proving a forbidden dependency fails the build; schema-ownership test; roles start alone and together; problem-details format | `./gradlew build` green in CI; the app starts in each role; a boundary violation fails the build |
+| 1 | Scaffolding | Gradle (Kotlin DSL), Java 25, Spring Boot 4.1; the 14 module packages with allowed dependencies; roles and `@ConditionalOnRole`; configuration; problem details and request IDs; health; JSON logs; per-module Flyway with empty schemas; PostgreSQL + PostGIS image; `docker compose`; GitHub Actions (§1, §2.1, §4.9, §13.1) | Spring Modulith verification; a fixture proving a forbidden dependency fails the build; schema-ownership test; roles start alone and together; problem-details format | `./gradlew build` green in CI; the app starts in each role; a boundary violation fails the build: **done 2026-10-02** (46 tests; CI build and container jobs green) |
 | 2 | Platform | IDs and clocks; idempotency keys; outbox, in-process relay, inbox and failed deliveries; timers and their poller; leases; audit log with partitions and the append-only trigger; maintenance and retention jobs (§5) | Same-key replay, different-request `422`, in-progress `409`; crash between commit and delivery (no loss, no duplicate effect); poison event set aside; timer fires after a rollback; lease takeover with fencing; audit rejects updates | Every platform mechanism proven by a failure test, not only a happy path |
 | 3 | Identity and access | One-time codes, tokens, refresh rotation with reuse detection, roles, ownership plumbing, in-memory rate limiter, seeded staff accounts (§12) | Code attempts and expiry; refresh rotation, grace window, family revocation; wrong-role and wrong-owner access for a sample endpoint per role; rate limits | Every later endpoint can declare its role and get ownership checks for free |
 | 4 | Reference data and profiles | Cities, service areas, special areas, categories and dispatch settings; fare, fee and surge rules; drivers, vehicles, verification; rider profiles, places and payment methods; Bengaluru seed data (§4.3, §4.4, §10.5) | Admin API contract tests; geometry validation; rule versioning (never edited, never in the past); zone resolution (special area over H3 cell) | Seeded local stack answers every admin and profile endpoint in the OpenAPI document |
