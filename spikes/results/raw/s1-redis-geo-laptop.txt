@@ -1,0 +1,21 @@
+ Container ride-spikes-bench-run-9d92a46ff29b Creating 
+ Container ride-spikes-bench-run-9d92a46ff29b Created 
+approach=redis-geo drivers=2000 update_rate=500/s query_rate=15/s radius=3000m k=20 load=12ms
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.03
+update         n=22061    rate=    490/s  p50=539µs     p95=1.493ms   p99=3.972ms   max=11.652ms   errors=0
+query          n=672      rate=     15/s  p50=940µs     p95=2.853ms   p99=5.902ms   max=7.084ms    errors=0
+results        avg_returned=13.4 short_of_k=58.8% stale_returned=0 swept=40
+server         cores=0.03 memory=1.9MB
+  evalsha      calls/s=505       usec/call=22.6
+  geoadd       calls/s=193       usec/call=3.7
+  geosearch    calls/s=15        usec/call=23.8
+  hget         calls/s=490       usec/call=0.7
+  hmget        calls/s=1         usec/call=2.6
+  hset         calls/s=490       usec/call=1.6
+  info         calls/s=0         usec/call=342.0
+  zadd         calls/s=490       usec/call=1.7
+  zrange       calls/s=0         usec/call=27.1
+  zrem         calls/s=4         usec/call=2.1
+  zscore       calls/s=200       usec/call=0.6

@@ -1,0 +1,12 @@
+ Container ride-spikes-bench-run-b7e90ab52aaa Creating 
+ Container ride-spikes-bench-run-b7e90ab52aaa Created 
+rate=2000/s cancel=70% delay=15s pollers=2 poll_every=250ms batch=200 outage=0s
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.26
+insert         n=120001   rate=   2000/s  p50=349µs     p95=985µs     p99=1.736ms   max=73.453ms   errors=0
+fire_lag       n=35898    rate=    598/s  p50=130.231ms p95=245.734ms p99=256.875ms max=292.885ms  errors=0
+counts         created=120001 cancelled=84004 fired=35898 pending_at_end=19568
+  INSERT INTO timers (kind, ref_id, due_at   calls=160000   exec_ms/call=0.016
+  DELETE FROM timers WHERE id = $1           calls=101653   exec_ms/call=0.010
+  WITH due AS ( SELECT id FROM timers WHER   calls=626      exec_ms/call=4.734

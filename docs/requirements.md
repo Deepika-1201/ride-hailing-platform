@@ -245,12 +245,12 @@ What the numbers imply:
 
 ## 12. Open questions for design spikes
 
-| Spike | Question | Feeds |
+| Spike | Question | Answer |
 |---|---|---|
-| S-1 | Live index: Redis GEO vs Redis with H3 cells vs PostGIS, at laptop and cloud-tier rates (query p99, update throughput, CPU) | Location storage ADR |
-| S-2 | Timers: does a PostgreSQL timer table fire offer timeouts within ~1 s at cloud-tier rates without loading the database? | Timers ADR |
-| S-3 | WebSockets: memory per connection, and how a message reaches the node that holds a driver's connection | Realtime transport ADR |
-| S-4 | Outbox relay throughput and per-ride ordering | Outbox ADR (V3) |
+| S-1 | Live index: Redis GEO vs Redis with H3 cells vs PostGIS, at laptop and cloud-tier rates (query p99, update throughput, CPU) | Valkey GEO sets: 0.26 cores vs 1.46 for PostGIS at the cloud tier ([results](../spikes/results/s1-live-index.md), [ADR-004](decisions/ADR-004-live-location-index.md)) |
+| S-2 | Timers: does a PostgreSQL timer table fire offer timeouts within ~1 s at cloud-tier rates without loading the database? | Yes: at most 0.3 s late at 10× the cloud rate, 0.26 cores ([results](../spikes/results/s2-timers.md), [ADR-005](decisions/ADR-005-durable-timers.md)) |
+| S-3 | WebSockets: memory per connection, and how a message reaches the node that holds a driver's connection | Tomcat with 1 KB buffers, ~21 KB per connection; Valkey pub/sub subject channels ([results](../spikes/results/s3-websockets.md), [ADR-006](decisions/ADR-006-realtime-transport.md)) |
+| S-4 | Outbox relay throughput and per-ride ordering | Open; measured when the broker arrives in V3 |
 
 Later, once the simulator exists: whether batch matching beats sequential offers, the cost of ETA calls, and the partition key for the location stream.
 

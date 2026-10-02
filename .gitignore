@@ -2,3 +2,5 @@
 .env
 .idea/
 .vscode/
+.gradle/
+build/

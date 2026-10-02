@@ -1,0 +1,12 @@
+ Container ride-spikes-bench-run-4e7a65a688ac Creating 
+ Container ride-spikes-bench-run-4e7a65a688ac Created 
+approach=postgis-unlogged drivers=50000 update_rate=12500/s query_rate=300/s radius=3000m k=20 load=565ms
+MEASURE_START
+MEASURE_END
+server_cpu_cores=1.41
+update         n=735682   rate=  12261/s  p50=252µs     p95=4.575ms   p99=17.619ms  max=581.701ms  errors=0
+query          n=18016    rate=    300/s  p50=1.089ms   p95=28.173ms  p99=108.64ms  max=536.321ms  errors=0
+results        avg_returned=19.7 short_of_k=2.8% stale_returned=0 swept=0
+server         wal=0.4MB/s (34 bytes/update) hot_updates=6% dead_tuples_end=593946 autovacuums=1 size_end=52.8MB
+  update       calls/s=12257     exec_ms/call=0.181
+  query        calls/s=300       exec_ms/call=3.279

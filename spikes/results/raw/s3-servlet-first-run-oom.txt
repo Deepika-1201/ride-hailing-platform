@@ -1,0 +1,11 @@
+ Container ride-spikes-bench-run-1f4ce5b73652 Creating 
+ Container ride-spikes-bench-run-1f4ce5b73652 Created 
+STATS connections=0 {"open":0,"messages":0,"heapUsedMb":13,"nonHeapUsedMb":44,"directBuffersMb":0,"threads":15,"rssMb":298}
+HOLD_START connections=5000
+STEP connections=5000 failed=0 acks_per_s=1250
+server_cpu_cores=0.18
+STATS connections=5000 {"open":5000,"messages":28558,"heapUsedMb":372,"nonHeapUsedMb":50,"directBuffersMb":0,"threads":18,"rssMb":662}
+HOLD_START connections=10000
+STEP connections=10000 failed=0 acks_per_s=2500
+server_cpu_cores=0.40
+STATS connections=10000 {"open":10000,"messages":89092,"heapUsedMb":732,"nonHeapUsedMb":50,"directBuffersMb":0,"threads":18,"rssMb":1124}

@@ -1,0 +1,12 @@
+ Container ride-spikes-bench-run-f8419a332e6a Creating 
+ Container ride-spikes-bench-run-f8419a332e6a Created 
+rate=200/s cancel=70% delay=15s pollers=2 poll_every=250ms batch=200 outage=0s
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.07
+insert         n=12008    rate=    200/s  p50=676µs     p95=1.564ms   p99=2.588ms   max=68.242ms   errors=0
+fire_lag       n=3582     rate=     60/s  p50=125.377ms p95=239.569ms p99=249.569ms max=252.105ms  errors=0
+counts         created=12008 cancelled=8373 fired=3582 pending_at_end=1966
+  INSERT INTO timers (kind, ref_id, due_at   calls=16000    exec_ms/call=0.057
+  DELETE FROM timers WHERE id = $1           calls=10140    exec_ms/call=0.023
+  WITH due AS ( SELECT id FROM timers WHER   calls=636      exec_ms/call=0.913

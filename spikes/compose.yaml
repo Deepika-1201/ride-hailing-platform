@@ -1,0 +1,55 @@
+# Throwaway infrastructure for the design spikes (docs/requirements.md §12). Not the product stack.
+name: ride-spikes
+
+services:
+  valkey:
+    image: valkey/valkey:9
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    mem_limit: 512m
+
+  postgis:
+    image: imresamu/postgis:18-3.6
+    environment:
+      POSTGRES_USER: spike
+      POSTGRES_PASSWORD: spike
+      POSTGRES_DB: spike
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_wal_size=4GB",
+              "-c", "max_connections=200", "-c", "shared_preload_libraries=pg_stat_statements"]
+    shm_size: 256m
+    mem_limit: 1536m
+
+  bench:
+    build: ./bench
+    profiles: [tools]
+    mem_limit: 1g
+    ulimits:
+      nofile: 65536
+
+  ws-servlet:
+    build: ./ws-server
+    profiles: [ws]
+    environment:
+      SPRING_MAIN_WEB_APPLICATION_TYPE: servlet
+    mem_limit: 1536m
+    ulimits:
+      nofile: 65536
+
+  ws-servlet-tuned:
+    build: ./ws-server
+    profiles: [ws]
+    environment:
+      SPRING_MAIN_WEB_APPLICATION_TYPE: servlet
+      SPIKE_TUNED: "true"
+      JAVA_TOOL_OPTIONS: -Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1024
+    mem_limit: 1536m
+    ulimits:
+      nofile: 65536
+
+  ws-reactive:
+    build: ./ws-server
+    profiles: [ws]
+    environment:
+      SPRING_MAIN_WEB_APPLICATION_TYPE: reactive
+    mem_limit: 1536m
+    ulimits:
+      nofile: 65536

@@ -1,0 +1,22 @@
+ Container ride-spikes-bench-run-296c4b065b90 Creating 
+ Container ride-spikes-bench-run-296c4b065b90 Created 
+h3 res=8 neighbour_spacing=944m max_k=6
+approach=redis-h3 drivers=2000 update_rate=500/s query_rate=15/s radius=3000m k=20 load=10ms
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.03
+update         n=22061    rate=    490/s  p50=492µs     p95=1.349ms   p99=2.45ms    max=8.296ms    errors=0
+query          n=672      rate=     15/s  p50=3.7ms     p95=6.741ms   p99=9.196ms   max=9.716ms    errors=0
+results        avg_returned=13.4 short_of_k=58.8% stale_returned=0 swept=40
+server         cores=0.03 memory=1.9MB
+  evalsha      calls/s=570       usec/call=24.6
+  hget         calls/s=490       usec/call=0.6
+  hmget        calls/s=606       usec/call=0.9
+  hset         calls/s=490       usec/call=1.5
+  info         calls/s=0         usec/call=298.0
+  sadd         calls/s=7         usec/call=4.6
+  smembers     calls/s=1567      usec/call=0.3
+  srem         calls/s=11        usec/call=4.7
+  zadd         calls/s=490       usec/call=1.7
+  zrange       calls/s=0         usec/call=9.0
+  zrem         calls/s=0         usec/call=8.0

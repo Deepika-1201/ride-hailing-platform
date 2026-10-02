@@ -1,0 +1,24 @@
+ Container ride-spikes-bench-run-4a46f9e77436 Creating 
+ Container ride-spikes-bench-run-4a46f9e77436 Created 
+h3 res=8 neighbour_spacing=944m max_k=6
+approach=redis-h3 drivers=50000 update_rate=12500/s query_rate=300/s radius=3000m k=20 load=290ms
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.45
+update         n=728108   rate=  12135/s  p50=491µs     p95=6.754ms   p99=10.554ms  max=143.132ms  errors=0
+query          n=18015    rate=    300/s  p50=14.533ms  p95=23.786ms  p99=65.599ms  max=277.205ms  errors=0
+results        avg_returned=19.7 short_of_k=2.8% stale_returned=0 swept=1000
+server         cores=0.45 memory=12.6MB
+  client|setinfo calls/s=0         usec/call=3.0
+  evalsha      calls/s=12969     usec/call=27.9
+  hello        calls/s=0         usec/call=42.0
+  hget         calls/s=12135     usec/call=0.2
+  hmget        calls/s=112874    usec/call=0.6
+  hset         calls/s=12135     usec/call=0.6
+  info         calls/s=0         usec/call=2609.0
+  sadd         calls/s=188       usec/call=0.9
+  smembers     calls/s=10519     usec/call=0.9
+  srem         calls/s=257       usec/call=0.7
+  zadd         calls/s=12135     usec/call=0.8
+  zrange       calls/s=0         usec/call=39.8
+  zrem         calls/s=0         usec/call=103.0

@@ -1,0 +1,12 @@
+ Container ride-spikes-bench-run-c9bb25075c1d Creating 
+ Container ride-spikes-bench-run-c9bb25075c1d Created 
+approach=postgis drivers=2000 update_rate=500/s query_rate=15/s radius=3000m k=20 load=72ms
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.11
+update         n=22062    rate=    490/s  p50=1.276ms   p95=2.755ms   p99=5.298ms   max=23.275ms   errors=0
+query          n=672      rate=     15/s  p50=850µs     p95=2.878ms   p99=3.991ms   max=5.782ms    errors=0
+results        avg_returned=13.4 short_of_k=58.5% stale_returned=0 swept=0
+server         wal=0.1MB/s (305 bytes/update) hot_updates=6% dead_tuples_end=12386 autovacuums=1 size_end=1.4MB
+  update       calls/s=490       exec_ms/call=0.138
+  query        calls/s=15        exec_ms/call=0.372

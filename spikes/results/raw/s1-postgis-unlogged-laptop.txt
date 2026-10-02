@@ -1,0 +1,12 @@
+ Container ride-spikes-bench-run-c8de52d973dc Creating 
+ Container ride-spikes-bench-run-c8de52d973dc Created 
+approach=postgis-unlogged drivers=2000 update_rate=500/s query_rate=15/s radius=3000m k=20 load=47ms
+MEASURE_START
+MEASURE_END
+server_cpu_cores=0.09
+update         n=22062    rate=    490/s  p50=462µs     p95=1.354ms   p99=3.452ms   max=43.957ms   errors=0
+query          n=672      rate=     15/s  p50=779µs     p95=2.313ms   p99=8.675ms   max=40.197ms   errors=0
+results        avg_returned=13.4 short_of_k=58.5% stale_returned=0 swept=0
+server         wal=0.0MB/s (35 bytes/update) hot_updates=6% dead_tuples_end=12854 autovacuums=1 size_end=1.4MB
+  update       calls/s=490       exec_ms/call=0.102
+  query        calls/s=15        exec_ms/call=0.437
