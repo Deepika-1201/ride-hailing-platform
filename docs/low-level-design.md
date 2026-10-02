@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Phase | 4 — Low-level design |
-| Status | Draft for approval |
+| Status | Approved 2026-10-02. Each phase re-reads its sections before coding and records changes here |
 | Inputs | [Requirements](requirements.md) · [HLD](architecture.md) (approved 2026-10-02) · [Ride lifecycle](ride-lifecycle.md) · [Dispatch](dispatch-design.md) · [Location system](location-system.md) · [ADRs](decisions/README.md) |
 | Contracts | [OpenAPI](openapi.yaml) · [event schemas](schemas/events/) · [WebSocket schemas](schemas/websocket/) |
 | Next | [Implementation plan](implementation-plan.md) · [Architecture review](architecture-review.md) |

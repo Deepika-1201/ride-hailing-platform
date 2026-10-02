@@ -1,6 +1,6 @@
 # ADR-022: Demo web app: React and MapLibre on self-hosted OpenStreetMap tiles
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-02
 - **Related:** [LLD](../low-level-design.md) §18; requirements FR-S6, FR-O5, A-2, C-4; [ADR-006](ADR-006-realtime-transport.md), [ADR-021](ADR-021-simulator.md)
 

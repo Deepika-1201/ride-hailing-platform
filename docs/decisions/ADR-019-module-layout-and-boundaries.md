@@ -1,6 +1,6 @@
 # ADR-019: Package-per-module layout, verified boundaries and per-module migrations
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-02
 - **Related:** [LLD](../low-level-design.md) §1–§2; [ADR-001](ADR-001-architecture-style.md), [ADR-002](ADR-002-java-spring-boot-jdbc.md), [ADR-008](ADR-008-outbox-and-events.md); requirements NFR-15
 

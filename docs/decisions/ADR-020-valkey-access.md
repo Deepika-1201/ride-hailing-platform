@@ -1,6 +1,6 @@
 # ADR-020: Valkey access: Lettuce, scripts by EVALSHA, sharded pub/sub
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-02
 - **Related:** [LLD](../low-level-design.md) §9, §14; [ADR-004](ADR-004-live-location-index.md), [ADR-006](ADR-006-realtime-transport.md), [ADR-015](ADR-015-identity.md); [spike S-1](../../spikes/results/s1-live-index.md)
 

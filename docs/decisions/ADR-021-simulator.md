@@ -1,6 +1,6 @@
 # ADR-021: A Go simulator that drives the platform through its public APIs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-02
 - **Related:** [LLD](../low-level-design.md) §18; requirements FR-S1–FR-S5, NFR-14, §7; [ADR-013](ADR-013-routing-provider.md); [HLD §17](../architecture.md#17-testing-strategy)
 

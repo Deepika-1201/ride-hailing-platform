@@ -22,9 +22,9 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-016](ADR-016-trip-routes.md) | Trip routes in daily PostgreSQL partitions, archived to object storage at scale | Accepted |
 | [ADR-017](ADR-017-observability.md) | OpenTelemetry everywhere, with SLOs and tested alerts | Accepted |
 | [ADR-018](ADR-018-aws-deployment.md) | AWS: ECS Fargate in Mumbai, temporary environments, Terraform | Accepted (sizes at V7) |
-| [ADR-019](ADR-019-module-layout-and-boundaries.md) | Package-per-module layout, verified boundaries and per-module migrations | Proposed |
-| [ADR-020](ADR-020-valkey-access.md) | Valkey access: Lettuce, scripts by `EVALSHA`, sharded pub/sub | Proposed |
-| [ADR-021](ADR-021-simulator.md) | A Go simulator that drives the platform through its public APIs | Proposed |
-| [ADR-022](ADR-022-demo-web-app.md) | Demo web app: React and MapLibre on self-hosted OpenStreetMap tiles | Proposed |
+| [ADR-019](ADR-019-module-layout-and-boundaries.md) | Package-per-module layout, verified boundaries and per-module migrations | Accepted |
+| [ADR-020](ADR-020-valkey-access.md) | Valkey access: Lettuce, scripts by `EVALSHA`, sharded pub/sub | Accepted |
+| [ADR-021](ADR-021-simulator.md) | A Go simulator that drives the platform through its public APIs | Accepted |
+| [ADR-022](ADR-022-demo-web-app.md) | Demo web app: React and MapLibre on self-hosted OpenStreetMap tiles | Accepted |
 
 Amendments are dated sections at the end of an ADR; the original decision text stays as it was.
