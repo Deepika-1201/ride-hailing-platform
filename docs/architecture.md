@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Phase | 3 — High-level design |
-| Status | Draft for approval |
+| Status | Approved 2026-10-02; refined by the [LLD](low-level-design.md) and the [architecture review](architecture-review.md) |
 | Inputs | [Requirements](requirements.md), [ADR-001 to ADR-018](decisions/README.md), [design spikes](../spikes/README.md) |
 | Deep dives | [Ride lifecycle](ride-lifecycle.md) · [Dispatch](dispatch-design.md) · [Location system](location-system.md) |
-| Next | LLD (`low-level-design.md`): schemas, module APIs, OpenAPI, event schemas, implementation plan |
+| Next | [LLD](low-level-design.md) · [OpenAPI](openapi.yaml) · [implementation plan](implementation-plan.md) |
 
 Numbers marked **(assumed)** are introduced in this document and stay open for challenge. [Appendix B](#appendix-b--assumptions-introduced-here) lists them all.
 
@@ -203,7 +203,7 @@ flowchart TB
 
 Conventions:
 - UUIDv7 keys; a `version` column on every aggregate; `timestamptz` in UTC; money as `bigint` paise plus a currency code.
-- READ COMMITTED isolation with conditional updates. Rows are locked in a fixed order (ride → offer → driver availability → timers) to avoid deadlocks.
+- READ COMMITTED isolation with conditional updates. Rows are locked in a fixed order (ride → driver → offer → driver availability) to avoid deadlocks. Search tasks and timers are claimed by their pollers first and removed by everyone else without waiting, so no transaction waits for one while holding another lock ([LLD §6](low-level-design.md#6-concurrency-rules)).
 - Connection pools per role, sized so their sum stays below the server limit.
 - A read replica for operations and history queries from V6.
 
@@ -211,11 +211,14 @@ Conventions:
 
 | Key or channel | Type | Content | Written by | Cleanup |
 |---|---|---|---|---|
-| `{city}:drv:<driverId>` | Hash | Last position, sequence, time, status mirror, active ride, category | `realtime` (position), `dispatch` (status) | Deleted when the driver goes offline |
+| `{city}:drv:<driverId>` | Hash | Last position, sequence, time, status mirror with its version, active ride, category | `realtime` (position), `dispatch` (status) | Replaced by a 10-min tombstone when the driver goes offline |
 | `{city}:geo:<category>` | GEO set | Available drivers | Update script, `dispatch` | Sweeper removes drivers silent for 30 s |
+| `{city}:geo:online` | GEO set | Every online driver, for the operations map (V2) | Update script | Removed when the driver goes offline |
 | `{city}:seen` | Sorted set | Last update time per driver | Update script | Sweeper |
+| `{city}:epoch` | String | When the city's index was (re)started; guards the sweeper after a loss | Reconciler | — |
 | `drv:<driverId>` | Pub/sub channel | Offers and driver status | `dispatch`, `api` | — |
-| `ride:<rideId>` | Pub/sub channel | Ride status, driver position during the ride | `api`, `dispatch`, `realtime` | — |
+| `rdr:<riderId>` | Pub/sub channel | Ride status for the rider | `api`, `dispatch` | — |
+| `ride:<rideId>` | Pub/sub channel | Driver position during the ride | `realtime` | — |
 | `wsticket:<id>` | String | One-time WebSocket ticket | `api` | 60 s TTL **(assumed)** |
 | `rl:<scope>:<id>` | Counter | Rate-limit buckets | All roles | Window TTL |
 | `{city}:surge` | Hash | Current multiplier per zone (V4) | `dispatch` | 2 min TTL |
@@ -229,8 +232,8 @@ Valkey holds only data that can be rebuilt or lost: positions refill from update
 | `rides.events` | Ride ID | Ride lifecycle events | 7 days | notification, payment, rating, earnings, analytics |
 | `dispatch.events` | Ride ID | Offers and their outcomes | 7 days | Analytics, ops timeline |
 | `drivers.events` | Driver ID | Online and offline, verification, suspension | 7 days | Analytics |
-| `payments.events` | Ride ID | Charge and refund outcomes | 7 days | notification, ride (dues), earnings |
-| `location.updates` | Driver ID | Accepted location updates | 24 h | Trip-route archiver, demand and supply counters, analytics |
+| `payments.events` | Ride ID | Charge and refund outcomes | 7 days | notification, analytics |
+| `location.updates` | Driver ID | Accepted location updates | 24 h | Trip-route archiver (designed-for tier), analytics |
 | `<topic>.dlq.<consumer>` | As source | Messages a consumer gave up on | 14 days | Ops replay |
 
 12 partitions per topic at the cloud tier **(assumed)**. Retention values **(assumed)**.
@@ -251,7 +254,7 @@ Valkey holds only data that can be rebuilt or lost: positions refill from update
 | Data | Store | Retention | Rebuildable |
 |---|---|---|---|
 | Rides, transitions, charges, audit | PostgreSQL | 3 years **(assumed)** | No |
-| Quotes | PostgreSQL | 30 days **(assumed)** | No |
+| Quotes | PostgreSQL | Used: 30 days; unused: 24 h after expiry **(assumed)** | No |
 | Dispatch decisions | PostgreSQL | 30 days **(assumed)** | No |
 | Timers, search tasks | PostgreSQL | Until fired or cancelled | No |
 | Idempotency keys | PostgreSQL | 24 h | No; expiry is safe |
@@ -447,17 +450,17 @@ Versioning: adding optional fields keeps the version. A breaking change publishe
 
 | Event | Producer | Consumers |
 |---|---|---|
-| `RideRequested` | ride | analytics, demand counters (V4) |
-| `OfferCreated`, `OfferAccepted`, `OfferDeclined`, `OfferExpired` | dispatch | ops timeline, analytics, acceptance-rate read model |
+| `RideRequested` | ride | analytics |
+| `OfferCreated`, `OfferAccepted`, `OfferDeclined`, `OfferExpired`, `OfferWithdrawn` | dispatch | ops timeline, analytics, acceptance-rate read model |
 | `DriverAssigned`, `DriverUnassigned`, `DriverArrived`, `TripStarted` | ride | notification, ops timeline |
 | `TripCompleted` | ride | payment (charge), rating (open window), earnings, notification |
 | `RideCancelled` | ride | payment (fees), notification |
 | `RideNotMatched` | ride | notification, analytics |
-| `ChargeSucceeded`, `ChargeFailed`, `RefundSucceeded` | payment | notification, ride history, earnings |
-| `DriverWentOnline`, `DriverWentOffline`, `DriverSuspended`, `DriverReinstated` | dispatch, driver | analytics, dispatch (suspension) |
-| `RatingSubmitted` | rating | rating summaries |
+| `ChargeSucceeded`, `ChargeFailed`, `RefundSucceeded` | payment | notification, analytics |
+| `DriverWentOnline`, `DriverWentOffline`, `DriverSuspended`, `DriverReinstated` | dispatch, driver | notification (why a driver went offline), analytics. Dispatch acts on a suspension in the same transaction, not through the event |
+| `RatingSubmitted` | rating | analytics; rating summaries are updated in the rating's own transaction |
 
-Schemas and examples come in the LLD.
+Schemas and examples: [schemas/events/](schemas/events/); catalog with payload fields in [LLD §15](low-level-design.md#15-events). Surge demand in V4 is counted from the database rather than by a consumer, so it keeps working while Kafka is down.
 
 ### 9.5 Multi-step operations and compensation
 
@@ -475,7 +478,7 @@ No operation uses a distributed transaction or two-phase commit.
 ### 10.1 Conventions
 
 - REST with JSON over HTTPS, versioned in the path (`/v1`). Within a version, changes are additive only. The OpenAPI spec is written in the LLD and enforced by contract tests.
-- Every state-changing POST requires an `Idempotency-Key` header (ADR-009).
+- Commands that change a ride, an offer, a driver's status, a payment or a rating require an `Idempotency-Key` header (ADR-009). Sign-in, quotes, location updates, WebSocket tickets and webhooks are exempt, because a repeat is harmless or deduplicated another way ([LLD §5.1](low-level-design.md#51-idempotency-adr-009)).
 - Errors use RFC 9457 `application/problem+json` with a stable `code`, for example `QUOTE_EXPIRED`, `ACTIVE_RIDE_EXISTS`, `DUES_OUTSTANDING`, `OFFER_NO_LONGER_AVAILABLE`, `INVALID_TRANSITION`, `WRONG_PIN`, `IDEMPOTENCY_KEY_REUSED`, `RATE_LIMITED`, `OUTSIDE_SERVICE_AREA`.
 - Timestamps are ISO-8601 in UTC. Money is `{ "amount_paise": 18900, "currency": "INR" }`.
 - Lists use cursor pagination (`cursor`, `limit`) ordered by `(created_at, id)`.
@@ -485,27 +488,31 @@ No operation uses a distributed transaction or two-phase commit.
 
 | Area | Endpoints |
 |---|---|
-| Sign-in | `POST /v1/auth/otp`, `POST /v1/auth/token`, `POST /v1/auth/refresh` |
-| Rider | `GET`/`PATCH /v1/riders/me`; `/v1/riders/me/places`; `/v1/riders/me/payment-methods`; `GET /v1/riders/me/rides`; `GET /v1/riders/me/dues`, `POST /v1/riders/me/dues/pay` |
-| Quotes and rides | `POST /v1/quotes`; `POST /v1/rides`; `GET /v1/rides/{id}`; `POST /v1/rides/{id}/cancel` (rider or driver; outcome depends on actor and state); `POST /v1/rides/{id}/arrive`, `/start` (with PIN), `/complete`, `/no-show` (driver); `POST /v1/rides/{id}/rating`; `GET /v1/rides/{id}/receipt` |
-| Driver | `GET /v1/drivers/me`; `POST /v1/drivers/me/online` (vehicle), `POST /v1/drivers/me/offline`; `POST /v1/drivers/me/location` (V1 only); `GET /v1/drivers/me/offer` (resync); `POST /v1/offers/{id}/accept`, `/decline`; `GET /v1/drivers/me/rides`, `GET /v1/drivers/me/earnings` |
+| Sign-in | `POST /v1/auth/otp`, `POST /v1/auth/token`, `POST /v1/auth/refresh`, `POST /v1/auth/logout` |
+| Rider | `GET`/`PATCH /v1/riders/me`; `/v1/riders/me/places`; `/v1/riders/me/payment-methods`; `GET /v1/riders/me/rides`, `GET /v1/riders/me/active-ride`; `GET /v1/riders/me/dues`, `POST /v1/riders/me/dues/pay` |
+| Quotes and rides | `POST /v1/quotes`; `POST /v1/rides`; `GET /v1/rides/{id}`; `POST /v1/rides/{id}/cancel` (rider or driver; outcome depends on actor and state); `POST /v1/rides/{id}/arrive`, `/start` (with PIN), `/complete`, `/no-show` (driver); `POST /v1/rides/{id}/rating`; `GET /v1/rides/{id}/receipt`; `GET /v1/rides/{id}/route` (V2) |
+| Driver | `GET /v1/drivers/me`; `POST /v1/drivers/me/online` (vehicle), `POST /v1/drivers/me/offline`; `POST /v1/drivers/me/location` (V1 live updates; from V2 offline replays only); `GET /v1/drivers/me/offer` (resync); `GET /v1/drivers/me/active-ride`; `POST /v1/offers/{id}/accept`, `/decline`; `GET /v1/drivers/me/rides`, `GET /v1/drivers/me/earnings` |
 | Real time | `POST /v1/realtime/tickets`, then `wss://…/ws?ticket=…` |
-| Operations | `GET /v1/ops/rides`, `GET /v1/ops/rides/{id}/timeline`, `POST /v1/ops/rides/{id}/cancel`; `GET /v1/ops/drivers`, `POST /v1/ops/drivers/{id}/suspend`, `/reinstate`; `GET /v1/ops/payments`, `POST /v1/ops/charges/{id}/refunds`; dead letters and replay (V3) |
-| Admin | `/v1/admin/cities`, `/zones`, `/categories`, `/fare-rules`, `/surge-rules`, `/fees`, `/drivers`, `/vehicles` |
+| Operations | `GET /v1/ops/rides`, `GET /v1/ops/rides/{id}/timeline`, `POST /v1/ops/rides/{id}/cancel`; `GET /v1/ops/drivers`, `POST /v1/ops/drivers/{id}/suspend`, `/reinstate`; `GET /v1/ops/payments`, `POST /v1/ops/charges/{id}/refunds`; `GET /v1/ops/flags`, `POST /v1/ops/flags/{id}/resolve`; `GET /v1/ops/invariants` (V2); dead letters and replay (V3) |
+| Admin | `/v1/admin/cities` (with service area, special areas and categories), `/fare-rules`, `/fee-rules`, `/surge-rules`, `/drivers`, `/vehicles` |
 | Webhooks | `POST /v1/webhooks/payments/{provider}` (signed) |
+
+The complete contract is [openapi.yaml](openapi.yaml).
 
 ### 10.3 WebSocket messages
 
 | Direction | Type | Fields |
 |---|---|---|
-| Driver → server | `location` | `seq`, `lat`, `lon`, `accuracy_m`, `heading_deg`, `speed_mps`, `device_time`, `replay` |
-| Server → driver | `offer` | `offer_id`, `ride_id`, pickup and drop-off summary, fare, `expires_at` |
-| Server → driver | `offer_withdrawn`, `ride_status` | IDs, `status`, `version` |
+| Driver → server | `location` | `seq`, `lat`, `lon`, `accuracy_m`, `heading_deg`, `speed_mps`, `device_time` |
+| Driver → server | `offer_seen` | `offer_id` |
+| Server → driver | `offer` | `offer_id`, `ride_id`, pickup and drop-off summary, fare, `expires_at`, `expires_in_ms` |
+| Server → driver | `offer_withdrawn`, `driver_status`, `ride_status` | IDs, `status`, `version`, reason |
 | Server → rider | `ride_status` | `ride_id`, `status`, `version`, driver and vehicle summary |
 | Server → rider | `driver_position` | `lat`, `lon`, `heading_deg`, `seq`, `eta_s` |
+| Operations ↔ server | `ops_viewport`, `ops_snapshot` | City and bounding box; drivers in it every 2 s |
 | Server → any | `reconnect` | `after_ms` (used when draining a node) |
 
-Every pushed message carries a version or sequence number, and clients ignore anything older than what they hold (ADR-006).
+Every pushed message carries a version or sequence number, and clients ignore anything older than what they hold (ADR-006). Schemas: [schemas/websocket/](schemas/websocket/). Frames stay under 1 KB, so offline replays go over HTTPS ([LLD §14](low-level-design.md#14-realtime-v2)).
 
 ## 11. Consistency and concurrency
 
@@ -690,7 +697,7 @@ Alert rules are unit-tested with `promtool`, as in the sibling projects. The ope
 
 | Profile | Adds | Memory **(assumed)** |
 |---|---|---|
-| default | PostgreSQL + PostGIS, Valkey, app (all roles) | ~1.5 GB |
+| default | PostgreSQL + PostGIS and the app (all roles); Valkey from V2 | ~1.5 GB |
 | `kafka` (V3+) | Kafka, native single-node image | ~0.3 GB |
 | `observability` | Grafana LGTM all-in-one | ~1 GB |
 | `routing` (V4) | OSRM with a Bengaluru extract | ~1 GB |
@@ -766,7 +773,7 @@ The implementation plan maps these to each version.
 
 | Version | Architectural change | Reference |
 |---|---|---|
-| V1 | All modules; REST; outbox delivered in-process; search tasks, timers and invariants in PostgreSQL; location over REST | Requirements §8 |
+| V1 | All modules; REST; outbox delivered in-process; search tasks, timers and invariants in PostgreSQL; location over REST into an in-memory live index | Requirements §8, [LLD §1.3](low-level-design.md#13-runtime-roles) |
 | V2 | `realtime` role, Valkey live index and pub/sub, trip routes, simulator, live map | ADR-004, ADR-006, ADR-016 |
 | V3 | Kafka; the relay publishes the outbox; consumers move to Kafka; location stream; dead letters and replay; spike S-4 | ADR-007, ADR-008 |
 | V4 | ETA ranking via the routing provider (OSRM), computed surge, batch-matching experiment, back-to-back trip design | ADR-011, ADR-012, ADR-013 |
@@ -797,6 +804,10 @@ The implementation plan maps these to each version.
 | Trip routes | PostgreSQL daily partitions, 90-day retention | [ADR-016](decisions/ADR-016-trip-routes.md) |
 | Observability | OpenTelemetry, Prometheus, Grafana, Tempo, Loki | [ADR-017](decisions/ADR-017-observability.md) |
 | Cloud | AWS ap-south-1: ECS Fargate, RDS, ElastiCache for Valkey, MSK, Terraform | [ADR-018](decisions/ADR-018-aws-deployment.md) |
+| Code layout | A package per module, verified boundaries, a migration history per module | [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md) |
+| Valkey access | Lettuce, scripts by `EVALSHA`, sharded pub/sub | [ADR-020](decisions/ADR-020-valkey-access.md) |
+| Simulator | Go, public APIs only, OSRM routes recorded for replay | [ADR-021](decisions/ADR-021-simulator.md) |
+| Demo web app | React, MapLibre, self-hosted OpenStreetMap tiles | [ADR-022](decisions/ADR-022-demo-web-app.md) |
 
 ---
 
@@ -825,7 +836,7 @@ The implementation plan maps these to each version.
 | Status mirror reconciliation | Every 30 s per city |
 | Trip point batches | Every 2 s or 500 points |
 | Kafka | 12 partitions per topic; 7-day retention for events, 24 h for location |
-| Retention | Rides, charges and audit 3 years; quotes 30 days; dispatch decisions 30 days; outbox 7 days after publishing |
+| Retention | Rides, charges and audit 3 years; used quotes 30 days, unused quotes 24 h after expiry; dispatch decisions 30 days; outbox 7 days after publishing |
 | WebSocket tickets | Single use, 60 s |
 | Tokens | Access 15 min; refresh 30 days, rotating |
 | Rate limits | See §14 |
@@ -838,6 +849,8 @@ The implementation plan maps these to each version.
 | Local memory per profile | See §16.1 |
 
 ## Appendix C — Open questions for the LLD
+
+All eight are answered in the LLD ([Appendix B](low-level-design.md#appendix-b--answers-to-the-hlds-open-questions)).
 
 1. Exact tables, columns, indexes and partial indexes, with Flyway migrations.
 2. Module API signatures, including how Dispatch calls Ride inside one transaction and the fixed lock order.

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/ChargeSucceeded.v1.json",
+  "title": "ChargeSucceeded v1",
+  "description": "A charge succeeded: online through an attempt, or recorded as cash. Aggregate: charge; key: ride.",
+  "type": "object",
+  "required": ["charge_id", "ride_id", "rider_id", "purpose", "amount", "method_type", "succeeded_at"],
+  "additionalProperties": false,
+  "properties": {
+    "charge_id": {"$ref": "common.json#/$defs/uuid"},
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "purpose": {"$ref": "common.json#/$defs/charge_purpose"},
+    "amount": {"$ref": "common.json#/$defs/money"},
+    "method_type": {"$ref": "common.json#/$defs/method_type"},
+    "attempt_id": {"$ref": "common.json#/$defs/uuid", "description": "Absent for cash."},
+    "succeeded_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "charge_id": "0199a3f9-aaaa-7bbb-8ccc-dddd1111eeee",
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "purpose": "FARE",
+      "amount": {"amount_paise": 25900, "currency": "INR"},
+      "method_type": "CARD",
+      "attempt_id": "0199a3f9-bbbb-7ccc-8ddd-eeee2222ffff",
+      "succeeded_at": "2026-10-02T08:47:13.120Z"
+    }
+  ]
+}

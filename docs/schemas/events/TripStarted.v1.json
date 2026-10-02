@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/TripStarted.v1.json",
+  "title": "TripStarted v1",
+  "description": "The driver started the trip with the rider's PIN (T9). Aggregate: ride.",
+  "type": "object",
+  "required": ["ride_id", "rider_id", "driver_id", "started_at"],
+  "additionalProperties": false,
+  "properties": {
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "started_at": {"$ref": "common.json#/$defs/timestamp", "description": "Server time."},
+    "device_time": {"$ref": "common.json#/$defs/timestamp", "description": "Present for commands queued offline (V2)."}
+  },
+  "examples": [
+    {
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "started_at": "2026-10-02T08:20:41.000Z"
+    }
+  ]
+}

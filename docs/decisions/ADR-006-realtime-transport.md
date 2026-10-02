@@ -75,3 +75,9 @@
 
 - Memory per node limits connection density, for example when extracting the gateway in V5. Netty or a Go gateway is then the candidate.
 - Lost pushes cause visible offer delays; a durable per-driver inbox would then be considered.
+
+## Amendments
+
+- **2026-10-02, low-level design** ([LLD §14](../low-level-design.md#14-realtime-v2), [review](../architecture-review.md) R-07, R-08):
+  - Riders get a personal channel `rdr:{riderId}` for ride status; their node subscribes to `ride:{id}` on seeing an active ride there. `ride:{id}` now carries only the driver's position.
+  - Offline replays of up to 100 updates go over HTTPS, because they don't fit the 1 KB frames chosen here.

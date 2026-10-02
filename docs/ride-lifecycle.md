@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Part of | [HLD](architecture.md) §7 |
-| Status | Draft for approval |
+| Status | Approved 2026-10-02 (lock-order rule refined by the [LLD](low-level-design.md#6-concurrency-rules)) |
 | Decisions | [ADR-010](decisions/ADR-010-state-machines.md) (state machines), [ADR-009](decisions/ADR-009-idempotency-and-identifiers.md) (idempotency), [ADR-005](decisions/ADR-005-durable-timers.md) (timers), [ADR-011](decisions/ADR-011-dispatch-protocol.md) (dispatch), [ADR-014](decisions/ADR-014-payments.md) (payments) |
 | Requirements | FR-RD1–FR-RD8, FR-DS3–FR-DS5, FR-PY1–FR-PY6, §5 policies |
 
@@ -19,7 +19,7 @@
    - the idempotency record.
 3. **Illegal transitions are rejected** with `409 INVALID_TRANSITION` and the current status and version.
 4. **Payment isn't a ride state.** A completed trip stays completed whatever happens to its charge; charges have their own state machine (§6).
-5. **Fixed lock order:** ride → offer → driver availability → timers, so that concurrent transitions wait for each other instead of deadlocking.
+5. **Fixed lock order:** ride → driver → offer → driver availability. Search tasks and timers are claimed by their pollers first and removed by everyone else without waiting ([LLD §6](low-level-design.md#6-concurrency-rules)). Concurrent transitions therefore wait for each other instead of deadlocking.
 
 ## 2. States
 

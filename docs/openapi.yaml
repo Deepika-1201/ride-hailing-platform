@@ -1,0 +1,2502 @@
+openapi: 3.1.0
+info:
+  title: Ride-Hailing Platform API
+  version: 1.0.0
+  description: |
+    REST API for riders, drivers, operations staff and admins. Design: [HLD §10](architecture.md#10-api-design),
+    [LLD §13](low-level-design.md#13-rest-api).
+
+    - **Authentication**: `Authorization: Bearer <access token>` from `/v1/auth/token` (JWT, 15 min). Sign-in and
+      webhook endpoints are public; webhooks are signed.
+    - **Idempotency**: commands that change a ride, offer, driver status, payment or rating require an
+      `Idempotency-Key` (1–255 visible ASCII characters). A retry with the same key and request returns the original
+      response with `Idempotent-Replayed: true`; the same key with a different request gets
+      `422 IDEMPOTENCY_KEY_REUSED`; a key still executing gets `409 IDEMPOTENCY_KEY_IN_PROGRESS` with `Retry-After`.
+      Keys are kept for 24 hours.
+    - **Format**: JSON in snake_case. Money is `{"amount_paise": 25900, "currency": "INR"}`. Timestamps are
+      RFC 3339 in UTC. Fields without a value are omitted. Clients must ignore unknown fields.
+    - **Errors**: RFC 9457 problem details (`application/problem+json`) with a stable `code` and the `request_id`.
+      Any operation may also answer `500 INTERNAL_ERROR` or `503 SERVICE_UNAVAILABLE` (with `Retry-After`); retry
+      commands with the same `Idempotency-Key` and backoff.
+    - **Visibility**: a resource the caller may not see answers `404`, not `403`.
+    - **Request IDs**: clients may send `X-Request-Id` (1–64 of `A-Za-z0-9._-`); otherwise one is generated. It is
+      echoed on every response and in error bodies.
+    - **Pagination**: `cursor` and `limit` (default 20, maximum 100), newest first; `next_cursor` when more exist.
+    - **Versions**: endpoints marked (V2) or (V3) arrive with that version of the platform.
+
+    This document is the contract: contract tests fail the build if the implementation drifts from it.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+security:
+  - bearer: []
+tags:
+  - name: Auth
+  - name: Riders
+  - name: Quotes
+  - name: Rides
+  - name: Drivers
+  - name: Offers
+  - name: Realtime
+  - name: Operations
+  - name: Admin
+  - name: Webhooks
+
+paths:
+  # ------------------------------------------------------------------ Auth
+  /v1/auth/otp:
+    post:
+      tags: [Auth]
+      operationId: requestOneTimeCode
+      summary: Send a one-time sign-in code
+      description: The answer is the same whether or not the phone has an account. Limited to 5 per phone and 20 per IP per hour.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OtpRequest'}
+            example: {phone: '+919845012345'}
+      responses:
+        '202':
+          description: Code sent.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OtpChallenge'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /v1/auth/token:
+    post:
+      tags: [Auth]
+      operationId: exchangeCode
+      summary: Exchange phone and code for tokens
+      description: A first sign-in creates a rider account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TokenRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Tokens'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshTokens
+      summary: Rotate a refresh token
+      description: Returns a new token pair. Reusing a rotated token more than 10 s after its rotation revokes the whole session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefreshRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Tokens'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Revoke the session of a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefreshRequest'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  # ------------------------------------------------------------------ Riders
+  /v1/riders/me:
+    get:
+      tags: [Riders]
+      operationId: getRider
+      summary: The signed-in rider's profile
+      responses:
+        '200':
+          description: Profile.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Rider'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    patch:
+      tags: [Riders]
+      operationId: updateRider
+      summary: Update the profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RiderUpdate'}
+      responses:
+        '200':
+          description: Updated profile.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Rider'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/riders/me/places:
+    get:
+      tags: [Riders]
+      operationId: listSavedPlaces
+      summary: Saved places
+      responses:
+        '200':
+          description: Up to 10 places.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SavedPlaceList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Riders]
+      operationId: createSavedPlace
+      summary: Save a place
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SavedPlaceCreate'}
+            example: {label: home, name: '12th Main, Indiranagar', location: {lat: 12.97194, lon: 77.64115}}
+      responses:
+        '201':
+          description: Saved.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SavedPlace'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/riders/me/places/{place_id}:
+    delete:
+      tags: [Riders]
+      operationId: deleteSavedPlace
+      summary: Delete a saved place
+      parameters:
+        - {name: place_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/riders/me/payment-methods:
+    get:
+      tags: [Riders]
+      operationId: listPaymentMethods
+      summary: Payment methods, including cash
+      responses:
+        '200':
+          description: Active methods.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentMethodList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Riders]
+      operationId: addPaymentMethod
+      summary: Add a mock card or UPI method
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PaymentMethodCreate'}
+            example: {type: CARD, provider_token: tok_ok, display: 'Visa •• 4242'}
+      responses:
+        '201':
+          description: Added.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentMethod'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/riders/me/payment-methods/{method_id}:
+    delete:
+      tags: [Riders]
+      operationId: removePaymentMethod
+      summary: Remove a card or UPI method
+      description: Cash can't be removed. Removing the default makes cash the default.
+      parameters:
+        - {name: method_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/riders/me/payment-methods/{method_id}/default:
+    post:
+      tags: [Riders]
+      operationId: setDefaultPaymentMethod
+      summary: Make a method the default
+      parameters:
+        - {name: method_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '200':
+          description: The method, now the default.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentMethod'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/riders/me/rides:
+    get:
+      tags: [Riders]
+      operationId: listRiderRides
+      summary: Ride history
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': {$ref: '#/components/responses/Rides'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/riders/me/active-ride:
+    get:
+      tags: [Riders]
+      operationId: getRiderActiveRide
+      summary: The rider's active ride, for resync after a reconnect
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/riders/me/dues:
+    get:
+      tags: [Riders]
+      operationId: getDues
+      summary: Unpaid charges that block booking
+      responses:
+        '200': {$ref: '#/components/responses/Dues'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/riders/me/dues/pay:
+    post:
+      tags: [Riders]
+      operationId: payDues
+      summary: Pay all dues with an online method
+      description: Starts a new attempt on every failed charge and answers at once; follow `GET /v1/riders/me/dues` for the outcome.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PayDuesRequest'}
+      responses:
+        '202': {$ref: '#/components/responses/Dues'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+
+  # ------------------------------------------------------------------ Quotes and rides
+  /v1/quotes:
+    post:
+      tags: [Quotes]
+      operationId: createQuote
+      summary: Get an upfront fare
+      description: The quote fixes the price for 5 minutes. Limited to 30 per rider per minute. No `Idempotency-Key` needed; a repeat is just another quote.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/QuoteRequest'}
+            example: {pickup: {lat: 12.97194, lon: 77.64115}, dropoff: {lat: 12.93524, lon: 77.62448}, category: MINI}
+      responses:
+        '201':
+          description: Quote.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Quote'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /v1/rides:
+    post:
+      tags: [Rides]
+      operationId: bookRide
+      summary: Book a ride from a quote
+      description: Answers once the ride is stored in `SEARCHING`; dispatch starts at once.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BookRideRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/RideCreated'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /v1/rides/{ride_id}:
+    get:
+      tags: [Rides]
+      operationId: getRide
+      summary: A ride, as seen by the caller
+      description: The rider's view includes the PIN and the driver and vehicle; the driver's view includes the rider's first name and rating, never the PIN.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/rides/{ride_id}/cancel:
+    post:
+      tags: [Rides]
+      operationId: cancelRide
+      summary: Cancel as the rider or the assigned driver
+      description: |
+        The outcome depends on the caller and the state ([ride lifecycle §3](ride-lifecycle.md#3-transitions)). A driver
+        cancelling before arrival returns the ride to `SEARCHING` for the rider. A rider cancelling after the free
+        window pays the cancellation fee shown in `cancellation.fee`.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CancelRideRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/rides/{ride_id}/arrive:
+    post:
+      tags: [Rides]
+      operationId: markArrived
+      summary: The driver is at the pickup
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/rides/{ride_id}/start:
+    post:
+      tags: [Rides]
+      operationId: startTrip
+      summary: Start the trip with the rider's PIN
+      description: Five wrong PINs lock the start (`409 PIN_LOCKED`). Offline apps send `device_time` (V2).
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StartTripRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/rides/{ride_id}/complete:
+    post:
+      tags: [Rides]
+      operationId: completeTrip
+      summary: End the trip at the drop-off
+      description: The fare is the quoted fare. Payment happens afterwards and doesn't change the ride.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CompleteTripRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/rides/{ride_id}/no-show:
+    post:
+      tags: [Rides]
+      operationId: markNoShow
+      summary: End the ride because the rider didn't come
+      description: Allowed 5 minutes after arrival; the rider pays the no-show fee.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/rides/{ride_id}/rating:
+    post:
+      tags: [Rides]
+      operationId: rateRide
+      summary: Rate the other party of a completed ride
+      description: Once per side, within 7 days of completion.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RatingRequest'}
+      responses:
+        '201':
+          description: Rating stored.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Rating'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/rides/{ride_id}/receipt:
+    get:
+      tags: [Rides]
+      operationId: getReceipt
+      summary: Receipt of a completed ride
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+      responses:
+        '200':
+          description: Receipt.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Receipt'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/rides/{ride_id}/route:
+    get:
+      tags: [Rides]
+      operationId: getTripRoute
+      summary: (V2) The trip route
+      description: Points in sequence order, thinned to at most 2,000. Reads by operations are audited.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+      responses:
+        '200':
+          description: Route.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TripRoute'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------------ Drivers and offers
+  /v1/drivers/me:
+    get:
+      tags: [Drivers]
+      operationId: getDriver
+      summary: The signed-in driver's profile, vehicles and status
+      responses:
+        '200':
+          description: Driver.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Driver'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/drivers/me/online:
+    post:
+      tags: [Drivers]
+      operationId: goOnline
+      summary: Go online with a vehicle
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/GoOnlineRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/DriverStatus'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/drivers/me/offline:
+    post:
+      tags: [Drivers]
+      operationId: goOffline
+      summary: Go offline
+      description: Refused during a ride. A pending offer is declined first.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': {$ref: '#/components/responses/DriverStatus'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/drivers/me/location:
+    post:
+      tags: [Drivers]
+      operationId: sendLocations
+      summary: Location updates over HTTP
+      description: |
+        V1: every live update (one per request, every 4 s). From V2 live updates use the WebSocket, and this endpoint
+        carries offline replays of up to 100 updates marked `replay: true`. Updates not newer than the last applied
+        sequence number are ignored. Limited to 1 request per second per driver.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LocationBatch'}
+            example:
+              updates:
+                - {seq: 1842, lat: 12.97571, lon: 77.60502, accuracy_m: 8.5, heading_deg: 91, speed_mps: 7.2,
+                   device_time: '2026-10-02T08:15:04.120Z', replay: false}
+      responses:
+        '200':
+          description: Outcome counts.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LocationBatchResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /v1/drivers/me/offer:
+    get:
+      tags: [Drivers]
+      operationId: getCurrentOffer
+      summary: The pending offer, if any
+      description: V1 drivers poll this; from V2 apps call it on every connect. The first fetch marks the offer as seen.
+      responses:
+        '200':
+          description: Pending offer.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Offer'}
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/drivers/me/active-ride:
+    get:
+      tags: [Drivers]
+      operationId: getDriverActiveRide
+      summary: The driver's active ride, for resync after a reconnect
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/drivers/me/rides:
+    get:
+      tags: [Drivers]
+      operationId: listDriverRides
+      summary: Trip history
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': {$ref: '#/components/responses/Rides'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/drivers/me/earnings:
+    get:
+      tags: [Drivers]
+      operationId: getEarnings
+      summary: Earnings per day, in the city's time zone
+      parameters:
+        - {name: from, in: query, required: true, schema: {type: string, format: date}}
+        - {name: to, in: query, required: true, description: 'Inclusive; at most 31 days after `from`.', schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Earnings.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Earnings'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/offers/{offer_id}/accept:
+    post:
+      tags: [Offers]
+      operationId: acceptOffer
+      summary: Accept a pending offer
+      description: Assigns the driver atomically. A late or repeated acceptance changes nothing and gets `409 OFFER_NO_LONGER_AVAILABLE`.
+      parameters:
+        - $ref: '#/components/parameters/OfferId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/offers/{offer_id}/decline:
+    post:
+      tags: [Offers]
+      operationId: declineOffer
+      summary: Decline a pending offer
+      parameters:
+        - $ref: '#/components/parameters/OfferId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: The declined offer.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Offer'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  # ------------------------------------------------------------------ Realtime
+  /v1/realtime/tickets:
+    post:
+      tags: [Realtime]
+      operationId: createRealtimeTicket
+      summary: (V2) A single-use ticket for the WebSocket handshake
+      description: Valid for 60 s. Connect to `url`; message schemas are in `docs/schemas/websocket/`.
+      responses:
+        '201':
+          description: Ticket.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RealtimeTicket'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  # ------------------------------------------------------------------ Operations
+  /v1/ops/rides:
+    get:
+      tags: [Operations]
+      operationId: listRidesForOps
+      summary: Rides by status and city
+      parameters:
+        - {name: status, in: query, schema: {type: array, items: {$ref: '#/components/schemas/RideStatus'}}, style: form, explode: false}
+        - {name: city_id, in: query, schema: {$ref: '#/components/schemas/CityId'}}
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': {$ref: '#/components/responses/Rides'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/ops/rides/{ride_id}/timeline:
+    get:
+      tags: [Operations]
+      operationId: getRideTimeline
+      summary: Everything that happened to a ride
+      description: Transitions, dispatch decisions, offers, events, charges, refunds, notifications, flags and audit entries, in time order.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+      responses:
+        '200':
+          description: Timeline.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Timeline'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/ops/rides/{ride_id}/cancel:
+    post:
+      tags: [Operations]
+      operationId: cancelRideAsOps
+      summary: Cancel a ride as operations (`CANCELLED_BY_SYSTEM`)
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OpsCancelRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Ride'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/ops/drivers:
+    get:
+      tags: [Operations]
+      operationId: listDriversForOps
+      summary: Drivers by availability
+      parameters:
+        - {name: city_id, in: query, schema: {$ref: '#/components/schemas/CityId'}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/AvailabilityStatus'}}
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Drivers.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DriverStatusList'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/ops/drivers/{driver_id}/suspend:
+    post:
+      tags: [Operations]
+      operationId: suspendDriver
+      summary: Suspend a driver
+      description: Withdraws a pending offer at once and takes the driver offline; a ride in progress continues.
+      parameters:
+        - $ref: '#/components/parameters/DriverId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReasonRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/AdminDriver'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/ops/drivers/{driver_id}/reinstate:
+    post:
+      tags: [Operations]
+      operationId: reinstateDriver
+      summary: Lift a suspension
+      parameters:
+        - $ref: '#/components/parameters/DriverId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReasonRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/AdminDriver'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/ops/payments:
+    get:
+      tags: [Operations]
+      operationId: listChargesForOps
+      summary: Charges by status, for example failed or unresolved
+      parameters:
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/ChargeStatus'}}
+        - {name: older_than, in: query, description: 'Only charges unchanged for at least this long (ISO-8601 duration, e.g. PT24H).', schema: {type: string}}
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Charges.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChargeList'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/ops/charges/{charge_id}/refunds:
+    post:
+      tags: [Operations]
+      operationId: refundCharge
+      summary: Refund a charge fully or partly
+      description: Answers at once; the provider call follows.
+      parameters:
+        - {name: charge_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefundRequest'}
+      responses:
+        '202':
+          description: Refund started.
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+            Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Refund'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/ops/flags:
+    get:
+      tags: [Operations]
+      operationId: listFlags
+      summary: The review queue
+      parameters:
+        - {name: open, in: query, schema: {type: boolean, default: true}}
+        - {name: kind, in: query, schema: {$ref: '#/components/schemas/FlagKind'}}
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Flags.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FlagList'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/ops/flags/{flag_id}/resolve:
+    post:
+      tags: [Operations]
+      operationId: resolveFlag
+      summary: Resolve a flag
+      parameters:
+        - {name: flag_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ResolveFlagRequest'}
+      responses:
+        '200':
+          description: Resolved flag.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Flag'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/ops/invariants:
+    get:
+      tags: [Operations]
+      operationId: checkInvariants
+      summary: (V2) Run the correctness checks
+      description: Read-only checks of the NFR-1 invariants ([LLD §17.3](low-level-design.md#173-invariant-checks)). The simulator calls it after every run.
+      responses:
+        '200':
+          description: Report; an empty `violations` list means all checks passed.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvariantReport'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/ops/dead-letters:
+    get:
+      tags: [Operations]
+      operationId: listDeadLetters
+      summary: (V3) Events a consumer gave up on
+      parameters:
+        - {name: consumer, in: query, schema: {type: string}}
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Dead letters.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeadLetterList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/ops/dead-letters/{dead_letter_id}/redrive:
+    post:
+      tags: [Operations]
+      operationId: redriveDeadLetter
+      summary: (V3) Run the consumer again on a dead letter
+      parameters:
+        - {name: dead_letter_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Re-driven.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeadLetter'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/ops/replays:
+    post:
+      tags: [Operations]
+      operationId: replayEvents
+      summary: (V3) Re-deliver past events to one consumer
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReplayRequest'}
+      responses:
+        '202':
+          description: Replay started.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Replay'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+  # ------------------------------------------------------------------ Admin
+  /v1/admin/cities:
+    get:
+      tags: [Admin]
+      operationId: listCities
+      summary: Cities
+      responses:
+        '200':
+          description: Cities.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/City'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Admin]
+      operationId: createCity
+      summary: Create a city
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CityCreate'}
+      responses:
+        '201': {$ref: '#/components/responses/City'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/admin/cities/{city_id}:
+    get:
+      tags: [Admin]
+      operationId: getCity
+      summary: A city
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+      responses:
+        '200': {$ref: '#/components/responses/City'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Admin]
+      operationId: updateCity
+      summary: Rename, activate or deactivate a city
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CityUpdate'}
+      responses:
+        '200': {$ref: '#/components/responses/City'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/cities/{city_id}/service-area:
+    put:
+      tags: [Admin]
+      operationId: replaceServiceArea
+      summary: Replace the city's service area
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ServiceAreaUpdate'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/admin/cities/{city_id}/special-areas:
+    get:
+      tags: [Admin]
+      operationId: listSpecialAreas
+      summary: Special areas (airport, stations, stadiums), which take precedence over H3 zones
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+      responses:
+        '200':
+          description: Special areas.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/SpecialArea'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Admin]
+      operationId: createSpecialArea
+      summary: Add a special area
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SpecialAreaCreate'}
+      responses:
+        '201':
+          description: Added.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SpecialArea'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/admin/cities/{city_id}/special-areas/{area_id}:
+    delete:
+      tags: [Admin]
+      operationId: deactivateSpecialArea
+      summary: Deactivate a special area
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+        - {name: area_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/admin/categories:
+    get:
+      tags: [Admin]
+      operationId: listCategories
+      summary: Ride categories
+      responses:
+        '200':
+          description: Categories.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Category'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/admin/cities/{city_id}/categories/{category}:
+    get:
+      tags: [Admin]
+      operationId: getCityCategory
+      summary: A category's settings in a city
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+        - $ref: '#/components/parameters/CategoryPath'
+      responses:
+        '200': {$ref: '#/components/responses/CityCategory'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Admin]
+      operationId: putCityCategory
+      summary: Offer a category in a city, or change its dispatch settings
+      parameters:
+        - $ref: '#/components/parameters/CityIdPath'
+        - $ref: '#/components/parameters/CategoryPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CityCategory'}
+      responses:
+        '200': {$ref: '#/components/responses/CityCategory'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/fare-rules:
+    get:
+      tags: [Admin]
+      operationId: listFareRules
+      summary: Fare rule versions
+      parameters:
+        - $ref: '#/components/parameters/CityIdQuery'
+        - $ref: '#/components/parameters/CategoryQuery'
+      responses:
+        '200':
+          description: Versions, newest first.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/FareRule'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Admin]
+      operationId: publishFareRule
+      summary: Publish a new fare rule version
+      description: Versions are never edited; existing quotes keep the version they used.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FareRuleCreate'}
+      responses:
+        '201':
+          description: Published.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FareRule'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/admin/fee-rules:
+    get:
+      tags: [Admin]
+      operationId: listFeeRules
+      summary: Cancellation and no-show fee versions
+      parameters:
+        - $ref: '#/components/parameters/CityIdQuery'
+        - $ref: '#/components/parameters/CategoryQuery'
+      responses:
+        '200':
+          description: Versions, newest first.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/FeeRule'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Admin]
+      operationId: publishFeeRule
+      summary: Publish a new fee rule version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FeeRuleCreate'}
+      responses:
+        '201':
+          description: Published.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FeeRule'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/admin/surge-rules:
+    get:
+      tags: [Admin]
+      operationId: listSurgeRules
+      summary: Surge rules
+      parameters:
+        - $ref: '#/components/parameters/CityIdQuery'
+      responses:
+        '200':
+          description: Rules.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/SurgeRule'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Admin]
+      operationId: createSurgeRule
+      summary: Add a surge rule for a zone and time window
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SurgeRuleCreate'}
+      responses:
+        '201':
+          description: Added.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SurgeRule'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/admin/surge-rules/{rule_id}:
+    patch:
+      tags: [Admin]
+      operationId: updateSurgeRule
+      summary: Change or deactivate a surge rule
+      parameters:
+        - {name: rule_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SurgeRuleUpdate'}
+      responses:
+        '200':
+          description: Updated.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SurgeRule'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/drivers:
+    get:
+      tags: [Admin]
+      operationId: listDriversForAdmin
+      summary: Drivers by city and verification status
+      parameters:
+        - {name: city_id, in: query, schema: {$ref: '#/components/schemas/CityId'}}
+        - {name: verification, in: query, schema: {$ref: '#/components/schemas/Verification'}}
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Drivers.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/AdminDriver'}}
+                  next_cursor: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Admin]
+      operationId: createDriver
+      summary: Onboard a driver (verification starts as `PENDING`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminDriverCreate'}
+      responses:
+        '201': {$ref: '#/components/responses/AdminDriver'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/drivers/{driver_id}:
+    get:
+      tags: [Admin]
+      operationId: getDriverForAdmin
+      summary: A driver with vehicles and status history
+      parameters:
+        - $ref: '#/components/parameters/DriverId'
+      responses:
+        '200': {$ref: '#/components/responses/AdminDriver'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/admin/drivers/{driver_id}/verification:
+    post:
+      tags: [Admin]
+      operationId: setDriverVerification
+      summary: Verify or reject a driver
+      parameters:
+        - $ref: '#/components/parameters/DriverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VerificationRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/AdminDriver'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/vehicles:
+    post:
+      tags: [Admin]
+      operationId: createVehicle
+      summary: Add a vehicle to a driver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VehicleCreate'}
+      responses:
+        '201': {$ref: '#/components/responses/Vehicle'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/vehicles/{vehicle_id}:
+    patch:
+      tags: [Admin]
+      operationId: updateVehicle
+      summary: Activate or deactivate a vehicle
+      parameters:
+        - {name: vehicle_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VehicleUpdate'}
+      responses:
+        '200': {$ref: '#/components/responses/Vehicle'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  # ------------------------------------------------------------------ Webhooks
+  /v1/webhooks/payments/{provider}:
+    post:
+      tags: [Webhooks]
+      operationId: receivePaymentWebhook
+      summary: Payment provider events
+      description: |
+        Signed with `X-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">`, accepted within 5 minutes.
+        Deduplicated by the provider's event `id`; a duplicate answers `200` and changes nothing.
+      security: []
+      parameters:
+        - {name: provider, in: path, required: true, schema: {type: string, enum: [mock]}}
+        - {name: X-Signature, in: header, required: true, schema: {type: string, pattern: '^t=[0-9]+,v1=[0-9a-f]{64}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PaymentWebhook'}
+      responses:
+        '200': {description: Received.}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from `/v1/auth/token` or `/v1/auth/refresh`.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique per logical command; reuse it only to retry the same request.
+      schema: {type: string, minLength: 1, maxLength: 255, pattern: '^[\x21-\x7E]+$'}
+    RideId:
+      name: ride_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    OfferId:
+      name: offer_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    DriverId:
+      name: driver_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    CityIdPath:
+      name: city_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/CityId'}
+    CityIdQuery:
+      name: city_id
+      in: query
+      required: true
+      schema: {$ref: '#/components/schemas/CityId'}
+    CategoryPath:
+      name: category
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/CategoryCode'}
+    CategoryQuery:
+      name: category
+      in: query
+      schema: {$ref: '#/components/schemas/CategoryCode'}
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque; from `next_cursor`.
+      schema: {type: string, maxLength: 200}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+
+  headers:
+    RequestId:
+      required: true
+      description: Correlation ID of this request.
+      schema: {type: string}
+    IdempotentReplayed:
+      description: '`true` when this is the stored response of an earlier request with the same key.'
+      schema: {type: string, enum: ['true', 'false']}
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: {type: integer, minimum: 1}
+
+  responses:
+    NoContent:
+      description: Nothing to return.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+    Tokens:
+      description: Tokens.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/TokenResponse'}
+    Ride:
+      description: The ride, as seen by the caller.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Ride'}
+    RideCreated:
+      description: The ride, in `SEARCHING`.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Ride'}
+    Rides:
+      description: Rides, newest first.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RideList'}
+    Dues:
+      description: Dues.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Dues'}
+    DriverStatus:
+      description: The driver's availability.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/DriverStatus'}
+    AdminDriver:
+      description: The driver.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminDriver'}
+    City:
+      description: The city.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/City'}
+    CityCategory:
+      description: The category's settings in the city.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/CityCategory'}
+    Vehicle:
+      description: The vehicle.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Vehicle'}
+    BadRequest:
+      description: '`VALIDATION_FAILED` (see `errors`), `MALFORMED_REQUEST` or `IDEMPOTENCY_KEY_REQUIRED`.'
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Unauthorized:
+      description: '`UNAUTHENTICATED`, `CODE_INVALID`, `REFRESH_TOKEN_INVALID` or `WEBHOOK_SIGNATURE_INVALID`.'
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Forbidden:
+      description: '`FORBIDDEN` (wrong role) or `ACCOUNT_DISABLED`.'
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    NotFound:
+      description: '`NOT_FOUND`: unknown, or not visible to the caller.'
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Conflict:
+      description: |
+        The state doesn't allow this now; re-read the resource. Codes: `INVALID_TRANSITION`, `RIDE_REASSIGNED`,
+        `OFFER_NO_LONGER_AVAILABLE`, `QUOTE_EXPIRED`, `QUOTE_ALREADY_USED`, `ACTIVE_RIDE_EXISTS`, `DUES_OUTSTANDING`,
+        `PIN_LOCKED`, `NO_SHOW_TOO_EARLY`, `DRIVER_NOT_ELIGIBLE`, `DRIVER_HAS_ACTIVE_RIDE`, `PLACES_LIMIT_REACHED`,
+        `NO_DUES`, `CHARGE_NOT_REFUNDABLE`, `RATING_NOT_OPEN`, `ALREADY_RATED`, `RECEIPT_NOT_AVAILABLE`,
+        `VERSION_CONFLICT`, `FLAG_ALREADY_RESOLVED`, or `IDEMPOTENCY_KEY_IN_PROGRESS` (retry with the same key after
+        `Retry-After`).
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Unprocessable:
+      description: |
+        Don't retry unchanged. Codes: `IDEMPOTENCY_KEY_REUSED`, `OUTSIDE_SERVICE_AREA`, `CATEGORY_NOT_AVAILABLE`,
+        `ROUTE_NOT_FOUND`, `PAYMENT_METHOD_INVALID`, `WRONG_PIN` (with `attempts_left`), `REFUND_EXCEEDS_CHARGE`,
+        `INVALID_GEOMETRY`, `RULE_EFFECTIVE_IN_PAST`.
+      headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    TooManyRequests:
+      description: '`RATE_LIMITED` or `CODE_ATTEMPTS_EXCEEDED`. Not processed, and the `Idempotency-Key` was not consumed.'
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+
+  schemas:
+    # ---------------------------------------------------------------- shared
+    Uuid: {type: string, format: uuid}
+    Timestamp: {type: string, format: date-time}
+    CityId: {type: string, pattern: '^[a-z]{3,8}$', examples: [blr]}
+    CategoryCode: {type: string, pattern: '^[A-Z][A-Z0-9_]{1,19}$', examples: [MINI]}
+    Phone: {type: string, pattern: '^\+[1-9][0-9]{7,14}$', examples: ['+919845012345']}
+    Money:
+      type: object
+      required: [amount_paise, currency]
+      properties:
+        amount_paise: {type: integer, format: int64, description: 'Paise; negative only in earnings adjustments.'}
+        currency: {type: string, pattern: '^[A-Z]{3}$', examples: [INR]}
+    GeoPoint:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat: {type: number, minimum: -90, maximum: 90}
+        lon: {type: number, minimum: -180, maximum: 180}
+    RatingSummary:
+      type: object
+      required: [count]
+      properties:
+        average: {type: number, minimum: 1, maximum: 5, description: Average of the latest 100 ratings; absent with no ratings.}
+        count: {type: integer, minimum: 0, maximum: 100}
+    Problem:
+      type: object
+      required: [title, status, code, request_id]
+      properties:
+        type: {type: string, default: about:blank}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        code: {type: string, description: Stable machine-readable code (LLD §13.2).}
+        request_id: {type: string}
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: {type: string}
+              message: {type: string}
+        current_status: {type: string}
+        current_version: {type: integer}
+        attempts_left: {type: integer, minimum: 0}
+        available_at: {$ref: '#/components/schemas/Timestamp'}
+        dues: {$ref: '#/components/schemas/Money'}
+    RideStatus:
+      type: string
+      enum: [SEARCHING, DRIVER_ASSIGNED, DRIVER_ARRIVED, IN_TRIP, COMPLETED, CANCELLED_BY_RIDER, CANCELLED_BY_DRIVER, CANCELLED_BY_SYSTEM, DRIVER_NOT_FOUND]
+    AvailabilityStatus: {type: string, enum: [OFFLINE, AVAILABLE, OFFERED, ASSIGNED, ON_TRIP]}
+    OfferStatus: {type: string, enum: [PENDING, ACCEPTED, DECLINED, EXPIRED, WITHDRAWN]}
+    ChargeStatus: {type: string, enum: [PENDING, SUCCEEDED, FAILED, UNKNOWN]}
+    ChargePurpose: {type: string, enum: [FARE, CANCELLATION_FEE, NO_SHOW_FEE]}
+    MethodType: {type: string, enum: [CASH, CARD, UPI]}
+    Role: {type: string, enum: [RIDER, DRIVER, OPS, ADMIN]}
+    Verification: {type: string, enum: [PENDING, VERIFIED, REJECTED]}
+    FlagKind: {type: string, enum: [ARRIVED_FAR, DRIVER_CANCELLED_AT_PICKUP, PIN_LOCKED, OFFLINE_CONFLICT, STUCK]}
+
+    # ---------------------------------------------------------------- auth
+    OtpRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone: {$ref: '#/components/schemas/Phone'}
+    OtpChallenge:
+      type: object
+      required: [expires_at, resend_after_s]
+      properties:
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        resend_after_s: {type: integer, minimum: 0}
+    TokenRequest:
+      type: object
+      required: [phone, code]
+      properties:
+        phone: {$ref: '#/components/schemas/Phone'}
+        code: {type: string, pattern: '^[0-9]{6}$'}
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: {type: string, minLength: 20, maxLength: 200}
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token, refresh_expires_in, user]
+      properties:
+        access_token: {type: string}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer, description: Seconds.}
+        refresh_token: {type: string}
+        refresh_expires_in: {type: integer, description: Seconds.}
+        user:
+          type: object
+          required: [id, roles]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            roles: {type: array, items: {$ref: '#/components/schemas/Role'}}
+
+    # ---------------------------------------------------------------- riders
+    Rider:
+      type: object
+      required: [id, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        first_name: {type: string}
+        last_name: {type: string}
+        email: {type: string, format: email}
+        rating: {$ref: '#/components/schemas/RatingSummary'}
+        default_payment_method_id: {$ref: '#/components/schemas/Uuid'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    RiderUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        first_name: {type: string, minLength: 1, maxLength: 60}
+        last_name: {type: string, maxLength: 60}
+        email: {type: string, format: email, maxLength: 200}
+    SavedPlace:
+      type: object
+      required: [id, label, name, location, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        label: {type: string}
+        name: {type: string}
+        location: {$ref: '#/components/schemas/GeoPoint'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    SavedPlaceCreate:
+      type: object
+      required: [label, name, location]
+      properties:
+        label: {type: string, minLength: 1, maxLength: 40}
+        name: {type: string, minLength: 1, maxLength: 200}
+        location: {$ref: '#/components/schemas/GeoPoint'}
+    SavedPlaceList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/SavedPlace'}}
+    PaymentMethod:
+      type: object
+      required: [id, type, display, is_default, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        type: {$ref: '#/components/schemas/MethodType'}
+        display: {type: string, examples: ['Visa •• 4242']}
+        is_default: {type: boolean}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    PaymentMethodCreate:
+      type: object
+      required: [type, provider_token, display]
+      properties:
+        type: {type: string, enum: [CARD, UPI]}
+        provider_token: {type: string, minLength: 1, maxLength: 100, description: Mock provider token; never a card number.}
+        display: {type: string, minLength: 1, maxLength: 40}
+    PaymentMethodList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/PaymentMethod'}}
+    ChargeSummary:
+      type: object
+      required: [id, ride_id, purpose, amount, status, method_type, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        purpose: {$ref: '#/components/schemas/ChargePurpose'}
+        amount: {$ref: '#/components/schemas/Money'}
+        status: {$ref: '#/components/schemas/ChargeStatus'}
+        method_type: {$ref: '#/components/schemas/MethodType'}
+        failure_code: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    Dues:
+      type: object
+      required: [total, charges]
+      properties:
+        total: {$ref: '#/components/schemas/Money'}
+        charges: {type: array, items: {$ref: '#/components/schemas/ChargeSummary'}}
+    PayDuesRequest:
+      type: object
+      properties:
+        payment_method_id: {$ref: '#/components/schemas/Uuid'}
+
+    # ---------------------------------------------------------------- quotes and rides
+    QuoteRequest:
+      type: object
+      required: [pickup, dropoff, category]
+      properties:
+        pickup: {$ref: '#/components/schemas/GeoPoint'}
+        dropoff: {$ref: '#/components/schemas/GeoPoint'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+    FareBreakdown:
+      type: object
+      required: [base, distance, time, surge, minimum_topup, booking_fee, tax, rounding, total]
+      properties:
+        base: {$ref: '#/components/schemas/Money'}
+        distance: {$ref: '#/components/schemas/Money'}
+        time: {$ref: '#/components/schemas/Money'}
+        surge: {$ref: '#/components/schemas/Money'}
+        minimum_topup: {$ref: '#/components/schemas/Money'}
+        booking_fee: {$ref: '#/components/schemas/Money'}
+        tax: {$ref: '#/components/schemas/Money'}
+        rounding: {$ref: '#/components/schemas/Money'}
+        total: {$ref: '#/components/schemas/Money'}
+    Quote:
+      type: object
+      required: [id, city_id, category, pickup, dropoff, distance_m, duration_s, fare, surge_multiplier, created_at, expires_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        pickup: {$ref: '#/components/schemas/GeoPoint'}
+        dropoff: {$ref: '#/components/schemas/GeoPoint'}
+        distance_m: {type: integer, minimum: 0}
+        duration_s: {type: integer, minimum: 0}
+        fare: {$ref: '#/components/schemas/FareBreakdown'}
+        surge_multiplier: {type: number, minimum: 1, maximum: 2}
+        pickup_eta_s: {type: integer, minimum: 0, description: Absent when no driver is nearby.}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    BookRideRequest:
+      type: object
+      required: [quote_id]
+      properties:
+        quote_id: {$ref: '#/components/schemas/Uuid'}
+        payment_method_id: {$ref: '#/components/schemas/Uuid', description: The default method when absent.}
+    PersonSummary:
+      type: object
+      required: [id, first_name]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        first_name: {type: string}
+        rating: {$ref: '#/components/schemas/RatingSummary'}
+    VehicleSummary:
+      type: object
+      required: [id, category, make, model, colour, plate]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        make: {type: string}
+        model: {type: string}
+        colour: {type: string}
+        plate: {type: string}
+    Cancellation:
+      type: object
+      required: [cancelled_by]
+      properties:
+        cancelled_by: {type: string, enum: [RIDER, DRIVER, SYSTEM]}
+        reason: {type: string}
+        fee:
+          type: object
+          required: [purpose, amount]
+          properties:
+            purpose: {type: string, enum: [CANCELLATION_FEE, NO_SHOW_FEE]}
+            amount: {$ref: '#/components/schemas/Money'}
+    Ride:
+      type: object
+      required: [id, status, version, city_id, category, pickup, dropoff, fare, payment_method, requested_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        status: {$ref: '#/components/schemas/RideStatus'}
+        version: {type: integer, minimum: 0}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        pickup: {$ref: '#/components/schemas/GeoPoint'}
+        dropoff: {$ref: '#/components/schemas/GeoPoint'}
+        fare: {$ref: '#/components/schemas/Money'}
+        payment_method:
+          type: object
+          required: [id, type]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            type: {$ref: '#/components/schemas/MethodType'}
+        pin: {type: string, pattern: '^[0-9]{4}$', description: Rider's view only, from assignment until the trip starts.}
+        promised_pickup_eta_s: {type: integer, minimum: 0}
+        driver: {$ref: '#/components/schemas/PersonSummary'}
+        vehicle: {$ref: '#/components/schemas/VehicleSummary'}
+        rider: {$ref: '#/components/schemas/PersonSummary'}
+        cancellation: {$ref: '#/components/schemas/Cancellation'}
+        requested_at: {$ref: '#/components/schemas/Timestamp'}
+        assigned_at: {$ref: '#/components/schemas/Timestamp'}
+        arrived_at: {$ref: '#/components/schemas/Timestamp'}
+        started_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {$ref: '#/components/schemas/Timestamp'}
+        ended_at: {$ref: '#/components/schemas/Timestamp'}
+    RideList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Ride'}}
+        next_cursor: {type: string}
+    CancelRideRequest:
+      type: object
+      properties:
+        reason: {type: string, maxLength: 200}
+    StartTripRequest:
+      type: object
+      required: [pin]
+      properties:
+        pin: {type: string, pattern: '^[0-9]{4}$'}
+        device_time: {$ref: '#/components/schemas/Timestamp'}
+    CompleteTripRequest:
+      type: object
+      properties:
+        device_time: {$ref: '#/components/schemas/Timestamp'}
+    RatingRequest:
+      type: object
+      required: [stars]
+      properties:
+        stars: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: string, maxLength: 500}
+    Rating:
+      type: object
+      required: [id, ride_id, rater_role, stars, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        rater_role: {type: string, enum: [RIDER, DRIVER]}
+        stars: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    Receipt:
+      type: object
+      required: [ride_id, city_id, category, pickup, dropoff, distance_m, duration_s, fare, payment, completed_at]
+      properties:
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        pickup: {$ref: '#/components/schemas/GeoPoint'}
+        dropoff: {$ref: '#/components/schemas/GeoPoint'}
+        distance_m: {type: integer, minimum: 0, description: Quoted route distance.}
+        duration_s: {type: integer, minimum: 0}
+        fare: {$ref: '#/components/schemas/FareBreakdown'}
+        payment:
+          type: object
+          required: [method_type, charges]
+          properties:
+            method_type: {$ref: '#/components/schemas/MethodType'}
+            charges: {type: array, items: {$ref: '#/components/schemas/ChargeSummary'}}
+        driver: {$ref: '#/components/schemas/PersonSummary'}
+        vehicle: {$ref: '#/components/schemas/VehicleSummary'}
+        started_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {$ref: '#/components/schemas/Timestamp'}
+    TripRoute:
+      type: object
+      required: [ride_id, points, thinned]
+      properties:
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        thinned: {type: boolean}
+        points:
+          type: array
+          maxItems: 2000
+          items:
+            type: object
+            required: [seq, lat, lon, received_at]
+            properties:
+              seq: {type: integer, format: int64}
+              lat: {type: number}
+              lon: {type: number}
+              received_at: {$ref: '#/components/schemas/Timestamp'}
+
+    # ---------------------------------------------------------------- drivers and offers
+    Vehicle:
+      type: object
+      required: [id, driver_id, category, plate, make, model, colour, active]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        driver_id: {$ref: '#/components/schemas/Uuid'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        plate: {type: string}
+        make: {type: string}
+        model: {type: string}
+        colour: {type: string}
+        active: {type: boolean}
+        version: {type: integer}
+    DriverStatus:
+      type: object
+      required: [driver_id, status, version]
+      properties:
+        driver_id: {$ref: '#/components/schemas/Uuid'}
+        status: {$ref: '#/components/schemas/AvailabilityStatus'}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        vehicle_id: {$ref: '#/components/schemas/Uuid'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        online_since: {$ref: '#/components/schemas/Timestamp'}
+        offer_id: {$ref: '#/components/schemas/Uuid'}
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        version: {type: integer, minimum: 0}
+    DriverStatusList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/DriverStatus'}}
+        next_cursor: {type: string}
+    Driver:
+      type: object
+      required: [id, first_name, city_id, verification, suspended, vehicles, status]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        first_name: {type: string}
+        last_name: {type: string}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        verification: {$ref: '#/components/schemas/Verification'}
+        suspended: {type: boolean}
+        rating: {$ref: '#/components/schemas/RatingSummary'}
+        vehicles: {type: array, items: {$ref: '#/components/schemas/Vehicle'}}
+        status: {$ref: '#/components/schemas/DriverStatus'}
+    GoOnlineRequest:
+      type: object
+      required: [vehicle_id]
+      properties:
+        vehicle_id: {$ref: '#/components/schemas/Uuid'}
+    LocationUpdate:
+      type: object
+      required: [seq, lat, lon, accuracy_m, device_time]
+      properties:
+        seq: {type: integer, format: int64, minimum: 0, description: Increases with every update the app records.}
+        lat: {type: number, minimum: -90, maximum: 90}
+        lon: {type: number, minimum: -180, maximum: 180}
+        accuracy_m: {type: number, minimum: 0}
+        heading_deg: {type: number, minimum: 0, exclusiveMaximum: 360}
+        speed_mps: {type: number, minimum: 0}
+        device_time: {$ref: '#/components/schemas/Timestamp'}
+        replay: {type: boolean, default: false}
+    LocationBatch:
+      type: object
+      required: [updates]
+      properties:
+        updates: {type: array, minItems: 1, maxItems: 100, items: {$ref: '#/components/schemas/LocationUpdate'}}
+    LocationBatchResult:
+      type: object
+      required: [applied, stale, ignored]
+      properties:
+        applied: {type: integer, minimum: 0}
+        stale: {type: integer, minimum: 0, description: Not newer than the last applied sequence number.}
+        ignored: {type: integer, minimum: 0, description: Driver offline, out of bounds or poor quality.}
+        last_applied_seq: {type: integer, format: int64}
+    Offer:
+      type: object
+      required: [id, ride_id, status, category, pickup, dropoff, pickup_distance_m, fare, created_at, expires_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        status: {$ref: '#/components/schemas/OfferStatus'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        pickup: {$ref: '#/components/schemas/GeoPoint'}
+        dropoff: {$ref: '#/components/schemas/GeoPoint'}
+        pickup_distance_m: {type: integer, minimum: 0}
+        fare: {$ref: '#/components/schemas/Money'}
+        rider: {$ref: '#/components/schemas/PersonSummary'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_in_ms: {type: integer, minimum: 0, description: Computed by the server, so a wrong device clock can't change the countdown.}
+    EarningsDay:
+      type: object
+      required: [date, rides, gross, commission, net, cash_collected]
+      properties:
+        date: {type: string, format: date}
+        rides: {type: integer, minimum: 0}
+        gross: {$ref: '#/components/schemas/Money'}
+        commission: {$ref: '#/components/schemas/Money'}
+        net: {$ref: '#/components/schemas/Money'}
+        cash_collected: {$ref: '#/components/schemas/Money'}
+    Earnings:
+      type: object
+      required: [from, to, days, totals]
+      properties:
+        from: {type: string, format: date}
+        to: {type: string, format: date}
+        days: {type: array, items: {$ref: '#/components/schemas/EarningsDay'}}
+        totals: {$ref: '#/components/schemas/EarningsDay'}
+    RealtimeTicket:
+      type: object
+      required: [ticket, expires_at, url]
+      properties:
+        ticket: {type: string}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        url: {type: string, format: uri}
+
+    # ---------------------------------------------------------------- operations
+    OpsCancelRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 500}
+        fee:
+          type: object
+          required: [purpose, amount_paise]
+          properties:
+            purpose: {type: string, enum: [CANCELLATION_FEE, NO_SHOW_FEE]}
+            amount_paise: {type: integer, format: int64, minimum: 1, description: At most the fee rule's amount.}
+    ReasonRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 500}
+    TimelineEntry:
+      type: object
+      required: [at, kind, summary]
+      properties:
+        at: {$ref: '#/components/schemas/Timestamp'}
+        kind: {type: string, enum: [TRANSITION, DISPATCH_DECISION, OFFER, EVENT, CHARGE, REFUND, NOTIFICATION, FLAG, AUDIT]}
+        summary: {type: string}
+        data: {type: object}
+    Timeline:
+      type: object
+      required: [ride_id, entries]
+      properties:
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        entries: {type: array, items: {$ref: '#/components/schemas/TimelineEntry'}}
+    ChargeAttempt:
+      type: object
+      required: [id, seq, status, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        seq: {type: integer, minimum: 1}
+        status: {type: string, enum: [PENDING, IN_FLIGHT, SUCCEEDED, FAILED, UNKNOWN]}
+        failure_code: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {$ref: '#/components/schemas/Timestamp'}
+    Charge:
+      allOf:
+        - $ref: '#/components/schemas/ChargeSummary'
+        - type: object
+          required: [rider_id, refunded, attempts]
+          properties:
+            rider_id: {$ref: '#/components/schemas/Uuid'}
+            driver_id: {$ref: '#/components/schemas/Uuid'}
+            refunded: {$ref: '#/components/schemas/Money'}
+            attempts: {type: array, items: {$ref: '#/components/schemas/ChargeAttempt'}}
+    ChargeList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Charge'}}
+        next_cursor: {type: string}
+    RefundRequest:
+      type: object
+      required: [amount_paise, reason]
+      properties:
+        amount_paise: {type: integer, format: int64, minimum: 1}
+        reason: {type: string, minLength: 1, maxLength: 500}
+    Refund:
+      type: object
+      required: [id, charge_id, amount, status, reason, automatic, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        charge_id: {$ref: '#/components/schemas/Uuid'}
+        amount: {$ref: '#/components/schemas/Money'}
+        status: {type: string, enum: [PENDING, IN_FLIGHT, SUCCEEDED, FAILED, UNKNOWN]}
+        reason: {type: string}
+        automatic: {type: boolean}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {$ref: '#/components/schemas/Timestamp'}
+    Flag:
+      type: object
+      required: [id, ride_id, kind, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        ride_id: {$ref: '#/components/schemas/Uuid'}
+        kind: {$ref: '#/components/schemas/FlagKind'}
+        details: {type: object}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        resolved_at: {$ref: '#/components/schemas/Timestamp'}
+        resolution: {type: string}
+    FlagList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Flag'}}
+        next_cursor: {type: string}
+    ResolveFlagRequest:
+      type: object
+      required: [resolution]
+      properties:
+        resolution: {type: string, minLength: 1, maxLength: 500}
+    InvariantReport:
+      type: object
+      required: [checked_at, checks, violations]
+      properties:
+        checked_at: {$ref: '#/components/schemas/Timestamp'}
+        checks: {type: array, items: {type: string}, description: 'Invariant IDs checked, e.g. I1.'}
+        violations:
+          type: array
+          items:
+            type: object
+            required: [invariant, detail]
+            properties:
+              invariant: {type: string}
+              detail: {type: string}
+              ids: {type: array, items: {$ref: '#/components/schemas/Uuid'}}
+    DeadLetter:
+      type: object
+      required: [id, consumer, topic, error, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        consumer: {type: string}
+        topic: {type: string}
+        event_id: {$ref: '#/components/schemas/Uuid'}
+        event_type: {type: string}
+        error: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        redriven_at: {$ref: '#/components/schemas/Timestamp'}
+    DeadLetterList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/DeadLetter'}}
+        next_cursor: {type: string}
+    ReplayRequest:
+      type: object
+      required: [consumer, from, to]
+      properties:
+        consumer: {type: string}
+        from: {$ref: '#/components/schemas/Timestamp'}
+        to: {$ref: '#/components/schemas/Timestamp'}
+        reprocess: {type: boolean, default: false, description: Clear the consumer's inbox for the range first, so events it already handled run again.}
+    Replay:
+      type: object
+      required: [id, consumer, from, to, status]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        consumer: {type: string}
+        from: {$ref: '#/components/schemas/Timestamp'}
+        to: {$ref: '#/components/schemas/Timestamp'}
+        status: {type: string, enum: [RUNNING, DONE, FAILED]}
+        events: {type: integer, minimum: 0}
+
+    # ---------------------------------------------------------------- admin
+    GeoJsonPolygon:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type: {type: string, const: Polygon}
+        coordinates:
+          type: array
+          minItems: 1
+          items: {type: array, minItems: 4, items: {type: array, minItems: 2, maxItems: 2, items: {type: number}}}
+    GeoJsonMultiPolygon:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type: {type: string, const: MultiPolygon}
+        coordinates:
+          type: array
+          minItems: 1
+          items:
+            type: array
+            minItems: 1
+            items: {type: array, minItems: 4, items: {type: array, minItems: 2, maxItems: 2, items: {type: number}}}
+    City:
+      type: object
+      required: [id, name, time_zone, currency, bounds, active, version]
+      properties:
+        id: {$ref: '#/components/schemas/CityId'}
+        name: {type: string}
+        time_zone: {type: string, examples: [Asia/Kolkata]}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+        bounds: {$ref: '#/components/schemas/GeoJsonPolygon'}
+        active: {type: boolean}
+        version: {type: integer}
+    CityCreate:
+      type: object
+      required: [id, name, time_zone, currency, bounds]
+      properties:
+        id: {$ref: '#/components/schemas/CityId'}
+        name: {type: string, minLength: 1, maxLength: 80}
+        time_zone: {type: string}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+        bounds: {$ref: '#/components/schemas/GeoJsonPolygon'}
+    CityUpdate:
+      type: object
+      required: [version]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 80}
+        active: {type: boolean}
+        version: {type: integer}
+    ServiceAreaUpdate:
+      type: object
+      required: [area]
+      properties:
+        area: {$ref: '#/components/schemas/GeoJsonMultiPolygon'}
+    SpecialArea:
+      type: object
+      required: [id, city_id, code, name, kind, area, priority, active]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        code: {type: string, pattern: '^[A-Z0-9-]{2,40}$'}
+        name: {type: string}
+        kind: {type: string, enum: [AIRPORT, STATION, STADIUM, OTHER]}
+        area: {$ref: '#/components/schemas/GeoJsonMultiPolygon'}
+        priority: {type: integer}
+        active: {type: boolean}
+    SpecialAreaCreate:
+      type: object
+      required: [code, name, kind, area]
+      properties:
+        code: {type: string, pattern: '^[A-Z0-9-]{2,40}$'}
+        name: {type: string, minLength: 1, maxLength: 80}
+        kind: {type: string, enum: [AIRPORT, STATION, STADIUM, OTHER]}
+        area: {$ref: '#/components/schemas/GeoJsonMultiPolygon'}
+        priority: {type: integer, default: 0}
+    Category:
+      type: object
+      required: [code, name, seats]
+      properties:
+        code: {$ref: '#/components/schemas/CategoryCode'}
+        name: {type: string}
+        seats: {type: integer, minimum: 1}
+    CityCategory:
+      type: object
+      required: [active, offer_ttl_s, search_timeout_s, radius_start_m, radius_step_m, radius_max_m, ranker]
+      properties:
+        city_id: {$ref: '#/components/schemas/CityId', readOnly: true}
+        category: {$ref: '#/components/schemas/CategoryCode', readOnly: true}
+        active: {type: boolean}
+        offer_ttl_s: {type: integer, minimum: 5, maximum: 60}
+        search_timeout_s: {type: integer, minimum: 30, maximum: 900}
+        radius_start_m: {type: integer, minimum: 100}
+        radius_step_m: {type: integer, minimum: 0}
+        radius_max_m: {type: integer, minimum: 100}
+        ranker: {type: string, enum: [nearest, eta, weighted]}
+        version: {type: integer, description: Required when updating; the current version.}
+    FareRuleCreate:
+      type: object
+      required: [city_id, category, base_paise, per_km_paise, per_min_paise, minimum_paise, booking_fee_paise, tax_bp, commission_bp, currency]
+      properties:
+        city_id: {$ref: '#/components/schemas/CityId'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        effective_from: {$ref: '#/components/schemas/Timestamp', description: Now when absent; never in the past.}
+        base_paise: {type: integer, format: int64, minimum: 0}
+        per_km_paise: {type: integer, format: int64, minimum: 0}
+        per_min_paise: {type: integer, format: int64, minimum: 0}
+        minimum_paise: {type: integer, format: int64, minimum: 0}
+        booking_fee_paise: {type: integer, format: int64, minimum: 0}
+        tax_bp: {type: integer, minimum: 0, maximum: 5000}
+        commission_bp: {type: integer, minimum: 0, maximum: 5000}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+    FareRule:
+      allOf:
+        - $ref: '#/components/schemas/FareRuleCreate'
+        - type: object
+          required: [id, version, effective_from, created_at]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            version: {type: integer, minimum: 1}
+            created_at: {$ref: '#/components/schemas/Timestamp'}
+    FeeRuleCreate:
+      type: object
+      required: [city_id, category, cancellation_fee_paise, no_show_fee_paise, commission_bp, currency]
+      properties:
+        city_id: {$ref: '#/components/schemas/CityId'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        effective_from: {$ref: '#/components/schemas/Timestamp'}
+        cancellation_fee_paise: {type: integer, format: int64, minimum: 0}
+        no_show_fee_paise: {type: integer, format: int64, minimum: 0}
+        free_cancel_window_s: {type: integer, minimum: 0, default: 120}
+        late_grace_s: {type: integer, minimum: 0, default: 300}
+        pickup_wait_s: {type: integer, minimum: 0, default: 300}
+        commission_bp: {type: integer, minimum: 0, maximum: 5000}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+    FeeRule:
+      allOf:
+        - $ref: '#/components/schemas/FeeRuleCreate'
+        - type: object
+          required: [id, version, effective_from, created_at]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            version: {type: integer, minimum: 1}
+            created_at: {$ref: '#/components/schemas/Timestamp'}
+    SurgeRuleCreate:
+      type: object
+      required: [city_id, zone_id, days_of_week, start_local, end_local, multiplier]
+      properties:
+        city_id: {$ref: '#/components/schemas/CityId'}
+        zone_id: {type: string, description: 'An H3 resolution-7 cell, or `area:<code>` for a special area.'}
+        days_of_week: {type: array, minItems: 1, uniqueItems: true, items: {type: integer, minimum: 1, maximum: 7}, description: 1 = Monday.}
+        start_local: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'}
+        end_local: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', description: May be earlier than the start, wrapping past midnight.}
+        multiplier: {type: number, minimum: 1, maximum: 2, multipleOf: 0.01}
+    SurgeRule:
+      allOf:
+        - $ref: '#/components/schemas/SurgeRuleCreate'
+        - type: object
+          required: [id, active, version]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            active: {type: boolean}
+            version: {type: integer}
+    SurgeRuleUpdate:
+      type: object
+      required: [version]
+      properties:
+        multiplier: {type: number, minimum: 1, maximum: 2, multipleOf: 0.01}
+        active: {type: boolean}
+        version: {type: integer}
+    AdminDriverCreate:
+      type: object
+      required: [phone, first_name, city_id]
+      properties:
+        phone: {$ref: '#/components/schemas/Phone'}
+        first_name: {type: string, minLength: 1, maxLength: 60}
+        last_name: {type: string, maxLength: 60}
+        city_id: {$ref: '#/components/schemas/CityId'}
+    AdminDriver:
+      type: object
+      required: [id, first_name, city_id, verification, suspended, vehicles, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        first_name: {type: string}
+        last_name: {type: string}
+        city_id: {$ref: '#/components/schemas/CityId'}
+        verification: {$ref: '#/components/schemas/Verification'}
+        suspended: {type: boolean}
+        suspension_reason: {type: string}
+        rating: {$ref: '#/components/schemas/RatingSummary'}
+        vehicles: {type: array, items: {$ref: '#/components/schemas/Vehicle'}}
+        status: {$ref: '#/components/schemas/DriverStatus'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    VerificationRequest:
+      type: object
+      required: [status, reason]
+      properties:
+        status: {type: string, enum: [VERIFIED, REJECTED]}
+        reason: {type: string, minLength: 1, maxLength: 500}
+    VehicleCreate:
+      type: object
+      required: [driver_id, category, plate, make, model, colour]
+      properties:
+        driver_id: {$ref: '#/components/schemas/Uuid'}
+        category: {$ref: '#/components/schemas/CategoryCode'}
+        plate: {type: string, pattern: '^[A-Z0-9 -]{4,15}$', examples: [KA 01 AB 1234]}
+        make: {type: string, maxLength: 40}
+        model: {type: string, maxLength: 40}
+        colour: {type: string, maxLength: 30}
+    VehicleUpdate:
+      type: object
+      required: [active, version]
+      properties:
+        active: {type: boolean}
+        version: {type: integer}
+
+    # ---------------------------------------------------------------- webhooks
+    PaymentWebhook:
+      type: object
+      required: [id, type, created_at, data]
+      properties:
+        id: {type: string, description: Provider event ID; the deduplication key.}
+        type: {type: string, enum: [charge.succeeded, charge.failed, refund.succeeded, refund.failed]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        data:
+          type: object
+          required: [idempotency_key, status, amount_paise]
+          properties:
+            idempotency_key: {$ref: '#/components/schemas/Uuid', description: The attempt or refund ID we sent.}
+            provider_reference: {type: string}
+            status: {type: string, enum: [succeeded, failed]}
+            amount_paise: {type: integer, format: int64, minimum: 1}
+            failure_code: {type: string}

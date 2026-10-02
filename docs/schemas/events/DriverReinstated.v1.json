@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/DriverReinstated.v1.json",
+  "title": "DriverReinstated v1",
+  "description": "Operations lifted a suspension; the driver may go online again. Aggregate: driver; key: driver.",
+  "type": "object",
+  "required": ["driver_id", "reason", "by", "at"],
+  "additionalProperties": false,
+  "properties": {
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 500},
+    "by": {"$ref": "common.json#/$defs/uuid"},
+    "at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "reason": "Complaint reviewed",
+      "by": "0199a300-0000-7000-8000-0000000000aa",
+      "at": "2026-10-05T09:30:00.000Z"
+    }
+  ]
+}

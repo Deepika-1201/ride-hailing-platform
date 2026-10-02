@@ -45,3 +45,7 @@ How are lifecycles modelled and enforced, and how do concurrent changes to the s
 ## Revisit when
 
 - Auditors or analytics need to replay full state history; event sourcing for one aggregate would then be worth evaluating.
+
+## Amendments
+
+- **2026-10-02, low-level design** ([LLD §6](../low-level-design.md#6-concurrency-rules), [review](../architecture-review.md) R-01, R-03): the lock order is ride → driver → offer → driver availability. Timers and search tasks have no place in it. Their pollers claim them first, and every other transaction removes them without waiting (`SKIP LOCKED`), leaving a row that is being handled to its handler, which re-checks state. Giving timers the last place, as decision 4 did, would let a timer handler and an acceptance deadlock.

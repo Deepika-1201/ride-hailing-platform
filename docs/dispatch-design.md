@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Part of | [HLD](architecture.md) §7 |
-| Status | Draft for approval |
+| Status | Approved 2026-10-02 (refined by the [LLD](low-level-design.md#8-dispatch)) |
 | Decisions | [ADR-011](decisions/ADR-011-dispatch-protocol.md) (protocol), [ADR-004](decisions/ADR-004-live-location-index.md) (candidates), [ADR-005](decisions/ADR-005-durable-timers.md) (timers), [ADR-001](decisions/ADR-001-architecture-style.md) (one transaction for assignment) |
 | Requirements | FR-DS1–FR-DS6, NFR-1, NFR-4, NFR-7 |
 
@@ -40,15 +40,15 @@ stateDiagram-v2
 | Field | Meaning |
 |---|---|
 | `driver_id`, `city`, `category`, `vehicle_id` | Who, where and with which vehicle the driver went online |
-| `status` | `AVAILABLE`, `OFFERED`, `ASSIGNED` or `ON_TRIP`; going offline deletes the row and records the session |
+| `status` | `OFFLINE`, `AVAILABLE`, `OFFERED`, `ASSIGNED` or `ON_TRIP`. The row is kept while the driver is offline, so its version only grows and post-commit mirror writes can be ordered by it ([LLD §9.4](low-level-design.md#94-scripts)); sessions are recorded separately |
 | `offer_id`, `ride_id` | The live offer, or the ride in progress |
 | `version` | Incremented on every change |
-| `consecutive_expired` | Offers left to expire in a row |
+| `consecutive_expired` | Offers the driver saw and let expire, in a row |
 
 Rules:
 - Going offline is refused in `ASSIGNED` and `ON_TRIP` (FR-D3). In `OFFERED` it declines the offer first.
 - Suspension (FR-D5) withdraws a live offer at once. A ride in progress continues, and the driver goes offline when it ends.
-- After 3 offers expire in a row, the driver is taken offline and told why **(assumed)**. This keeps unresponsive drivers from slowing every search.
+- After 3 offers the driver saw expire in a row, the driver is taken offline and told why **(assumed)**. This keeps unresponsive drivers from slowing every search. Offers the app never acknowledged don't count, so a lost push or a dead connection can't take drivers offline.
 
 ## 3. Search tasks
 
@@ -74,7 +74,7 @@ Rules:
 
 One transaction per claimed task:
 
-1. **Check the ride** is still `SEARCHING`; otherwise delete the task.
+1. **Check the ride** is still `SEARCHING`, holding a share lock on it so a concurrent cancellation waits for this attempt or this attempt waits for it ([LLD §6.4](low-level-design.md#64-why-the-search-attempt-takes-a-share-lock-on-the-ride)); otherwise delete the task.
 2. **Find candidates:** the Valkey query script ([ADR-004](decisions/ADR-004-live-location-index.md)) returns up to 20 available drivers of the category within `radius_m`, heard from in the last 30 s, nearest first.
 3. **Exclude** drivers already offered this ride, whatever the outcome (FR-DS3).
 4. **Rank** with the city's `CandidateRanker` (§7).

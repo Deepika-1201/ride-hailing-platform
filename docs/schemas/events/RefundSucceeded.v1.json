@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/RefundSucceeded.v1.json",
+  "title": "RefundSucceeded v1",
+  "description": "A refund succeeded: requested by operations, or automatic after a late success. Aggregate: refund; key: ride.",
+  "type": "object",
+  "required": ["refund_id", "charge_id", "ride_id", "rider_id", "amount", "automatic", "succeeded_at"],
+  "additionalProperties": false,
+  "properties": {
+    "refund_id": {"$ref": "common.json#/$defs/uuid"},
+    "charge_id": {"$ref": "common.json#/$defs/uuid"},
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "amount": {"$ref": "common.json#/$defs/money"},
+    "automatic": {"type": "boolean"},
+    "succeeded_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "refund_id": "0199a3fa-cccc-7ddd-8eee-ffff3333aaaa",
+      "charge_id": "0199a3f9-aaaa-7bbb-8ccc-dddd1111eeee",
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "amount": {"amount_paise": 5000, "currency": "INR"},
+      "automatic": false,
+      "succeeded_at": "2026-10-02T12:10:00.000Z"
+    }
+  ]
+}

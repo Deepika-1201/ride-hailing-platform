@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design phase. Done: the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, and ADR-001 to ADR-018. Next comes the low-level design and the implementation plan. Implementation starts once the design is approved.
+> **Status:** design complete, awaiting final approval. Done: the requirements baseline, design spikes S-1 to S-3, the high-level design (approved) with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-022. Implementation starts with V1 once the design is approved.
 
 ## Documentation
 
@@ -15,5 +15,9 @@ The focus is the real-time layer: ingesting a continuous stream of driver locati
 | [Ride lifecycle](docs/ride-lifecycle.md) | Ride, charge and refund state machines; fees; offline commands; races on a ride |
 | [Dispatch design](docs/dispatch-design.md) | Driver availability, search tasks, offers, ranking strategies, race scenarios, batch matching |
 | [Location system](docs/location-system.md) | Ingestion, ordering, freshness, live index and status mirror, tracking, trip routes, privacy |
+| [Low-level design](docs/low-level-design.md) | Code layout, module APIs, database schema, lock order, transaction steps, Valkey scripts, payments, security, realtime protocol, tests |
+| [OpenAPI](docs/openapi.yaml) and [schemas](docs/schemas/) | The REST contract; JSON Schemas for every event and WebSocket message |
+| [Implementation plan](docs/implementation-plan.md) | Phases from V1 to V8, tests per phase, exit criteria |
+| [Architecture review](docs/architecture-review.md) | Findings before implementation, single points of failure, bottlenecks, threats |
 | [Decision records](docs/decisions/README.md) | One ADR per significant architecture decision |
 | [Design spikes](spikes/README.md) | Throwaway benchmarks behind the ADRs: live location index, database timers, WebSocket cost |

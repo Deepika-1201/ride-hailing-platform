@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/DriverWentOffline.v1.json",
+  "title": "DriverWentOffline v1",
+  "description": "The driver went offline, or the platform took them offline. Aggregate: availability; key: driver.",
+  "type": "object",
+  "required": ["driver_id", "city_id", "reason", "online_seconds", "offline_at"],
+  "additionalProperties": false,
+  "properties": {
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "city_id": {"$ref": "common.json#/$defs/city_id"},
+    "reason": {
+      "enum": ["DRIVER", "SILENT", "UNREACHABLE", "UNRESPONSIVE", "SUSPENDED"],
+      "description": "SILENT: no update for 10 min; UNREACHABLE: silent for 2 min while assigned; UNRESPONSIVE: 3 seen offers expired in a row."
+    },
+    "online_seconds": {"type": "integer", "minimum": 0},
+    "offline_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "city_id": "blr",
+      "reason": "UNRESPONSIVE",
+      "online_seconds": 5420,
+      "offline_at": "2026-10-02T09:28:20.000Z"
+    }
+  ]
+}

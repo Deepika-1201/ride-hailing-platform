@@ -49,3 +49,7 @@ Who issues identities and tokens, and how are they checked?
 
 - Real users sign in: move to Cognito or Keycloak and keep the resource-server side unchanged.
 - Staff accounts need SSO and MFA.
+
+## Amendments
+
+- **2026-10-02, low-level design** ([LLD §12.2](../low-level-design.md#122-tokens), [review](../architecture-review.md) R-15): reuse of a rotated refresh token within 10 s of its rotation **(assumed)** is treated as a client retry whose response was lost. A new pair is issued and the pair from the first rotation is revoked. Later reuse still revokes the whole family.

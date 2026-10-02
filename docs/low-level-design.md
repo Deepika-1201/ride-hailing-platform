@@ -1,0 +1,2439 @@
+# Low-level design — Ride-Hailing Platform
+
+| | |
+|---|---|
+| Phase | 4 — Low-level design |
+| Status | Draft for approval |
+| Inputs | [Requirements](requirements.md) · [HLD](architecture.md) (approved 2026-10-02) · [Ride lifecycle](ride-lifecycle.md) · [Dispatch](dispatch-design.md) · [Location system](location-system.md) · [ADRs](decisions/README.md) |
+| Contracts | [OpenAPI](openapi.yaml) · [event schemas](schemas/events/) · [WebSocket schemas](schemas/websocket/) |
+| Next | [Implementation plan](implementation-plan.md) · [Architecture review](architecture-review.md) |
+
+V1 is specified completely. V2–V4 are specified to the level of tables, scripts, algorithms and interfaces; each phase re-reads its section before coding and records any change here. V5–V8 keep the decisions in the HLD and get detail when they start (requirements §2). Numbers marked **(assumed)** are new here; [Appendix A](#appendix-a--assumptions-introduced-here) lists them.
+
+## Contents
+
+1. [Code organization](#1-code-organization)
+2. [Modules and dependencies](#2-modules-and-dependencies)
+3. [Domain model](#3-domain-model)
+4. [Database schema](#4-database-schema)
+5. [Platform mechanisms](#5-platform-mechanisms)
+6. [Concurrency rules](#6-concurrency-rules)
+7. [Ride transitions](#7-ride-transitions)
+8. [Dispatch](#8-dispatch)
+9. [Location and the live index](#9-location-and-the-live-index)
+10. [Pricing](#10-pricing)
+11. [Payments](#11-payments)
+12. [Identity and security](#12-identity-and-security)
+13. [REST API](#13-rest-api)
+14. [Realtime (V2)](#14-realtime-v2)
+15. [Events](#15-events)
+16. [Observability](#16-observability)
+17. [Testing](#17-testing)
+18. [Simulator and demo web app (V2)](#18-simulator-and-demo-web-app-v2)
+19. [Later versions](#19-later-versions)
+20. [Configuration reference](#20-configuration-reference)
+- [Appendix A — Assumptions introduced here](#appendix-a--assumptions-introduced-here)
+- [Appendix B — Answers to the HLD's open questions](#appendix-b--answers-to-the-hlds-open-questions)
+
+---
+
+## 1. Code organization
+
+Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
+
+### 1.1 Repository layout
+
+```text
+build.gradle.kts, settings.gradle.kts, gradlew, gradle/wrapper/
+docker-compose.yml                profiles: default, kafka, observability, routing, simulator
+docker/postgres/Dockerfile        postgres:18 + the PGDG postgresql-18-postgis-3 package (ADR-003)
+src/main/java/com/ridehailing/
+  RideHailingApplication.java
+  shared/                         value types every module may use (open module)
+  platform/                       roles, web conventions, security plumbing, ids and clock, idempotency,
+                                  outbox, inbox, timers, leases, jobs, rate limits
+  audit/ identity/ rider/ driver/ geography/ location/ pricing/
+  ride/ dispatch/ payment/ notification/ rating/ operations/
+src/main/resources/
+  application.yml, application-local.yml
+  db/migration/<module>/V<n>__<description>.sql
+  db/seed/                        local and demo seed data (Bengaluru), loaded in the local profile only
+  valkey/*.lua                    live-index, mirror, sweep, snapshot and rate-limit scripts (V2)
+src/test/java/com/ridehailing/
+  architecture/                   module, schema-ownership and coding rules
+  support/                        Testcontainers set-up, fixtures, test clock, API client
+  <module>/                       unit and integration tests per module
+  concurrency/                    the race scenarios (§17.2)
+  contract/                       OpenAPI, event and WebSocket schema tests
+scripts/demo.sh                   V1 scripted demo (FR-S1)
+simulator/                        Go simulator (V2, ADR-021)
+web/                              demo web app (V2, ADR-022)
+docs/                             design documents, openapi.yaml, schemas/
+spikes/                           throwaway measurements (not product code)
+```
+
+### 1.2 Inside a module
+
+| Package | Contents | Rules |
+|---|---|---|
+| `com.ridehailing.<module>` | The module's API: `…Api` interfaces, command and view records, enums, service-provider interfaces | The only package other modules may import |
+| `….domain` | Aggregates, state machines, policies (fees, fares, ranking) | Plain Java: no Spring, no SQL, no I/O |
+| `….app` | Application services: one method per command or query; transaction boundaries; role and ownership checks | Transactions start here and nowhere else |
+| `….db` | Repositories on `JdbcClient`, row mappers | SQL names only the module's own schema |
+| `….web` | `@ApiController` classes, request and response records | No business logic |
+| `….jobs` | Pollers, consumers and scheduled jobs | Each declares its role (§1.3) |
+
+### 1.3 Runtime roles
+
+- `ride.roles` (environment `RIDE_ROLES`): a comma-separated subset of `api`, `realtime`, `dispatch`, `worker`. Default: all four. An empty or unknown value fails startup.
+- `@ApiController` = `@RestController` + `@ConditionalOnRole(API)`. Jobs use `@RoleComponent(DISPATCH)` and similar. An ArchUnit rule rejects a bare `@RestController` or `@Scheduled` method.
+- Port 8080 serves the public REST API (role `api`) and WebSockets (role `realtime`, V2). Port 8081 serves management: health, info (active roles), Prometheus metrics.
+- **V1 runs on PostgreSQL alone** (ADR-001): the live index, rate limiter and push bus use in-memory implementations of their ports (§9.2, §5.8). Those implementations are only correct inside one process, so startup fails if `ride.location.store=memory` is combined with a role set that doesn't include both `api` and `dispatch`.
+
+### 1.4 Conventions
+
+| Topic | Rule |
+|---|---|
+| Identifiers | UUIDv7 generated in the application by `IdGenerator` (monotonic within a millisecond per JVM), so IDs exist before the insert and tests can fix them. Key columns also default to `uuidv7()` for rows written by SQL, such as seed data |
+| Time | The **database clock** decides everything compared in SQL: due timers, expiries, leases. The **application clock** is UTC with microsecond ticks (matching `timestamptz`) and evaluates domain windows measured in minutes (free cancellation, no-show wait). All timestamps are stored in UTC; days for earnings use the city's time zone (`Asia/Kolkata`) |
+| Money | `Money(long paise, Currency)`; INR only; integer arithmetic; percentages in basis points (`tax_bp = 500` is 5%); one rounding step, up to whole rupees, at the end of a fare calculation (§10.2) |
+| Coordinates | `GeoPoint(lat, lon)` as doubles, validated to WGS 84 ranges; stored as `lat`/`lon` columns. Distances by haversine with Earth radius 6,371,008.8 m. PostGIS types only for polygons and spatial queries |
+| JSON | Jackson 3; `snake_case`; ISO-8601 UTC timestamps; null fields omitted; unknown request fields ignored |
+| Validation | Jakarta Bean Validation on request records; domain rules in `domain` |
+| Logs | JSON (ECS) in containers, plain text locally. Context: `request_id`, `correlation_id`, `trace_id`, `span_id`, `role`, `module`, and `ride_id` or `driver_id` when known |
+| Transactions | `READ COMMITTED`. `statement_timeout` 2 s on request paths, 5 s in jobs **(assumed)**. Deadlocks (`40P01`) and serialization failures (`40001`) are retried up to 3 times by the transaction template; nothing else is retried automatically |
+
+### 1.5 Local runs, image and CI
+
+- **Local:** `docker compose up` starts PostgreSQL + PostGIS and the application with all roles. Profiles add Valkey (V2 default), Kafka, observability, routing and the simulator as their versions arrive (HLD §16.1).
+- **Tests** use Testcontainers with the same PostgreSQL image built from `docker/postgres/Dockerfile`. The siblings' embedded PostgreSQL has no PostGIS, so it isn't used.
+- **Image:** two stages (JDK 25 build, JRE 25 run), layered jar, non-root user, `-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError`.
+- **CI (GitHub Actions):** compile with `-Werror`; unit, architecture, integration and contract tests; build the image; start `docker compose` and wait for readiness. Terraform jobs arrive in V7.
+
+## 2. Modules and dependencies
+
+Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
+
+### 2.1 Allowed dependencies
+
+| Module | May depend on | Why |
+|---|---|---|
+| `shared` | — | Open module: `Money`, `GeoPoint`, `Actor`, `Page`, `CityId` |
+| `platform` | `shared` | Infrastructure used by every module |
+| `audit` | `platform`, `shared` | Every module writes audit entries |
+| `notification` | `platform`, `shared` | One-time-code SMS for identity; consumes events as JSON |
+| `identity` | `notification`, `audit`, `platform`, `shared` | Sends one-time codes |
+| `rider` | `audit`, `platform`, `shared` | |
+| `driver` | `identity`, `audit`, `platform`, `shared` | Admins create a driver's user |
+| `geography` | `audit`, `platform`, `shared` | Owns cities, areas, zones, categories and the `RoutingProvider` |
+| `rating` | `audit`, `platform`, `shared` | Opens rating windows from `TripCompleted` (JSON) |
+| `location` | `geography`, `notification`, `platform`, `shared` | City bounds; live index; the "driver arriving" notification (V2) |
+| `pricing` | `geography`, `location`, `audit`, `platform`, `shared` | Zones, routes, pickup ETA estimate |
+| `payment` | `rider`, `audit`, `platform`, `shared` | Payment methods; consumes ride events as JSON |
+| `ride` | `pricing`, `payment`, `rider`, `rating`, `location`, `audit`, `platform`, `shared` | Consume quote, check dues, payment method, rider snapshot, arrival distance |
+| `dispatch` | `ride`, `driver`, `rating`, `location`, `geography`, `audit`, `platform`, `shared` | Assignment, eligibility, driver snapshot, candidates, policies |
+| `operations` | `ride`, `dispatch`, `driver`, `payment`, `notification`, `location`, `audit`, `platform`, `shared` | Read models and orchestrated operations commands |
+
+The graph is acyclic. Two runtime calls go against it, both by design (ADR-019):
+- **Events** travel as JSON (§15), so payment, notification and rating consume ride events without depending on `ride`.
+- **`RideDispatchParticipant`** is declared in `ride` and implemented in `dispatch` (§2.3).
+
+```mermaid
+flowchart BT
+    shared["shared"]
+    platform["platform"] --> shared
+    audit["audit"] --> platform
+    notification["notification"] --> platform
+    identity["identity"] --> notification
+    identity --> audit
+    rider["rider"] --> audit
+    driver["driver"] --> identity
+    geography["geography"] --> audit
+    rating["rating"] --> audit
+    location["location"] --> geography
+    pricing["pricing"] --> location
+    payment["payment"] --> rider
+    ride["ride"] --> pricing
+    ride --> payment
+    ride --> rating
+    dispatch["dispatch"] --> ride
+    dispatch --> driver
+    operations["operations"] --> dispatch
+    operations --> notification
+```
+
+The diagram shows the main edges; the table is complete.
+
+### 2.2 Module APIs
+
+Signatures are indicative; records are in each module's API package. Every method that changes state requires a surrounding transaction (`Propagation.MANDATORY`) when another module calls it, so the caller's transaction and lock order apply (§6).
+
+```java
+// ride: queries for everyone, assignment for dispatch, operations commands
+public interface RideQueries {
+    Optional<RideView> find(UUID rideId);
+    Page<RideSummary> history(UUID userId, Party party, Cursor cursor);
+    Optional<RideView> activeRide(UUID userId, Party party);
+    List<TransitionView> transitions(UUID rideId);
+    List<RideView> overdue(Map<RideStatus, Duration> thresholds, int limit);   // stuck-ride detector
+}
+public interface RideAssignment {                       // dispatch only
+    Optional<SearchingRide> lockIfSearching(UUID rideId);   // SELECT … FOR SHARE (§8.3)
+    AssignedRide assign(AssignDriver command);              // T2, ride part (§8.4)
+    void unassignUnreachable(UUID rideId, UUID driverId);   // T7 (§8.9)
+}
+public interface RideOperations {                       // operations only
+    RideView cancelBySystem(UUID rideId, Actor ops, String reason, Optional<FeeRequest> fee);  // T13
+    void resolveFlag(UUID flagId, Actor ops, String resolution);
+}
+public interface RideDispatchParticipant {              // declared by ride, implemented by dispatch
+    void searchStarted(SearchStarted search);               // T1, T6, T7
+    void searchStopped(UUID rideId, String reason);         // T3, T4, T13 while SEARCHING
+    void driverReleased(UUID rideId, UUID driverId, DriverRelease release);  // T6–T8, T10–T13
+    void tripStarted(UUID rideId, UUID driverId);           // T9
+}
+
+// dispatch
+public interface DispatchApi {
+    DriverStatusView goOnline(UUID driverId, UUID vehicleId);
+    DriverStatusView goOffline(UUID driverId);
+    Optional<OfferView> currentOffer(UUID driverId);        // marks the offer seen (§8.5)
+    void markOfferSeen(UUID offerId, UUID driverId);        // WebSocket acknowledgement (V2)
+    RideView accept(UUID offerId, UUID driverId);           // T2
+    OfferView decline(UUID offerId, UUID driverId);
+    void onDriverSuspended(UUID driverId);                  // operations, same transaction as the suspension
+}
+public interface DispatchQueries {
+    List<DecisionView> decisions(UUID rideId);
+    List<OfferView> offers(UUID rideId);
+    Page<DriverStatusView> drivers(CityId city, Optional<AvailabilityStatus> status, Cursor cursor);
+}
+
+// location
+public interface LiveIndex { … }                            // §9.1
+public interface LocationIngestion {
+    BatchResult accept(UUID driverId, List<LocationUpdate> updates);    // V1 REST, V2 WebSocket
+}
+
+// pricing
+public interface PricingApi {
+    QuoteView quote(UUID riderId, QuoteRequest request);
+    ConsumedQuote consume(UUID quoteId, UUID riderId, UUID rideId);     // conditional update (§7.2)
+    FeeRuleView feeRule(UUID feeRuleId);
+}
+
+// payment
+public interface PaymentApi {
+    Money outstandingDues(UUID riderId);                    // checked in the booking transaction
+    List<ChargeView> charges(UUID rideId);
+    Page<ChargeView> charges(ChargeFilter filter, Cursor cursor);        // operations
+    RefundView refund(UUID chargeId, Money amount, String reason, Actor ops);
+    EarningsView earnings(UUID driverId, LocalDate from, LocalDate to);
+}
+
+// rider, driver, geography, rating, identity, notification, audit
+public interface RiderApi {
+    Optional<PaymentMethodView> paymentMethod(UUID riderId, Optional<UUID> methodId);  // default when empty
+    RiderSnapshot snapshot(UUID riderId);                   // first name and rating
+}
+public interface DriverApi {
+    Eligibility lockEligibility(UUID driverId, UUID vehicleId);   // driver row FOR SHARE (§6.1)
+    DriverSnapshot snapshot(UUID driverId, UUID vehicleId);       // first name, rating, vehicle
+    void suspend(UUID driverId, Actor ops, String reason);
+    void reinstate(UUID driverId, Actor ops, String reason);
+}
+public interface GeographyApi {
+    CityConfig city(CityId city);                           // cached; categories and dispatch policies
+    Optional<CityId> cityAt(GeoPoint point);                // service area lookup
+    ZoneId zoneOf(CityId city, GeoPoint point);             // special area, else H3 cell (§10.1)
+}
+public interface RoutingProvider {
+    Route route(GeoPoint from, GeoPoint to);
+    DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);
+}
+public interface RatingApi { RatingSummary summary(UUID userId, Party party); }
+public interface IdentityApi { UUID createUser(String phone, Set<Role> roles); }
+public interface NotificationApi {
+    void sendOneTimeCode(String phone, String code);       // synchronous, never stored (§12.1)
+    void notify(Notice notice);                             // joins the caller's transaction
+}
+public interface AuditLog { void record(AuditEntry entry); }   // joins the caller's transaction
+
+// platform
+public interface Outbox { void append(DomainEvent event); }    // joins the caller's transaction
+public interface Timers {
+    void schedule(TimerKind kind, UUID aggregateId, Instant dueAt, Map<String, Object> payload);
+    void cancel(TimerKind kind, UUID aggregateId);          // never waits (§6.2)
+}
+public interface Idempotency { <T> CommandResponse<T> execute(IdempotentCall call, Supplier<CommandResponse<T>> command); }
+```
+
+### 2.3 The dispatch participant
+
+The ride module owns the ride state machine; dispatch owns offers, availability and search tasks. When a ride transition must change dispatch state, the ride's application service calls `RideDispatchParticipant` after updating the ride row, inside the same transaction:
+
+| Ride transition | Participant call | Dispatch effect |
+|---|---|---|
+| T1 book | `searchStarted` | Insert the search task, due now |
+| T3 search timeout, T4 rider cancels while searching, T13 from `SEARCHING` | `searchStopped` | Withdraw the pending offer if any and release its driver; remove the task and the offer timer |
+| T6 driver cancels before arrival | `driverReleased(AVAILABLE, DRIVER_CANCELLED)` then `searchStarted(priority 1)` | Release the driver, count the cancellation, reset the task due now |
+| T7 driver unreachable | `driverReleased(OFFLINE, UNREACHABLE)` then `searchStarted(priority 1)` | Driver offline, session closed, task due now |
+| T8, T10, T11, T12, T13 after assignment | `driverReleased(AVAILABLE or OFFLINE, reason)` | `OFFLINE` when the driver was suspended during the ride |
+| T9 trip starts | `tripStarted` | Availability `ASSIGNED → ON_TRIP` |
+
+T2 (acceptance) runs the other way round: it starts in dispatch, which calls `RideAssignment.assign` first so that the ride row is locked before the offer (§6.1).
+
+## 3. Domain model
+
+### 3.1 Aggregates
+
+| Module | Aggregate (table) | Identity | Lifecycle | Invariants it protects |
+|---|---|---|---|---|
+| identity | User (`users`) | UUID; unique phone (E.164) | `ACTIVE`, `DISABLED` | One user per phone |
+| identity | One-time-code challenge | UUID | Created → consumed or expired | 5 attempts, 5 min |
+| identity | Refresh token | UUID; family | Issued → rotated or revoked | Reuse of a rotated token revokes its family (§12.2) |
+| rider | Rider (`riders`) | User ID | — | At most 10 saved places; exactly one cash method |
+| driver | Driver (`drivers`) | User ID | Verification `PENDING`, `VERIFIED`, `REJECTED`; suspended flag | Only verified, unsuspended drivers with an active own vehicle go online |
+| driver | Vehicle | UUID; unique plate | Active flag | Belongs to one driver |
+| geography | City | Code (`blr`) | Active flag | Categories and dispatch policies per city |
+| pricing | Fare rule, fee rule | UUID; `(city, category, version)` | Versions with `effective_from` | A published version never changes |
+| pricing | Quote | UUID | Created → used or expired | Immutable; used once by one ride |
+| ride | Ride (`rides`) | UUID (= correlation ID) | [Ride lifecycle](ride-lifecycle.md#2-states) | One active ride per rider and per driver; one driver per ride; allowed transitions only |
+| dispatch | Driver availability | Driver ID | [Dispatch §2](dispatch-design.md#2-driver-availability) | One live offer per driver; one active ride per driver |
+| dispatch | Offer | UUID | `PENDING` → `ACCEPTED`, `DECLINED`, `EXPIRED`, `WITHDRAWN` | One pending offer per ride and per driver; a driver is offered a ride at most once |
+| dispatch | Search task | Ride ID | Due, paused, removed | At most one per ride |
+| payment | Charge, with attempts | UUID; unique `(ride, purpose)` | [Ride lifecycle §6](ride-lifecycle.md#6-charges-and-refunds) | No double charge; refunds never exceed the charge |
+| payment | Refund | UUID | `PENDING` → `SUCCEEDED`, `FAILED`, `UNKNOWN` | |
+| notification | Notification, with deliveries | UUID | Delivery `PENDING` → `SENT`, `DEAD` | One notification per event, recipient and kind |
+| rating | Rating window, ratings | Ride ID | Open 7 days after completion | One rating per side per ride |
+| audit | Audit entry | UUID | Append-only | Never updated or deleted, except whole expired partitions |
+
+### 3.2 Value objects and enums (in `shared` or the owning module's API)
+
+`Money`, `GeoPoint`, `CityId`, `ZoneId` (H3 cell or `area:<code>`), `CategoryCode` (`AUTO`, `MINI`, `SEDAN`, `XL`, configurable), `Actor` (type `RIDER`, `DRIVER`, `OPS`, `ADMIN`, `SYSTEM` + ID), `RideStatus`, `AvailabilityStatus`, `OfferStatus`, `ChargeStatus`, `ChargePurpose`, `Party` (`RIDER`, `DRIVER`), `DriverRelease` (target `AVAILABLE` or `OFFLINE`, reason).
+
+### 3.3 Core records and how they link
+
+Links between modules are IDs without foreign keys (ADR-019).
+
+```mermaid
+erDiagram
+    QUOTE ||--o| RIDE : "used by"
+    RIDE ||--o| RATING_WINDOW : "rated in"
+    RIDE ||--o{ RIDE_TRANSITION : "logs"
+    RIDE ||--o{ CHARGE : "charged by"
+    CHARGE ||--o{ CHARGE_ATTEMPT : "tried as"
+    CHARGE ||--o{ REFUND : "refunded by"
+    RIDE ||--o| SEARCH_TASK : "searched by"
+    RIDE ||--o{ OFFER : "offered as"
+    DRIVER_AVAILABILITY ||--o| OFFER : "holds live"
+```
+
+## 4. Database schema
+
+One schema per module, owned by it (ADR-019). Conventions: UUID keys; `version` on every aggregate; `timestamptz` in UTC; money in `bigint` paise; status columns as `text` with `CHECK` constraints, which are easier to extend than PostgreSQL enums; no foreign keys across schemas. Every module's first migration creates its schema and records its owner (`COMMENT ON SCHEMA`).
+
+### 4.1 platform
+
+```sql
+CREATE TABLE platform.outbox (
+  id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  event_id          uuid        NOT NULL UNIQUE,
+  event_type        text        NOT NULL,
+  event_version     int         NOT NULL,
+  aggregate_type    text        NOT NULL,
+  aggregate_id      uuid        NOT NULL,
+  aggregate_version bigint      NOT NULL,
+  partition_key     uuid        NOT NULL,           -- Kafka key (V3): the ride for ride, offer and payment events
+  occurred_at       timestamptz NOT NULL,
+  producer          text        NOT NULL,
+  correlation_id    text        NOT NULL,
+  causation_id      text,
+  trace_parent      text,
+  payload           jsonb       NOT NULL,
+  published_at      timestamptz
+);
+CREATE INDEX outbox_unpublished ON platform.outbox (id) WHERE published_at IS NULL;
+CREATE INDEX outbox_by_key ON platform.outbox (partition_key, id);            -- ride timeline, replay
+CREATE INDEX outbox_published ON platform.outbox (published_at) WHERE published_at IS NOT NULL;
+
+CREATE TABLE platform.inbox (
+  consumer     text        NOT NULL,
+  event_id     uuid        NOT NULL,
+  processed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (consumer, event_id)
+);
+
+CREATE TABLE platform.failed_deliveries (            -- V1–V2 dead letters; Kafka topics from V3
+  consumer     text        NOT NULL,
+  event_id     uuid        NOT NULL,
+  outbox_id    bigint      NOT NULL,
+  attempts     int         NOT NULL,
+  last_error   text        NOT NULL,
+  failed_at    timestamptz NOT NULL,
+  redriven_at  timestamptz,
+  PRIMARY KEY (consumer, event_id)
+);
+
+CREATE TABLE platform.timers (
+  id           uuid        PRIMARY KEY DEFAULT uuidv7(),
+  kind         text        NOT NULL,                 -- OFFER_EXPIRY, SEARCH_TIMEOUT
+  aggregate_id uuid        NOT NULL,
+  payload      jsonb       NOT NULL DEFAULT '{}',
+  due_at       timestamptz NOT NULL,
+  attempts     int         NOT NULL DEFAULT 0,
+  last_error   text,
+  parked_at    timestamptz,
+  trace_parent text,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX timers_due ON platform.timers (due_at) WHERE parked_at IS NULL;
+CREATE INDEX timers_by_aggregate ON platform.timers (aggregate_id, kind);
+ALTER TABLE platform.timers SET (autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_threshold = 1000,
+                                 autovacuum_vacuum_cost_delay = 0);    -- churns by design (ADR-005)
+
+CREATE TABLE platform.idempotency_keys (
+  principal       text        NOT NULL,              -- user ID, or the webhook provider
+  key             text        NOT NULL CHECK (length(key) BETWEEN 1 AND 255),
+  request_hash    bytea       NOT NULL,              -- SHA-256 of method, path template, path values, body
+  response_status int         NOT NULL,              -- 0 while the owning transaction runs
+  response_body   text,
+  resource_id     uuid,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  expires_at      timestamptz NOT NULL,
+  PRIMARY KEY (principal, key)
+);
+CREATE INDEX idempotency_expiry ON platform.idempotency_keys (expires_at);
+
+CREATE TABLE platform.leases (
+  name       text PRIMARY KEY,                       -- outbox-relay, job:<name>, reconciler:<city>, city-owner:<city>
+  holder     text,
+  token      bigint NOT NULL DEFAULT 0,              -- fencing token, +1 on every acquisition
+  expires_at timestamptz
+);
+```
+
+### 4.2 audit
+
+```sql
+CREATE TABLE audit.audit_log (
+  id             uuid        NOT NULL,
+  occurred_at    timestamptz NOT NULL,
+  actor_type     text        NOT NULL CHECK (actor_type IN ('RIDER','DRIVER','OPS','ADMIN','SYSTEM')),
+  actor_id       text,
+  action         text        NOT NULL,               -- ride.cancel, driver.suspend, fare_rule.publish, route.read …
+  entity_type    text        NOT NULL,
+  entity_id      text        NOT NULL,
+  reason         text,
+  request_id     text,
+  correlation_id text,
+  before_state   jsonb,
+  after_state    jsonb,
+  PRIMARY KEY (occurred_at, id)
+) PARTITION BY RANGE (occurred_at);                  -- monthly partitions, created 2 months ahead
+CREATE INDEX audit_by_entity ON audit.audit_log (entity_type, entity_id, occurred_at);
+-- Append-only: a trigger raises on UPDATE and DELETE. Dropping a whole expired partition is still possible.
+CREATE FUNCTION audit.reject_change() RETURNS trigger LANGUAGE plpgsql AS
+  $$ BEGIN RAISE EXCEPTION 'audit_log is append-only'; END $$;
+CREATE TRIGGER audit_append_only BEFORE UPDATE OR DELETE ON audit.audit_log
+  FOR EACH ROW EXECUTE FUNCTION audit.reject_change();
+```
+
+### 4.3 identity, rider, driver
+
+```sql
+CREATE TABLE identity.users (
+  id         uuid PRIMARY KEY DEFAULT uuidv7(),
+  phone      text NOT NULL UNIQUE CHECK (phone ~ '^\+[1-9][0-9]{7,14}$'),
+  roles      text[] NOT NULL CHECK (roles <@ ARRAY['RIDER','DRIVER','OPS','ADMIN'] AND cardinality(roles) > 0),
+  status     text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','DISABLED')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  version    int NOT NULL DEFAULT 0
+);
+CREATE TABLE identity.otp_challenges (
+  id          uuid PRIMARY KEY,
+  phone       text NOT NULL,
+  code_hmac   bytea NOT NULL,                        -- HMAC-SHA256(code, server secret); never the code itself
+  attempts    smallint NOT NULL DEFAULT 0,
+  expires_at  timestamptz NOT NULL,
+  consumed_at timestamptz,
+  request_ip  inet,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX otp_by_phone ON identity.otp_challenges (phone, created_at DESC);
+CREATE TABLE identity.refresh_tokens (
+  id         uuid PRIMARY KEY,
+  family_id  uuid NOT NULL,
+  user_id    uuid NOT NULL REFERENCES identity.users (id),
+  token_hash bytea NOT NULL UNIQUE,                  -- SHA-256 of a 256-bit random token
+  issued_at  timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  rotated_at timestamptz,
+  revoked_at timestamptz
+);
+CREATE INDEX refresh_by_family ON identity.refresh_tokens (family_id);
+
+CREATE TABLE rider.riders (
+  user_id    uuid PRIMARY KEY,
+  first_name text, last_name text, email text,
+  default_payment_method_id uuid,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  version    int NOT NULL DEFAULT 0
+);
+CREATE TABLE rider.saved_places (
+  id         uuid PRIMARY KEY,
+  rider_id   uuid NOT NULL REFERENCES rider.riders (user_id),
+  label      text NOT NULL CHECK (length(label) BETWEEN 1 AND 40),
+  name       text NOT NULL CHECK (length(name) <= 200),
+  lat        double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
+  lon        double precision NOT NULL CHECK (lon BETWEEN -180 AND 180),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (rider_id, label)
+);
+CREATE TABLE rider.payment_methods (
+  id           uuid PRIMARY KEY,
+  rider_id     uuid NOT NULL REFERENCES rider.riders (user_id),
+  type         text NOT NULL CHECK (type IN ('CASH','CARD','UPI')),
+  provider_ref text,                                 -- mock token; never a card number
+  display      text NOT NULL,                        -- "Visa •• 4242", "ri***@okbank", "Cash"
+  active       boolean NOT NULL DEFAULT true,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  CHECK ((type = 'CASH') = (provider_ref IS NULL))
+);
+CREATE UNIQUE INDEX one_cash_method ON rider.payment_methods (rider_id) WHERE type = 'CASH';
+
+CREATE TABLE driver.drivers (
+  id                uuid PRIMARY KEY,                -- the driver's user ID
+  city_id           text NOT NULL,
+  first_name        text NOT NULL, last_name text,
+  verification      text NOT NULL DEFAULT 'PENDING' CHECK (verification IN ('PENDING','VERIFIED','REJECTED')),
+  suspended         boolean NOT NULL DEFAULT false,
+  suspension_reason text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  version           int NOT NULL DEFAULT 0
+);
+CREATE TABLE driver.vehicles (
+  id         uuid PRIMARY KEY,
+  driver_id  uuid NOT NULL REFERENCES driver.drivers (id),
+  category   text NOT NULL,
+  plate      text NOT NULL UNIQUE,
+  make text NOT NULL, model text NOT NULL, colour text NOT NULL,
+  active     boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  version    int NOT NULL DEFAULT 0
+);
+CREATE TABLE driver.status_changes (                 -- verification and suspension history
+  id          uuid PRIMARY KEY,
+  driver_id   uuid NOT NULL REFERENCES driver.drivers (id),
+  kind        text NOT NULL CHECK (kind IN ('VERIFICATION','SUSPENSION','REINSTATEMENT')),
+  from_value  text, to_value text NOT NULL,
+  reason      text, actor_id text NOT NULL,
+  occurred_at timestamptz NOT NULL
+);
+```
+
+### 4.4 geography and pricing
+
+```sql
+CREATE TABLE geography.cities (
+  id         text PRIMARY KEY CHECK (id ~ '^[a-z]{3,8}$'),      -- also the Valkey hash tag: {blr}
+  name       text NOT NULL,
+  time_zone  text NOT NULL,                                     -- Asia/Kolkata
+  currency   char(3) NOT NULL,
+  bounds     geometry(Polygon, 4326) NOT NULL,                  -- bounding box for location validation
+  active     boolean NOT NULL DEFAULT true,
+  version    int NOT NULL DEFAULT 0
+);
+CREATE TABLE geography.service_areas (
+  id      uuid PRIMARY KEY,
+  city_id text NOT NULL REFERENCES geography.cities (id),
+  area    geometry(MultiPolygon, 4326) NOT NULL CHECK (ST_IsValid(area)),
+  active  boolean NOT NULL DEFAULT true
+);
+CREATE INDEX service_areas_gist ON geography.service_areas USING gist (area) WHERE active;
+CREATE TABLE geography.special_areas (               -- zones that take precedence over H3 cells
+  id       uuid PRIMARY KEY,
+  city_id  text NOT NULL REFERENCES geography.cities (id),
+  code     text NOT NULL UNIQUE,                     -- BLR-AIRPORT
+  name     text NOT NULL,
+  kind     text NOT NULL CHECK (kind IN ('AIRPORT','STATION','STADIUM','OTHER')),
+  area     geometry(MultiPolygon, 4326) NOT NULL CHECK (ST_IsValid(area)),
+  priority int NOT NULL DEFAULT 0,                   -- highest wins where areas overlap
+  active   boolean NOT NULL DEFAULT true
+);
+CREATE INDEX special_areas_gist ON geography.special_areas USING gist (area) WHERE active;
+CREATE TABLE geography.categories (code text PRIMARY KEY, name text NOT NULL, seats smallint NOT NULL);
+CREATE TABLE geography.city_categories (
+  city_id          text NOT NULL REFERENCES geography.cities (id),
+  category         text NOT NULL REFERENCES geography.categories (code),
+  active           boolean NOT NULL DEFAULT true,
+  offer_ttl_s      int NOT NULL DEFAULT 15  CHECK (offer_ttl_s BETWEEN 5 AND 60),
+  search_timeout_s int NOT NULL DEFAULT 180 CHECK (search_timeout_s BETWEEN 30 AND 900),
+  radius_start_m   int NOT NULL DEFAULT 2000,
+  radius_step_m    int NOT NULL DEFAULT 1000,
+  radius_max_m     int NOT NULL DEFAULT 6000,
+  ranker           text NOT NULL DEFAULT 'nearest',  -- nearest, eta, weighted (V4)
+  version          int NOT NULL DEFAULT 0,
+  PRIMARY KEY (city_id, category),
+  CHECK (radius_start_m <= radius_max_m)
+);
+
+CREATE TABLE pricing.fare_rules (
+  id             uuid PRIMARY KEY,
+  city_id        text NOT NULL,
+  category       text NOT NULL,
+  version        int NOT NULL,
+  effective_from timestamptz NOT NULL,
+  base_paise     bigint NOT NULL CHECK (base_paise >= 0),
+  per_km_paise   bigint NOT NULL CHECK (per_km_paise >= 0),
+  per_min_paise  bigint NOT NULL CHECK (per_min_paise >= 0),
+  minimum_paise  bigint NOT NULL CHECK (minimum_paise >= 0),
+  booking_fee_paise bigint NOT NULL CHECK (booking_fee_paise >= 0),
+  tax_bp         int NOT NULL CHECK (tax_bp BETWEEN 0 AND 5000),
+  commission_bp  int NOT NULL CHECK (commission_bp BETWEEN 0 AND 5000),
+  currency       char(3) NOT NULL,
+  created_by     uuid NOT NULL,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (city_id, category, version)
+);
+CREATE INDEX fare_rules_current ON pricing.fare_rules (city_id, category, effective_from DESC);
+CREATE TABLE pricing.fee_rules (                     -- versioned like fare rules (ADR-012)
+  id                     uuid PRIMARY KEY,
+  city_id                text NOT NULL,
+  category               text NOT NULL,
+  version                int NOT NULL,
+  effective_from         timestamptz NOT NULL,
+  cancellation_fee_paise bigint NOT NULL CHECK (cancellation_fee_paise >= 0),
+  no_show_fee_paise      bigint NOT NULL CHECK (no_show_fee_paise >= 0),
+  free_cancel_window_s   int NOT NULL DEFAULT 120,
+  late_grace_s           int NOT NULL DEFAULT 300,
+  pickup_wait_s          int NOT NULL DEFAULT 300,
+  commission_bp          int NOT NULL CHECK (commission_bp BETWEEN 0 AND 5000),
+  currency               char(3) NOT NULL,
+  created_by             uuid NOT NULL,
+  created_at             timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (city_id, category, version)
+);
+CREATE TABLE pricing.surge_rules (                   -- V1: admin-set multipliers by zone and time window
+  id           uuid PRIMARY KEY,
+  city_id      text NOT NULL,
+  zone_id      text NOT NULL,                        -- H3 cell or area:<code>
+  days_of_week smallint[] NOT NULL CHECK (days_of_week <@ ARRAY[1,2,3,4,5,6,7]::smallint[]),
+  start_local  time NOT NULL,
+  end_local    time NOT NULL,                        -- may wrap past midnight
+  multiplier   numeric(3,2) NOT NULL CHECK (multiplier BETWEEN 1.00 AND 2.00),
+  active       boolean NOT NULL DEFAULT true,
+  created_by   uuid NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  version      int NOT NULL DEFAULT 0
+);
+CREATE INDEX surge_rules_by_zone ON pricing.surge_rules (city_id, zone_id) WHERE active;
+CREATE TABLE pricing.quotes (
+  id                uuid PRIMARY KEY,
+  rider_id          uuid NOT NULL,
+  city_id           text NOT NULL,
+  category          text NOT NULL,
+  pickup_lat double precision NOT NULL, pickup_lon double precision NOT NULL,
+  dropoff_lat double precision NOT NULL, dropoff_lon double precision NOT NULL,
+  pickup_zone       text NOT NULL,
+  distance_m        int NOT NULL CHECK (distance_m >= 0),
+  duration_s        int NOT NULL CHECK (duration_s >= 0),
+  route_source      text NOT NULL CHECK (route_source IN ('MOCK','OSRM','MOCK_FALLBACK')),
+  fare_rule_id      uuid NOT NULL,
+  fee_rule_id       uuid NOT NULL,
+  surge_multiplier  numeric(3,2) NOT NULL,
+  surge_source      text NOT NULL CHECK (surge_source IN ('NONE','RULE','COMPUTED')),
+  base_paise bigint NOT NULL, distance_paise bigint NOT NULL, time_paise bigint NOT NULL,
+  surge_paise bigint NOT NULL, minimum_topup_paise bigint NOT NULL, booking_fee_paise bigint NOT NULL,
+  tax_paise bigint NOT NULL, rounding_paise bigint NOT NULL, total_paise bigint NOT NULL,
+  commission_paise  bigint NOT NULL,
+  currency          char(3) NOT NULL,
+  pickup_eta_s      int,                             -- NULL when no driver is within the maximum radius
+  created_at        timestamptz NOT NULL,
+  expires_at        timestamptz NOT NULL,
+  used_by_ride_id   uuid UNIQUE,
+  used_at           timestamptz
+);
+CREATE INDEX quotes_retention ON pricing.quotes (created_at);
+CREATE INDEX quotes_by_zone ON pricing.quotes (city_id, pickup_zone, created_at);   -- surge demand (V4)
+```
+
+The fare breakdown is stored as typed columns, not a JSON document, because the formula is fixed by FR-PR2 and typed columns get `CHECK` constraints. Extensions (airport fee, promotions) arrive as ordered `FareComponent`s with their own rows when they are built (ADR-012).
+
+### 4.5 ride
+
+```sql
+CREATE TABLE ride.rides (
+  id                    uuid PRIMARY KEY,
+  rider_id              uuid NOT NULL,
+  city_id               text NOT NULL,
+  category              text NOT NULL,
+  quote_id              uuid NOT NULL UNIQUE,
+  pickup_lat double precision NOT NULL, pickup_lon double precision NOT NULL,
+  dropoff_lat double precision NOT NULL, dropoff_lon double precision NOT NULL,
+  pickup_zone           text NOT NULL,
+  distance_m            int NOT NULL,                -- quoted route
+  duration_s            int NOT NULL,
+  fare_paise            bigint NOT NULL,
+  commission_paise      bigint NOT NULL,
+  currency              char(3) NOT NULL,
+  fee_rule_id           uuid NOT NULL,
+  payment_method_id     uuid NOT NULL,
+  payment_method_type   text NOT NULL CHECK (payment_method_type IN ('CASH','CARD','UPI')),
+  status                text NOT NULL CHECK (status IN ('SEARCHING','DRIVER_ASSIGNED','DRIVER_ARRIVED','IN_TRIP',
+                          'COMPLETED','CANCELLED_BY_RIDER','CANCELLED_BY_DRIVER','CANCELLED_BY_SYSTEM','DRIVER_NOT_FOUND')),
+  version               int NOT NULL DEFAULT 0,
+  search_generation     int NOT NULL DEFAULT 1,      -- +1 each time the ride re-enters SEARCHING
+  driver_id             uuid,
+  vehicle_id            uuid,
+  offer_id              uuid,
+  rider_snapshot        jsonb NOT NULL,              -- first name and rating at booking (NFR-10: no phone)
+  driver_snapshot       jsonb,                       -- first name, rating, vehicle at assignment
+  pin                   char(4),                     -- shown only to the rider; never logged or published
+  pin_attempts          smallint NOT NULL DEFAULT 0,
+  promised_pickup_eta_s int,
+  requested_at          timestamptz NOT NULL,
+  assigned_at           timestamptz, arrived_at timestamptz, started_at timestamptz,
+  completed_at          timestamptz, ended_at timestamptz,
+  start_device_time     timestamptz, complete_device_time timestamptz,      -- offline commands (V2)
+  cancelled_by          text CHECK (cancelled_by IN ('RIDER','DRIVER','SYSTEM')),
+  cancel_reason         text,
+  fee_purpose           text CHECK (fee_purpose IN ('CANCELLATION_FEE','NO_SHOW_FEE')),
+  fee_paise             bigint,
+  reassign_count        int NOT NULL DEFAULT 0,
+  CHECK (status NOT IN ('DRIVER_ASSIGNED','DRIVER_ARRIVED','IN_TRIP','COMPLETED') OR driver_id IS NOT NULL),
+  CHECK ((fee_purpose IS NULL) = (fee_paise IS NULL))
+);
+CREATE UNIQUE INDEX one_active_ride_per_rider ON ride.rides (rider_id)
+  WHERE status IN ('SEARCHING','DRIVER_ASSIGNED','DRIVER_ARRIVED','IN_TRIP');
+CREATE UNIQUE INDEX one_active_ride_per_driver ON ride.rides (driver_id)
+  WHERE status IN ('DRIVER_ASSIGNED','DRIVER_ARRIVED','IN_TRIP');
+CREATE INDEX rides_rider_history ON ride.rides (rider_id, requested_at DESC, id);
+CREATE INDEX rides_driver_history ON ride.rides (driver_id, requested_at DESC, id) WHERE driver_id IS NOT NULL;
+CREATE INDEX rides_active ON ride.rides (city_id, status, requested_at)
+  WHERE status IN ('SEARCHING','DRIVER_ASSIGNED','DRIVER_ARRIVED','IN_TRIP');
+CREATE INDEX rides_by_zone ON ride.rides (city_id, pickup_zone, requested_at);        -- surge demand (V4)
+
+CREATE TABLE ride.transitions (
+  id          uuid PRIMARY KEY,
+  ride_id     uuid NOT NULL REFERENCES ride.rides (id),
+  version     int NOT NULL,                          -- the ride's version after the transition
+  from_status text,
+  to_status   text NOT NULL,
+  command     text NOT NULL,                         -- BOOK, ACCEPT, SEARCH_TIMEOUT, CANCEL, ARRIVE, …
+  actor_type  text NOT NULL,
+  actor_id    text,
+  reason      text,
+  occurred_at timestamptz NOT NULL,
+  device_time timestamptz,
+  request_id  text,
+  UNIQUE (ride_id, version)
+);
+
+CREATE TABLE ride.flags (                            -- the operations review queue
+  id          uuid PRIMARY KEY,
+  ride_id     uuid NOT NULL REFERENCES ride.rides (id),
+  kind        text NOT NULL CHECK (kind IN ('ARRIVED_FAR','DRIVER_CANCELLED_AT_PICKUP','PIN_LOCKED',
+                                            'OFFLINE_CONFLICT','STUCK')),
+  details     jsonb NOT NULL DEFAULT '{}',
+  created_at  timestamptz NOT NULL,
+  resolved_at timestamptz, resolved_by uuid, resolution text
+);
+CREATE UNIQUE INDEX one_open_flag_per_kind ON ride.flags (ride_id, kind) WHERE resolved_at IS NULL;
+CREATE INDEX flags_open ON ride.flags (created_at) WHERE resolved_at IS NULL;
+```
+
+### 4.6 dispatch
+
+```sql
+CREATE TABLE dispatch.driver_availability (            -- one row per driver, kept while offline
+  driver_id           uuid PRIMARY KEY,
+  city_id             text NOT NULL,
+  status              text NOT NULL CHECK (status IN ('OFFLINE','AVAILABLE','OFFERED','ASSIGNED','ON_TRIP')),
+  category            text,
+  vehicle_id          uuid,
+  offer_id            uuid,
+  ride_id             uuid,
+  consecutive_expired smallint NOT NULL DEFAULT 0,
+  offline_after_ride  boolean NOT NULL DEFAULT false,      -- suspended during a ride
+  online_since        timestamptz,
+  status_changed_at   timestamptz NOT NULL,
+  version             bigint NOT NULL DEFAULT 0,           -- monotonic for the driver's lifetime (§9.4)
+  CHECK ((status = 'OFFERED') = (offer_id IS NOT NULL)),
+  CHECK ((status IN ('ASSIGNED','ON_TRIP')) = (ride_id IS NOT NULL)),
+  CHECK ((status = 'OFFLINE') = (online_since IS NULL)),
+  CHECK (status = 'OFFLINE' OR (category IS NOT NULL AND vehicle_id IS NOT NULL))
+);
+CREATE INDEX availability_online ON dispatch.driver_availability (city_id, status) WHERE status <> 'OFFLINE';
+
+CREATE TABLE dispatch.driver_sessions (
+  id             uuid PRIMARY KEY,
+  driver_id      uuid NOT NULL,
+  city_id        text NOT NULL,
+  vehicle_id     uuid NOT NULL,
+  category       text NOT NULL,
+  online_at      timestamptz NOT NULL,
+  offline_at     timestamptz,
+  offline_reason text CHECK (offline_reason IN ('DRIVER','SILENT','UNREACHABLE','UNRESPONSIVE','SUSPENDED'))
+);
+CREATE INDEX sessions_by_driver ON dispatch.driver_sessions (driver_id, online_at DESC);
+
+CREATE TABLE dispatch.offers (
+  id           uuid PRIMARY KEY,
+  ride_id      uuid NOT NULL,
+  driver_id    uuid NOT NULL,
+  attempt      int NOT NULL,
+  status       text NOT NULL CHECK (status IN ('PENDING','ACCEPTED','DECLINED','EXPIRED','WITHDRAWN')),
+  rank         smallint NOT NULL,
+  distance_m   int NOT NULL,
+  eta_s        int,                                  -- V4 ETA ranking
+  created_at   timestamptz NOT NULL,
+  expires_at   timestamptz NOT NULL,
+  seen_at      timestamptz,                          -- first fetch or WebSocket acknowledgement
+  responded_at timestamptz,
+  end_reason   text,                                 -- DRIVER_OFFLINE, RIDER_CANCELLED, SEARCH_TIMEOUT, OPS_CANCELLED, SUSPENDED
+  version      int NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX one_pending_offer_per_driver ON dispatch.offers (driver_id) WHERE status = 'PENDING';
+CREATE UNIQUE INDEX one_pending_offer_per_ride ON dispatch.offers (ride_id) WHERE status = 'PENDING';
+CREATE UNIQUE INDEX one_offer_per_ride_and_driver ON dispatch.offers (ride_id, driver_id);    -- FR-DS3
+
+CREATE TABLE dispatch.search_tasks (
+  ride_id    uuid PRIMARY KEY,
+  city_id    text NOT NULL,
+  category   text NOT NULL,
+  pickup_lat double precision NOT NULL, pickup_lon double precision NOT NULL,
+  priority   smallint NOT NULL DEFAULT 0,             -- 1 for reassigned rides
+  attempt    int NOT NULL DEFAULT 0,
+  radius_m   int NOT NULL,
+  due_at     timestamptz,                             -- NULL while an offer is pending
+  backoff_s  int NOT NULL DEFAULT 0,                  -- live-index outage backoff
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+CREATE INDEX search_tasks_due ON dispatch.search_tasks (priority DESC, due_at) WHERE due_at IS NOT NULL;
+
+CREATE TABLE dispatch.decisions (                       -- FR-DS6, kept 30 days
+  id               uuid PRIMARY KEY,
+  ride_id          uuid NOT NULL,
+  attempt          int NOT NULL,
+  created_at       timestamptz NOT NULL,
+  strategy         text NOT NULL,
+  strategy_version text NOT NULL,
+  radius_m         int NOT NULL,
+  outcome          text NOT NULL CHECK (outcome IN ('OFFERED','NO_CANDIDATES','ALL_RESERVATIONS_LOST','INDEX_UNAVAILABLE')),
+  chosen_driver_id uuid,
+  offer_id         uuid,
+  detail           jsonb NOT NULL,                      -- candidates, exclusions, reservation tries (§8.3)
+  duration_us      int NOT NULL
+);
+CREATE INDEX decisions_by_ride ON dispatch.decisions (ride_id, created_at);
+CREATE INDEX decisions_retention ON dispatch.decisions (created_at);
+
+CREATE TABLE dispatch.driver_stats (                    -- acceptance and cancellation rates (V4 ranking)
+  driver_id              uuid PRIMARY KEY,
+  offers                 int NOT NULL DEFAULT 0,
+  accepted               int NOT NULL DEFAULT 0,
+  declined               int NOT NULL DEFAULT 0,
+  expired                int NOT NULL DEFAULT 0,
+  cancelled_after_accept int NOT NULL DEFAULT 0,
+  updated_at             timestamptz NOT NULL
+);
+```
+
+### 4.7 payment, notification, rating
+
+```sql
+CREATE TABLE payment.charges (
+  id                   uuid PRIMARY KEY,
+  ride_id              uuid NOT NULL,
+  rider_id             uuid NOT NULL,
+  driver_id            uuid,
+  purpose              text NOT NULL CHECK (purpose IN ('FARE','CANCELLATION_FEE','NO_SHOW_FEE')),
+  amount_paise         bigint NOT NULL CHECK (amount_paise > 0),
+  currency             char(3) NOT NULL,
+  method_type          text NOT NULL CHECK (method_type IN ('CASH','CARD','UPI')),
+  payment_method_id    uuid,
+  status               text NOT NULL CHECK (status IN ('PENDING','SUCCEEDED','FAILED','UNKNOWN')),
+  succeeded_attempt_id uuid,
+  refunded_paise       bigint NOT NULL DEFAULT 0,      -- reserved by non-failed refunds
+  created_at           timestamptz NOT NULL,
+  updated_at           timestamptz NOT NULL,
+  version              int NOT NULL DEFAULT 0,
+  UNIQUE (ride_id, purpose),
+  CHECK (refunded_paise BETWEEN 0 AND amount_paise)
+);
+CREATE INDEX charges_dues ON payment.charges (rider_id) WHERE status = 'FAILED';
+CREATE INDEX charges_by_status ON payment.charges (status, updated_at) WHERE status IN ('FAILED','UNKNOWN');
+
+CREATE TABLE payment.charge_attempts (
+  id                  uuid PRIMARY KEY,               -- also the provider's idempotency key
+  charge_id           uuid NOT NULL REFERENCES payment.charges (id),
+  seq                 smallint NOT NULL,
+  status              text NOT NULL CHECK (status IN ('PENDING','IN_FLIGHT','SUCCEEDED','FAILED','UNKNOWN')),
+  provider            text NOT NULL,
+  payment_method_id   uuid NOT NULL,
+  provider_payment_id text,
+  failure_code        text,
+  created_at          timestamptz NOT NULL,
+  sent_at             timestamptz,
+  completed_at        timestamptz,
+  lease_until         timestamptz,                    -- while IN_FLIGHT
+  next_check_at       timestamptz,                    -- while UNKNOWN
+  checks              smallint NOT NULL DEFAULT 0,
+  version             int NOT NULL DEFAULT 0,
+  UNIQUE (charge_id, seq)
+);
+CREATE UNIQUE INDEX one_open_attempt_per_charge ON payment.charge_attempts (charge_id)
+  WHERE status IN ('PENDING','IN_FLIGHT','UNKNOWN');
+CREATE INDEX attempts_to_send ON payment.charge_attempts (created_at) WHERE status = 'PENDING';
+CREATE INDEX attempts_in_flight ON payment.charge_attempts (lease_until) WHERE status = 'IN_FLIGHT';
+CREATE INDEX attempts_to_check ON payment.charge_attempts (next_check_at) WHERE status = 'UNKNOWN';
+
+CREATE TABLE payment.refunds (
+  id                 uuid PRIMARY KEY,                -- also the provider's idempotency key
+  charge_id          uuid NOT NULL REFERENCES payment.charges (id),
+  amount_paise       bigint NOT NULL CHECK (amount_paise > 0),
+  reason             text NOT NULL,
+  automatic          boolean NOT NULL DEFAULT false,  -- late-success refunds
+  status             text NOT NULL CHECK (status IN ('PENDING','IN_FLIGHT','SUCCEEDED','FAILED','UNKNOWN')),
+  provider_refund_id text,
+  requested_by       text NOT NULL,
+  created_at         timestamptz NOT NULL,
+  completed_at       timestamptz,
+  lease_until        timestamptz,
+  next_check_at      timestamptz,
+  checks             smallint NOT NULL DEFAULT 0,
+  version            int NOT NULL DEFAULT 0
+);
+
+CREATE TABLE payment.provider_webhooks (
+  provider          text NOT NULL,
+  provider_event_id text NOT NULL,
+  event_type        text NOT NULL,
+  received_at       timestamptz NOT NULL,
+  raw_body          text NOT NULL,                    -- byte-exact, as signed
+  processed_at      timestamptz,
+  outcome           text,
+  PRIMARY KEY (provider, provider_event_id)
+);
+
+CREATE TABLE payment.driver_earnings (                -- read model (ADR-014)
+  id                   uuid PRIMARY KEY,
+  driver_id            uuid NOT NULL,
+  ride_id              uuid NOT NULL,
+  kind                 text NOT NULL CHECK (kind IN ('FARE','CANCELLATION_FEE','NO_SHOW_FEE','ADJUSTMENT')),
+  source_id            uuid NOT NULL,                  -- ride (fare), fee charge, or refund (adjustment)
+  gross_paise          bigint NOT NULL,
+  commission_paise     bigint NOT NULL,
+  net_paise            bigint NOT NULL,
+  cash_collected_paise bigint NOT NULL DEFAULT 0,
+  currency             char(3) NOT NULL,
+  earned_at            timestamptz NOT NULL,
+  earned_on            date NOT NULL,                  -- in the city's time zone
+  UNIQUE (source_id, kind)
+);
+CREATE INDEX earnings_by_driver ON payment.driver_earnings (driver_id, earned_on);
+
+CREATE TABLE notification.notifications (
+  id           uuid PRIMARY KEY,
+  recipient_id uuid NOT NULL,
+  kind         text NOT NULL,                          -- DRIVER_ASSIGNED, TRIP_COMPLETED, PAYMENT_FAILED, …
+  ride_id      uuid,
+  event_id     uuid,
+  payload      jsonb NOT NULL,
+  created_at   timestamptz NOT NULL,
+  UNIQUE (event_id, recipient_id, kind)
+);
+CREATE TABLE notification.deliveries (
+  id              uuid PRIMARY KEY,
+  notification_id uuid NOT NULL REFERENCES notification.notifications (id),
+  channel         text NOT NULL CHECK (channel IN ('PUSH','SMS')),
+  status          text NOT NULL CHECK (status IN ('PENDING','SENT','DEAD')),
+  attempts        smallint NOT NULL DEFAULT 0,
+  next_attempt_at timestamptz NOT NULL,
+  last_error      text,
+  sent_at         timestamptz
+);
+CREATE INDEX deliveries_due ON notification.deliveries (next_attempt_at) WHERE status = 'PENDING';
+
+CREATE TABLE rating.rating_windows (
+  ride_id      uuid PRIMARY KEY,
+  rider_id     uuid NOT NULL,
+  driver_id    uuid NOT NULL,
+  completed_at timestamptz NOT NULL,
+  closes_at    timestamptz NOT NULL
+);
+CREATE TABLE rating.ratings (
+  id         uuid PRIMARY KEY,
+  ride_id    uuid NOT NULL REFERENCES rating.rating_windows (ride_id),
+  rater_role text NOT NULL CHECK (rater_role IN ('RIDER','DRIVER')),
+  rater_id   uuid NOT NULL,
+  ratee_id   uuid NOT NULL,
+  stars      smallint NOT NULL CHECK (stars BETWEEN 1 AND 5),
+  comment    text CHECK (length(comment) <= 500),
+  created_at timestamptz NOT NULL,
+  UNIQUE (ride_id, rater_role)
+);
+CREATE INDEX ratings_by_ratee ON rating.ratings (ratee_id, created_at DESC);
+CREATE TABLE rating.summaries (
+  user_id    uuid NOT NULL,
+  party      text NOT NULL CHECK (party IN ('RIDER','DRIVER')),
+  average    numeric(3,2) NOT NULL,
+  count      int NOT NULL,                             -- ratings in the average, at most 100
+  updated_at timestamptz NOT NULL,
+  PRIMARY KEY (user_id, party)
+);
+```
+
+### 4.8 Later tables
+
+```sql
+-- V2: trip routes (ADR-016). The writer sets received_day; generated columns can't be partition keys.
+CREATE TABLE location.trip_points (
+  received_day date NOT NULL,
+  ride_id      uuid NOT NULL,
+  seq          bigint NOT NULL,
+  driver_id    uuid NOT NULL,
+  received_at  timestamptz NOT NULL,
+  device_time  timestamptz,
+  lat double precision NOT NULL, lon double precision NOT NULL,
+  accuracy_m real, speed_mps real, heading_deg real,
+  flags        smallint NOT NULL DEFAULT 0,            -- 1 poor accuracy, 2 implausible, 4 replayed
+  PRIMARY KEY (received_day, ride_id, seq)
+) PARTITION BY RANGE (received_day);
+
+-- V3: dead letters mirrored from Kafka for listing and re-driving (§19.1)
+CREATE TABLE platform.dead_letters (
+  id uuid PRIMARY KEY, consumer text NOT NULL, topic text NOT NULL, kafka_partition int NOT NULL,
+  kafka_offset bigint NOT NULL, event_id uuid, error text NOT NULL, payload text NOT NULL,
+  created_at timestamptz NOT NULL, redriven_at timestamptz,
+  UNIQUE (topic, kafka_partition, kafka_offset)
+);
+
+-- V4: computed surge (§19.2)
+CREATE TABLE pricing.surge_steps (city_id text, ratio_from numeric(5,2), multiplier numeric(3,2),
+                                  PRIMARY KEY (city_id, ratio_from));
+CREATE TABLE pricing.surge_multipliers (city_id text, zone_id text, multiplier numeric(3,2) NOT NULL,
+  demand int NOT NULL, supply int NOT NULL, computed_at timestamptz NOT NULL, PRIMARY KEY (city_id, zone_id));
+CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at timestamptz, multiplier numeric(3,2),
+  demand int, supply int, PRIMARY KEY (city_id, zone_id, computed_at));       -- kept 7 days
+```
+
+### 4.9 Migrations
+
+- One folder and one history table per module (ADR-019); `platform` and `audit` migrate first, then the rest in the dependency order of §2.1.
+- Forward-only. A change that a running version still depends on goes expand → migrate data → contract, across at least two releases (HLD §16.3).
+- Partitions (audit monthly, trip points daily) are created ahead by the maintenance job (§5.7), never by migrations, so a missed migration can't stop writes.
+- Seed data for local runs and demos lives in `db/seed/` and loads only in the `local` profile: Bengaluru with its service area, airport and station areas, four categories, fare and fee rules, a few surge rules, 2,000 verified drivers with vehicles, 500 riders, and one operations and one admin account **(assumed counts for riders and staff)**.
+
+## 5. Platform mechanisms
+
+### 5.1 Idempotency (ADR-009)
+
+1. Every command that changes a ride, an offer, a driver's status, a payment or a rating requires `Idempotency-Key` (1–255 visible ASCII characters). The endpoint computes `request_hash` = SHA-256 of method, path template, path values and the canonical JSON body.
+2. Inside the command's transaction, before anything else, with `SET LOCAL lock_timeout = '1s'`:
+
+   ```sql
+   INSERT INTO platform.idempotency_keys (principal, key, request_hash, response_status, expires_at)
+   VALUES (:principal, :key, :hash, 0, now() + interval '24 hours')
+   ON CONFLICT (principal, key) DO NOTHING
+   ```
+
+   - **Inserted:** run the command. Its response (status and JSON body) is written to the row just before commit, whatever the status, so a rejection that changed state (a wrong PIN, §7.6) replays exactly.
+   - **Conflict:** the row exists and is committed. A different hash returns `422 IDEMPOTENCY_KEY_REUSED`; otherwise the stored response is returned with `Idempotent-Replayed: true`.
+   - **Lock timeout:** another transaction holds the same key uncommitted, so it is still running: `409 IDEMPOTENCY_KEY_IN_PROGRESS` with `Retry-After: 1`.
+3. If the command's transaction rolls back (an exception, a business rejection that changed nothing, a crash), the key row disappears with it, and a retry runs the command again. That is safe because nothing happened.
+4. Exempt endpoints, each because a repeat is harmless or has its own deduplication:
+   - sign-in and token calls (§12): a stored response would hand the same tokens to anyone replaying the key;
+   - quotes: a duplicate quote is just another quote;
+   - location updates (sequence numbers), WebSocket tickets (single use) and webhooks (provider event IDs);
+   - profile, saved-place, payment-method, flag and admin endpoints: a duplicate is either rejected by a unique constraint or version check, or harmless, such as an identical new rule version.
+5. Rows expire after 24 h; the cleanup job deletes them in batches.
+
+### 5.2 Outbox and relay (ADR-008)
+
+- `Outbox.append(event)` inserts one row in the caller's transaction. It takes the trace context and correlation ID from the current context and fails if there is no transaction.
+- **The relay** runs in the `worker` role under the lease `outbox-relay` (§5.5), in a loop:
+
+  ```sql
+  SELECT * FROM platform.outbox WHERE published_at IS NULL ORDER BY id LIMIT 500
+  ```
+
+  - **V1–V2:** each event is delivered to every in-process consumer subscribed to its type (§5.3), in ID order. Then the batch is marked published with a fenced update (`… WHERE id = ANY(:ids) AND <lease token still ours>`).
+  - **V3+:** the batch is produced to Kafka (§19.1) and marked published after the acknowledgements.
+  - It polls every 100 ms when idle **(assumed)** and loops at once while batches are full.
+- **Order:** rows of one aggregate are inserted only after the previous transaction on that aggregate committed (it held the aggregate's row lock), so their IDs increase with the aggregate version. The same holds for events that share a partition key and are causally ordered, such as a ride's offers: the next offer can only be created after the previous one ended. Independent facts about one ride, such as the rider's and the driver's ratings, may be published in either order. The relay never skips a row: it selects by the published flag, not by a high-water mark, so a late commit with a lower ID is picked up by the next batch.
+- **Retention:** published rows are deleted after 7 days.
+
+### 5.3 Consumers and the inbox
+
+```java
+public interface EventConsumer {
+    String name();                                  // "payment.charges", "notification.ride", …
+    Set<String> eventTypes();
+    void handle(EventEnvelope event);               // runs inside the consumer's transaction
+}
+```
+
+- **Delivery (V1–V2):** for each event and subscribed consumer, the relay opens a transaction, inserts `(consumer, event_id)` into `platform.inbox` (`ON CONFLICT DO NOTHING`; zero rows means already handled, so it commits and moves on), calls `handle`, and commits.
+- **Failures:** a failing handler is retried 3 times with backoff (0.5 s, 1 s, 2 s). After that, the event goes to `platform.failed_deliveries` for that consumer, and delivery continues with the next event, so one poison event can't stall the stream (HLD §12.2). Operations can re-drive it.
+- **Rules for handlers:** only database work inside the transaction; no network calls. The payment consumer records a charge and its first attempt; the provider call happens later in the payment executor (§11.2). This keeps a slow provider from stalling the relay.
+- **Mapping:** a handler maps `event.payload()` (a JSON tree) into its own record type, validated against the producer's JSON Schema in contract tests (ADR-019).
+- **V3:** the same `EventConsumer` beans run behind Kafka listeners instead of the relay (§19.1).
+
+### 5.4 Timers (ADR-005)
+
+- `Timers.schedule` inserts a row in the caller's transaction. `Timers.cancel` deletes matching rows **without waiting** (§6.2):
+
+  ```sql
+  DELETE FROM platform.timers WHERE id IN (
+    SELECT id FROM platform.timers WHERE aggregate_id = :id AND kind = :kind FOR UPDATE SKIP LOCKED)
+  ```
+
+- **The poller** runs in the `dispatch` role every 250 ms with a few virtual-thread workers per node (default 4 **(assumed)**). Each worker repeats, until nothing is due or 50 timers were handled:
+
+  ```sql
+  BEGIN;
+  SELECT * FROM platform.timers
+   WHERE due_at <= clock_timestamp() AND parked_at IS NULL
+   ORDER BY due_at LIMIT 1 FOR UPDATE SKIP LOCKED;
+  -- run the handler for its kind, in this transaction
+  DELETE FROM platform.timers WHERE id = :id;
+  COMMIT;
+  ```
+
+  One timer per transaction keeps a slow or failing handler from holding or rolling back others. S-2 measured batches of 200 per transaction; this costs a few more round trips per timer, a fair price at ≤ 2,000 timers/s.
+- **Handler failure:** roll back, then in a new transaction add 1 to `attempts`, store `last_error` and set `due_at = now() + least(2^attempts, 60) s`. After 10 failures the timer is parked (`parked_at`) and an alert fires (HLD §12.2).
+- **Handlers** re-check state and are no-ops when the state moved on: firing is at least once.
+
+| Kind | Owner | Payload | Fires | Handler |
+|---|---|---|---|---|
+| `OFFER_EXPIRY` | dispatch | offer ID | `expires_at` | §8.6 |
+| `SEARCH_TIMEOUT` | ride | `search_generation` | 3 min after the ride (re)entered `SEARCHING` | §7.3 |
+
+Other waits are not timers. A no-show is allowed from 5 min after arrival; free cancellation is computed at the moment of cancelling; silent drivers are found by the sweeper (§8.9); payment checks wait on `next_check_at` (§11.3), because their handlers make network calls.
+
+### 5.5 Leases
+
+```sql
+-- acquire or take over an expired lease
+UPDATE platform.leases SET holder = :me, token = token + 1, expires_at = now() + :ttl
+ WHERE name = :name AND (holder IS NULL OR expires_at < now())
+RETURNING token;
+-- renew, only while still the holder
+UPDATE platform.leases SET expires_at = now() + :ttl
+ WHERE name = :name AND holder = :me AND token = :token;
+```
+
+- TTL 10 s, renewed every 3 s **(assumed)**. A holder that fails to renew stops working at once.
+- Writes that must not come from a stale holder carry the token: the relay's "mark published" update checks the lease row in the same statement. This is the Job Scheduler's fencing pattern.
+- Users: `outbox-relay`; `job:<name>` for maintenance jobs; `reconciler:<city>`; `city-owner:<city>` from V4 (§19.2).
+
+### 5.6 Audit log
+
+- `AuditLog.record` inserts into `audit.audit_log` in the caller's transaction.
+- Recorded: every ride transition, availability change caused by a person or a sweeper, verification and suspension change, charge, attempt and refund outcome, fare, fee and surge rule change, operations and admin action, and trip-route read by operations (FR-A1, FR-A2).
+- `before_state` and `after_state` hold the changed fields only. Phone numbers, PINs and positions are never written to it.
+
+### 5.7 Background jobs and retention
+
+| Job | Role | Schedule | Work |
+|---|---|---|---|
+| Outbox relay | worker | Continuous, under its lease | §5.2 |
+| Payment executor and status checks | worker | Every 250 ms | §11.2, §11.3 |
+| Notification deliveries | worker | Every 500 ms | §15.4 |
+| Stuck-ride detector | worker | Every minute | Ride flags `STUCK` (thresholds in [ride lifecycle §9](ride-lifecycle.md#9-recovery)) |
+| Partition maintenance | worker | Hourly | Audit: create 2 months ahead, drop after 3 years. Trip points (V2): create 3 days ahead, drop after 90 days |
+| Retention | worker | Hourly, 10,000-row batches | Idempotency keys (expired); outbox (published > 7 days); inbox (> 14 days); unused quotes (> 24 h after expiry); used quotes, dispatch decisions (> 30 days); one-time codes (> 1 day); refresh tokens (> 1 day after expiry) |
+| Timer poller, search-task poller | dispatch | Every 250 ms | §5.4, §8.3 |
+| Sweeper | dispatch | Every 5 s per city | §8.9 |
+| Mirror reconciler | dispatch | Every 30 s per city, under its lease | §8.10 |
+
+Jobs that must run once per cluster take a `job:<name>` lease; pollers that use `SKIP LOCKED` need none.
+
+### 5.8 Rate limits
+
+- `RateLimiter.tryAcquire(scope, id, cost)` returns allowed, or rejected with a retry delay. Buckets come from HLD §14.
+- **V1:** token buckets in process memory, per node. **V2+:** one Valkey script per call on `rl:{scope}:{id}` (token bucket with the refill computed from the stored timestamp), so limits hold across nodes.
+- If Valkey is unavailable, the limiter allows the request (fails open), except for one-time codes, which fail closed (HLD §12.1).
+- A rejected request gets `429 RATE_LIMITED` with `Retry-After`. Its `Idempotency-Key` isn't consumed, because the check runs before the command's transaction.
+
+## 6. Concurrency rules
+
+### 6.1 Lock order
+
+Every transaction that locks more than one of these rows takes them in this order, skipping the ones it doesn't need:
+
+1. **ride** (`ride.rides`)
+2. **driver profile** (`driver.drivers`)
+3. **offer** (`dispatch.offers`)
+4. **driver availability** (`dispatch.driver_availability`)
+
+Two consequences:
+- A transaction that starts from a driver or an offer reads what it needs without a lock first, then locks in order and re-checks. For example, going offline reads the availability row, locks its pending offer, then locks the availability row and checks that it still points to that offer; otherwise it retries.
+- Where one transaction locks several rows of the same kind (batch matching in V4), it locks them in ascending ID order.
+
+### 6.2 Tasks and timers are never waited on
+
+Search tasks and timers are claimed by pollers with `FOR UPDATE SKIP LOCKED` **before** the poller locks the ride, offer or availability row it needs. A fixed position in the order above would deadlock. For example: the search-timeout handler holds its timer and waits for the ride, while an acceptance holds the ride and wants to delete that same timer.
+
+The rule that prevents it:
+- **Pollers claim first.** A search attempt or timer handler holds its task or timer, then may wait for ride, offer and availability locks in the order of §6.1.
+- **Everyone else removes tasks and timers without waiting**, with `SKIP LOCKED`. If a task or timer is locked, a poller is handling it right now. It is left in place, and its handler cleans up: handlers re-check state and stop when the ride or offer moved on.
+- **Nobody holding a ride, offer or availability lock ever waits for a task or timer lock.** Making a task due (`UPDATE … SET due_at = now()`) is the one exception, and it can't block: it happens only when an offer ends, and a task is paused (not claimable) while its offer is pending.
+
+So no transaction waits for a lock held by a transaction that is itself waiting for one of its own locks: there is no cycle, and no deadlock.
+
+### 6.3 Who locks what
+
+| Transaction | Claims first | Then locks, in order | Removes without waiting |
+|---|---|---|---|
+| Book (T1) | — | ride (insert) | — |
+| Search attempt (§8.3) | search task | ride (`FOR SHARE`), availability of each candidate tried | — |
+| Accept (T2) | — | ride, offer, availability | search task, offer timer, search timer |
+| Decline, go offline while offered | — | offer, availability | offer timer |
+| Offer expiry (§8.6) | timer | offer, availability | — |
+| Search timeout (T3) | timer | ride, offer, availability | search task, offer timer |
+| Rider cancels while searching (T4), operations cancel from `SEARCHING` (T13) | — | ride, offer, availability | search task, offer timer, search timer |
+| Driver cancels or is unreachable (T6, T7) | — | ride, availability | — |
+| Other ride commands (T5, T8–T13) | — | ride, availability | — |
+| Suspension (§8.8) | — | driver profile, offer, availability | offer timer |
+| Go online | — | driver profile (`FOR SHARE`), availability | — |
+
+### 6.4 Why the search attempt takes a share lock on the ride
+
+Without it, a rider's cancellation could commit between the attempt's "is it still searching?" check and its new offer. The cancellation would find no pending offer to withdraw, and the new offer would then hold a driver for 15 s on a cancelled ride. With `SELECT … FOR SHARE` on the ride, either the cancel waits for the attempt and then withdraws the new offer, or the attempt waits for the cancel and then finds the ride cancelled. The share lock doesn't block other attempts: a ride has one task, held by one attempt at a time.
+
+## 7. Ride transitions
+
+Meaning, preconditions, fees and events of each transition are in the [ride lifecycle](ride-lifecycle.md#3-transitions). This section gives the transaction steps.
+
+### 7.1 Skeleton of a ride command
+
+1. Idempotency key (§5.1).
+2. `SELECT … FROM ride.rides WHERE id = :id FOR UPDATE`: the first lock in the order (§6.1).
+3. Authorize: the caller must be the ride's rider, its assigned driver, or operations. Otherwise `404`, so a ride's existence isn't revealed.
+4. Natural idempotency: if the same actor's earlier command already produced this command's result, return `200` with the ride (table below).
+5. Look up `(status, command, actor)` in the transition table. Missing entry or failed precondition: `409` with the code from §13.2.
+6. `UPDATE ride.rides SET status = :to, version = version + 1, … WHERE id = :id AND status = :from AND version = :v`. The row lock from step 2 makes this always match; the guard stays as a second line of defence (ADR-010) that turns a bug into a rollback.
+7. In the same transaction: a `ride.transitions` row, outbox events, the audit entry, timer changes, and participant calls (§2.3).
+8. Store the response in the idempotency row and commit. After commit: mirror writes (§8.10) and pushes (V2, §14).
+
+| Command | Recognized as already done when | Answer |
+|---|---|---|
+| Accept | The ride is assigned to this driver through this offer | `200` with the ride |
+| Arrive | `DRIVER_ARRIVED` with this driver | `200` with the ride |
+| Start | `IN_TRIP` or `COMPLETED` with this driver | `200` with the ride |
+| Complete | `COMPLETED` by this driver | `200` with the ride |
+| No-show | `CANCELLED_BY_DRIVER` with reason `NO_SHOW` by this driver | `200` with the ride |
+| Rider cancels | `CANCELLED_BY_RIDER` | `200` with the ride |
+| Driver cancels | The transition log shows this driver's cancellation as the latest change involving them | `200` with the driver's view, which no longer includes rider details |
+
+A driver command on a ride that was reassigned away from that driver gets `409 RIDE_REASSIGNED` (ride lifecycle §4).
+
+### 7.2 Booking (T1)
+
+```text
+POST /v1/rides {quote_id, payment_method_id?}                    rider R, Idempotency-Key
+1. idempotency (R, key)
+2. PricingApi.consume(quote_id, R, ride_id):
+     UPDATE pricing.quotes SET used_by_ride_id = :ride, used_at = now()
+      WHERE id = :quote AND rider_id = :R AND used_by_ride_id IS NULL AND expires_at > now()
+      RETURNING …
+   no row: re-read to answer 404 NOT_FOUND (missing, or another rider's), 409 QUOTE_EXPIRED or 409 QUOTE_ALREADY_USED
+3. PaymentApi.outstandingDues(R) > 0                → 409 DUES_OUTSTANDING
+4. RiderApi.paymentMethod(R, payment_method_id)    → missing or inactive: 422 PAYMENT_METHOD_INVALID
+5. an active ride for R exists                     → 409 ACTIVE_RIDE_EXISTS
+6. INSERT ride.rides (SEARCHING, version 0, search_generation 1, rider snapshot, fare, fee rule and route from the quote)
+   (a unique violation on one_active_ride_per_rider, from a concurrent booking, also maps to ACTIVE_RIDE_EXISTS)
+7. transition (— → SEARCHING, BOOK); outbox RideRequested; audit
+8. Timers.schedule(SEARCH_TIMEOUT, ride, now + search_timeout, {generation: 1})
+9. participant.searchStarted(ride, priority 0)    → INSERT dispatch.search_tasks (due now, radius_start_m)
+10. 201 with the ride; commit
+```
+
+Every check is inside the transaction, so a rejected booking leaves the quote unused.
+
+### 7.3 Search timeout (T3)
+
+The `SEARCH_TIMEOUT` handler runs in the timer's transaction (§5.4):
+
+1. Lock the ride. If it isn't `SEARCHING`, or its `search_generation` differs from the timer's, do nothing: the timer belongs to an earlier search.
+2. `SEARCHING → DRIVER_NOT_FOUND`, `ended_at = now()`.
+3. `participant.searchStopped(ride, SEARCH_TIMEOUT)`: lock the pending offer, set it `WITHDRAWN` and release its driver (`OFFERED → AVAILABLE`); remove the task and the offer timer without waiting; `OfferWithdrawn`.
+4. Outbox `RideNotMatched`; audit.
+
+### 7.4 Cancellations (T4, T6, T8, T11, T13)
+
+`POST /v1/rides/{id}/cancel` is one endpoint; the outcome depends on the caller and the state:
+
+| Caller | State | Transition | Dispatch effect | Fee |
+|---|---|---|---|---|
+| Rider | `SEARCHING` | T4 → `CANCELLED_BY_RIDER` | `searchStopped` | None |
+| Rider | `DRIVER_ASSIGNED`, `DRIVER_ARRIVED` | T8 → `CANCELLED_BY_RIDER` | `driverReleased(AVAILABLE, RIDER_CANCELLED)` | Fee rule below |
+| Driver | `DRIVER_ASSIGNED` | T6 → `SEARCHING` | `driverReleased(AVAILABLE, DRIVER_CANCELLED)`, `searchStarted(priority 1)` | None |
+| Driver | `DRIVER_ARRIVED` | T11 → `CANCELLED_BY_DRIVER` | `driverReleased(AVAILABLE, DRIVER_CANCELLED)` | None; flag `DRIVER_CANCELLED_AT_PICKUP` |
+| Operations (`/v1/ops/rides/{id}/cancel`) | Any non-terminal | T13 → `CANCELLED_BY_SYSTEM` | `searchStopped` or `driverReleased` | Optional, chosen by operations, at most the fee rule's amount |
+
+T6 also clears the ride's driver fields, adds 1 to `search_generation` and `reassign_count`, and schedules a new `SEARCH_TIMEOUT` with the new generation. The event is `DriverUnassigned` (reason `DRIVER_CANCELLED`). The driver is excluded from the new search because they already have an offer row for this ride (FR-DS3).
+
+The rider's fee uses the ride's fee rule, whose version was fixed at booking:
+
+```java
+Optional<Fee> feeOnRiderCancel(Ride ride, FeeRule rule, Instant now) {
+    if (ride.status() == SEARCHING) return Optional.empty();
+    if (!now.isAfter(ride.assignedAt().plus(rule.freeCancelWindow()))) return Optional.empty();   // within 2 min
+    Instant lateAfter = ride.assignedAt().plusSeconds(ride.promisedPickupEtaS()).plus(rule.lateGrace());
+    boolean driverLate = now.isAfter(lateAfter)
+            && (ride.arrivedAt() == null || ride.arrivedAt().isAfter(lateAfter));                  // > ETA + 5 min
+    if (driverLate) return Optional.empty();
+    return Optional.of(new Fee(CANCELLATION_FEE, rule.cancellationFee(), rule.commissionBp()));
+}
+```
+
+The fee, with the rule that produced it, is stored on the ride (`fee_purpose`, `fee_paise`) and carried in `RideCancelled`; the payment module charges it (§11.1).
+
+### 7.5 Arrival (T5)
+
+- Before the transaction: read the ride without a lock, then the driver's live position from the index.
+- In the transaction: `DRIVER_ASSIGNED → DRIVER_ARRIVED`, `arrived_at = now()`, outbox `DriverArrived`.
+- If the position is more than 300 m from the pickup, or unknown, add the flag `ARRIVED_FAR` with the distance. The arrival still succeeds: GPS can be wrong, and the rider can see where the driver is.
+
+### 7.6 Trip start with PIN (T9)
+
+1. Lock the ride; the caller must be its driver; status `DRIVER_ARRIVED`.
+2. `pin_attempts ≥ 5` → `409 PIN_LOCKED`.
+3. The PIN differs (constant-time comparison) → `pin_attempts + 1`, and on the fifth failure the flag `PIN_LOCKED`. **Commit** and answer `422 WRONG_PIN` with `attempts_left`. The idempotency row stores this response (§5.1), so a retried request doesn't count twice.
+4. The PIN matches → `IN_TRIP`, `started_at`, `participant.tripStarted` (availability `ASSIGNED → ON_TRIP`), outbox `TripStarted`.
+
+A ride whose PIN is locked can be cancelled by the driver (T11) or by operations; operations see the flag.
+
+### 7.7 No-show (T10)
+
+`DRIVER_ARRIVED` and `now ≥ arrived_at + pickup_wait` (5 min from the fee rule); otherwise `409 NO_SHOW_TOO_EARLY` with `available_at`. Effects: `CANCELLED_BY_DRIVER` with reason `NO_SHOW`, the no-show fee on the ride, `driverReleased(AVAILABLE, NO_SHOW)`, outbox `RideCancelled`.
+
+### 7.8 Completion (T12)
+
+`IN_TRIP → COMPLETED`, `completed_at = ended_at = now()`. The final fare is the quoted fare (FR-RD6). Then `driverReleased(AVAILABLE, COMPLETED)`, which becomes `OFFLINE` if the driver was suspended during the trip. Outbox `TripCompleted` carries what payment, earnings and ratings need: rider, driver, fare, commission, payment method, city and completion time (§15.1).
+
+### 7.9 Unreachable driver (T7)
+
+Called by the sweeper (§8.9), one transaction per ride: `RideAssignment.unassignUnreachable(ride, driver)` locks the ride and checks it is still `DRIVER_ASSIGNED` to that driver. Then, as T6: the ride returns to `SEARCHING` with priority, and the driver is excluded from it. The release goes to `OFFLINE` (reason `UNREACHABLE`), and the event is `DriverUnassigned` with reason `DRIVER_UNREACHABLE`.
+
+### 7.10 Offline driver commands (V2)
+
+- `start` and `complete` accept `device_time`, stored in `start_device_time` and `complete_device_time` and on the transition row (FR-RD8). The client's command ID is the idempotency key.
+- A late command for a ride that was reassigned away from the driver gets `409 RIDE_REASSIGNED`. In the same committed transaction, the ride gets the flag `OFFLINE_CONFLICT`, with both drivers and the device time, because a physical trip may be under way ([ride lifecycle §7](ride-lifecycle.md#7-offline-driver-commands-fr-rd8)).
+- Idempotency keys live 24 h. A command replayed later still can't apply twice, because the state machine recognizes it (§7.1).
+
+### 7.11 Flags and stuck rides
+
+- Flags (`ride.flags`) are the operations review queue: `ARRIVED_FAR`, `DRIVER_CANCELLED_AT_PICKUP`, `PIN_LOCKED`, `OFFLINE_CONFLICT`, `STUCK`. At most one open flag per ride and kind.
+- The stuck-ride detector (worker, every minute) asks `RideQueries.overdue(thresholds)` for rides past the thresholds in [ride lifecycle §9](ride-lifecycle.md#9-recovery). It opens a `STUCK` flag for each and sets the gauge `rides_stuck{status}`, which has an alert.
+
+## 8. Dispatch
+
+### 8.1 Availability transitions
+
+| From → to | Trigger | Section |
+|---|---|---|
+| `OFFLINE → AVAILABLE` | Go online | §8.2 |
+| `AVAILABLE → OFFERED` | Reservation by a search attempt | §8.3 |
+| `OFFERED → ASSIGNED` | Accept | §8.4 |
+| `OFFERED → AVAILABLE` | Decline, expiry, withdrawal | §8.6, §8.7, §7.3, §7.4 |
+| `OFFERED → OFFLINE` | Go offline (declines first), suspension, third seen offer expired in a row | §8.2, §8.8, §8.6 |
+| `ASSIGNED → ON_TRIP` | Trip starts | §7.6 |
+| `ASSIGNED → AVAILABLE` | Ride cancelled, or the driver cancels | §7.4 |
+| `ASSIGNED → OFFLINE` | Unreachable for 2 min | §7.9 |
+| `ON_TRIP → AVAILABLE` | Trip completed, or cancelled by operations | §7.8, §7.4 |
+| `ASSIGNED`/`ON_TRIP → OFFLINE` | The ride ends while `offline_after_ride` is set (suspended during the ride) | §8.8 |
+| `AVAILABLE → OFFLINE` | Go offline, silent for 10 min, suspension | §8.2, §8.9, §8.8 |
+
+Every change adds 1 to `version` and sets `status_changed_at`. Going online or offline writes `DriverWentOnline` or `DriverWentOffline` and closes or opens a `driver_sessions` row. After commit the live-index mirror is updated with the new version (§8.10).
+
+### 8.2 Going online and offline
+
+```text
+POST /v1/drivers/me/online {vehicle_id}                          driver D, Idempotency-Key
+tx: DriverApi.lockEligibility(D, vehicle)       driver and vehicle rows FOR SHARE: verified, not suspended,
+                                                vehicle active and D's, category active in D's city
+                                                → otherwise 409 DRIVER_NOT_ELIGIBLE
+    INSERT dispatch.driver_availability (D, city, OFFLINE, version 0) ON CONFLICT DO NOTHING   -- first time only
+    UPDATE dispatch.driver_availability
+       SET status = 'AVAILABLE', category = :c, vehicle_id = :v, online_since = now(),
+           consecutive_expired = 0, status_changed_at = now(), version = version + 1
+     WHERE driver_id = :D AND status = 'OFFLINE'
+    no row: already online with this vehicle → 200 (natural idempotency); otherwise 409 INVALID_TRANSITION
+    driver_sessions row; outbox DriverWentOnline; audit
+after commit: mirror AVAILABLE. The driver becomes a candidate with its first location update.
+```
+
+`POST /v1/drivers/me/offline` reads the availability row without a lock, then:
+
+| Status | Action |
+|---|---|
+| `ASSIGNED`, `ON_TRIP` | `409 DRIVER_HAS_ACTIVE_RIDE` (FR-D3) |
+| `OFFERED` | Lock the offer: `PENDING → DECLINED` (end reason `DRIVER_OFFLINE`), task due now, offer timer cancelled. Then lock the availability row, check it still points to that offer, and set `OFFLINE` |
+| `AVAILABLE` | Lock the availability row, check it is still `AVAILABLE`, set `OFFLINE` |
+| `OFFLINE` | `200` |
+
+Going offline clears category, vehicle, offer and ride, closes the session with reason `DRIVER`, and writes `DriverWentOffline` and the audit entry.
+
+### 8.3 Search attempt
+
+Every `dispatch` node polls every 250 ms with 4 workers **(assumed)**. Each worker handles tasks one transaction at a time, up to 20 per tick:
+
+```sql
+BEGIN;
+SELECT * FROM dispatch.search_tasks
+ WHERE due_at <= clock_timestamp()
+ ORDER BY priority DESC, due_at
+ LIMIT 1 FOR UPDATE SKIP LOCKED;
+-- RideAssignment.lockIfSearching(ride_id): SELECT … FROM ride.rides WHERE id = ? FOR SHARE (§6.4)
+--   not SEARCHING → DELETE FROM dispatch.search_tasks WHERE ride_id = ?; COMMIT
+SELECT driver_id FROM dispatch.offers WHERE ride_id = :ride;              -- excluded: offered before (FR-DS3)
+-- candidates = LiveIndex.nearby(city, category, pickup, radius_m, 20, 30 s)
+-- ranked     = ranker.rank(request, candidates − excluded)
+-- for each of the first 5 ranked candidates, until one row changes:
+UPDATE dispatch.driver_availability
+   SET status = 'OFFERED', offer_id = :offer, status_changed_at = now(), version = version + 1
+ WHERE driver_id = :candidate AND status = 'AVAILABLE' AND city_id = :city AND category = :category
+RETURNING version;
+-- reserved:
+--   INSERT dispatch.offers (PENDING, expires_at = clock_timestamp() + offer_ttl)
+--   Timers.schedule(OFFER_EXPIRY, offer, expires_at)
+--   UPDATE dispatch.search_tasks SET due_at = NULL, attempt = attempt + 1, backoff_s = 0, updated_at = now()
+--   INSERT dispatch.decisions (OFFERED); outbox OfferCreated; driver_stats.offers + 1
+-- nothing reserved:
+--   UPDATE dispatch.search_tasks SET attempt = attempt + 1,
+--          radius_m = least(radius_m + radius_step_m, radius_max_m),
+--          due_at = clock_timestamp() + (a reservation was lost ? 1 s : 5 s)
+--   INSERT dispatch.decisions (NO_CANDIDATES or ALL_RESERVATIONS_LOST)
+COMMIT;
+-- after commit: mirror OFFERED (the driver leaves the GEO set); push the offer (V2)
+```
+
+- **Live index unavailable** (timeout or connection error): outcome `INDEX_UNAVAILABLE`, `backoff_s` doubles from 1 up to 10, and the task is due after it (dispatch §12).
+- **The radius widens only when nothing was reserved.** After a decline or expiry, the task runs again at the same radius, because other candidates may be inside it.
+- **The decision record's `detail`:**
+
+  ```json
+  {"candidates": [{"driver_id": "0199a4c2-…", "distance_m": 840, "seen_ago_s": 3, "score": 840.0}],
+   "excluded": {"already_offered": 2},
+   "tries": [{"driver_id": "0199a4c2-…", "result": "LOST"}, {"driver_id": "0199a4c3-…", "result": "RESERVED"}],
+   "index_ms": 0.4}
+  ```
+
+### 8.4 Acceptance (T2)
+
+```text
+POST /v1/offers/{offer_id}/accept                                driver D, Idempotency-Key
+before the transaction (no locks, may call the routing provider):
+  offer = SELECT ride_id, driver_id FROM dispatch.offers … ; missing or not D's → 404
+  vehicle = the vehicle on D's availability row
+  promised_pickup_eta_s = route(D's live position → pickup).duration   (fallback: from the offer's distance)
+  driver_snapshot = DriverApi.snapshot(D, vehicle) + RatingApi.summary(D, DRIVER)
+tx:
+ 1. RideAssignment.assign(...):                                   -- ride first (§6.1)
+      SELECT … FROM ride.rides WHERE id = :ride FOR UPDATE
+      assigned to D through this offer → return it (natural idempotency)
+      not SEARCHING → 409 OFFER_NO_LONGER_AVAILABLE
+      UPDATE ride.rides SET status = 'DRIVER_ASSIGNED', driver_id, vehicle_id, offer_id, pin = 4 random digits,
+             promised_pickup_eta_s, driver_snapshot, assigned_at = now(), version = version + 1
+       WHERE id = :ride AND status = 'SEARCHING' AND version = :v
+      transition, outbox DriverAssigned, audit; Timers.cancel(SEARCH_TIMEOUT)
+ 2. UPDATE dispatch.offers SET status = 'ACCEPTED', responded_at = now(), version = version + 1
+     WHERE id = :offer AND driver_id = :D AND status = 'PENDING' AND expires_at > clock_timestamp()
+    no row → roll back everything → 409 OFFER_NO_LONGER_AVAILABLE
+ 3. UPDATE dispatch.driver_availability
+       SET status = 'ASSIGNED', ride_id = :ride, offer_id = NULL, consecutive_expired = 0,
+           status_changed_at = now(), version = version + 1
+     WHERE driver_id = :D AND status = 'OFFERED' AND offer_id = :offer
+    no row → roll back → 409 (impossible while the invariants hold; logged as an error)
+ 4. remove the search task and the offer timer without waiting
+ 5. outbox OfferAccepted; driver_stats.accepted + 1
+commit; after commit: mirror ASSIGNED; push ride_status on ride:{ride} and drv:{D} (V2)
+```
+
+The driver's response contains pickup, drop-off, fare and the rider's first name and rating. It never contains the PIN (FR-RD5).
+
+### 8.5 Offer delivery
+
+- **V1:** the driver app polls `GET /v1/drivers/me/offer` (every 2 s in the demo). **V2:** the offer is pushed on `drv:{id}`, and the app also fetches it on every connect (ADR-006).
+- The first fetch, or the app's `offer_seen` WebSocket message, records that the driver saw the offer:
+
+  ```sql
+  UPDATE dispatch.offers SET seen_at = now() WHERE id = :offer AND driver_id = :D AND seen_at IS NULL
+  ```
+
+- Every offer message carries `expires_in_ms`, computed from `expires_at` and the database clock, so a wrong device clock can't change the countdown.
+
+### 8.6 Offer expiry
+
+`OFFER_EXPIRY` handler, in the timer's transaction:
+
+1. Lock the offer. If it isn't `PENDING`, do nothing.
+2. `PENDING → EXPIRED`.
+3. Lock the availability row. Add 1 to `consecutive_expired` only if `seen_at` is set: an offer the driver never saw (a lost push, a dead connection) says nothing about the driver.
+4. At 3, the driver goes `OFFLINE` (session reason `UNRESPONSIVE`) and is notified why. Otherwise `AVAILABLE`.
+5. Make the ride's task due now; outbox `OfferExpired`; `driver_stats.expired + 1`.
+6. After commit: mirror, and push `offer_withdrawn` with reason `EXPIRED` (V2).
+
+### 8.7 Decline
+
+Lock the offer (`PENDING` and the caller's): `DECLINED`, `responded_at`. Then the availability row goes to `AVAILABLE` with `consecutive_expired = 0`; the task becomes due now; the offer timer is cancelled without waiting; outbox `OfferDeclined`; `driver_stats.declined + 1`. An offer that is already `DECLINED` answers `200`; one that expired, was withdrawn or was accepted answers `409 OFFER_NO_LONGER_AVAILABLE`.
+
+### 8.8 Suspension and reinstatement
+
+```text
+POST /v1/ops/drivers/{id}/suspend {reason}                       operations, Idempotency-Key
+tx: DriverApi.suspend: driver FOR UPDATE; suspended = true; status_changes row; outbox DriverSuspended; audit
+    DispatchApi.onDriverSuspended (same transaction, so suspension blocks offers at once, FR-D5):
+      OFFERED             → lock the offer: WITHDRAWN (SUSPENDED), task due now, offer timer cancelled
+                            → availability OFFLINE (SUSPENDED)
+      AVAILABLE           → OFFLINE (SUSPENDED)
+      ASSIGNED, ON_TRIP   → offline_after_ride = true; the ride continues
+after commit: mirror; push driver_status on drv:{id} (V2)
+```
+
+Reinstatement clears `suspended`. The driver then goes online again normally.
+
+### 8.9 Sweeper
+
+Runs in the `dispatch` role every 5 s per city:
+
+1. `LiveIndex.sweep(city, now − 30 s)`: drivers silent for 30 s leave the matching sets (§9.4). The query script's freshness filter covers the gap between sweeps.
+2. Read the index epoch: when the index started holding this city's data (§9.3).
+3. A driver is **silent since t** if its last update is older than t. A driver with no update since the epoch counts as last seen at the later of the epoch and its `online_since`.
+4. **Unreachable:** silent for 2 min and `ASSIGNED` → T7 (§7.9), one transaction per ride.
+5. **Idle:** silent for 10 min and `AVAILABLE` → `OFFLINE` with session reason `SILENT`, one transaction per driver.
+6. **Safety valve:** steps 4 and 5 are skipped, the counter `sweeper_safety_valve_total{rule}` increases and an alert fires, when either:
+   - the epoch is younger than the rule's threshold, because silence isn't meaningful yet after the index was rebuilt;
+   - the step would act on more than max(5, 10% of the city's drivers in that state) at once **(assumed)**. Mass silence means the platform lost contact with its drivers (a `realtime` outage, a network partition), not that the drivers left.
+
+`ON_TRIP` drivers are never swept: the trip continues and the app's queued commands arrive later (FR-RD8).
+
+### 8.10 Mirror writes and the reconciler
+
+- After commit, a transaction-synchronization callback applies each availability change to the live index with its new version: `LiveIndex.mirror(city, driver, status, version, category, ride)`. The mirror script ignores versions older than the one it holds (§9.4), so post-commit writes may arrive in any order.
+- A failed mirror write is logged and counted (`live_index_mirror_failures_total`). The reconciler repairs it.
+- **Reconciler**, per city every 30 s under the lease `reconciler:<city>`:
+  1. read the online drivers from PostgreSQL, plus drivers who went offline in the last 10 min (the tombstone lifetime);
+  2. read their mirror entries from the index;
+  3. re-apply the database state, with its version, wherever the index differs or has no entry;
+  4. remove GEO-set members that aren't `AVAILABLE` in the database;
+  5. set the epoch if it is missing. A city found empty is reconciled at once, which is how matching recovers within NFR-7's 10 s after a total loss of Valkey.
+
+### 8.11 Ranking
+
+```java
+public interface CandidateRanker {
+    String name();
+    String version();
+    List<RankedCandidate> rank(SearchRequest request, List<Candidate> candidates);
+}
+record Candidate(UUID driverId, int distanceM, Instant lastSeen, OptionalDouble headingDeg) {}
+```
+
+- `NearestDriverRanker` (V1): distance ascending; ties go to the fresher position, then the lower driver ID, so results are deterministic.
+- The ranker is chosen per city and category (`geography.city_categories.ranker`). Each decision records the ranker's name and version.
+- V4 adds `eta` and `weighted` (§19.2).
+
+## 9. Location and the live index
+
+### 9.1 The port
+
+```java
+public interface LiveIndex {
+    UpdateResult update(CityId city, UUID driverId, String category, LocationUpdate update);
+    List<Candidate> nearby(CityId city, String category, GeoPoint at, int radiusM, int k, Duration freshness);
+    Optional<LivePosition> position(CityId city, UUID driverId);
+    void mirror(CityId city, UUID driverId, MirrorState state);     // status, version, category, ride
+    List<UUID> sweep(CityId city, Instant silentBefore);            // returns drivers removed from matching
+    Map<UUID, Instant> lastSeen(CityId city, Collection<UUID> drivers);
+    Instant epoch(CityId city);
+    Snapshot snapshot(CityId city, BoundingBox box, int max);       // operations map (V2)
+}
+```
+
+`UpdateResult` is `APPLIED`, `STALE`, `OFFLINE` or `CATEGORY_MISMATCH`, with the mirror's status, the active ride and quality flags.
+
+### 9.2 V1: in-memory implementation
+
+- Per city, a `ConcurrentHashMap<UUID, Entry>`. Each update or mirror write runs in `compute`, so it is atomic per driver, with the same rules as the scripts: sequence check, status from the mirror, version guard, offline tombstones.
+- `nearby` scans the city's `AVAILABLE` entries of the category, filters by freshness and radius (haversine), sorts and returns k. A linear scan of ≤ 2,000 drivers costs well under a millisecond.
+- The epoch is the process start time.
+- One contract test suite runs against this implementation and the Valkey one (§17).
+
+### 9.3 V2: Valkey keys
+
+| Key | Type | Fields or members |
+|---|---|---|
+| `{city}:drv:<id>` | Hash | `status`, `sv` (availability version), `cat`, `ride`, `seq`, `ts` (last receive time, ms), `plat`, `plon`, `pts` (last usable position and its time), `acc`, `hdg`, `spd`, `bad` (implausible streak). An `OFFLINE` hash is a tombstone that expires after 10 min |
+| `{city}:geo:<category>` | GEO set | `AVAILABLE` drivers of the category at their last usable position |
+| `{city}:geo:online` | GEO set | Every online driver at its last usable position (operations map, ADR-022) |
+| `{city}:seen` | Sorted set | Last receive time per driver |
+| `{city}:epoch` | String | When this city's index was (re)started; set by the reconciler with `SET NX` |
+
+### 9.4 Scripts
+
+Loaded and called as in [ADR-020](decisions/ADR-020-valkey-access.md): Lua files, `EVALSHA` with an `EVAL` fallback. All keys of a call share the `{city}` tag.
+
+**Location update** (`live_update.lua`): one call per update, in sequence order.
+
+```lua
+-- KEYS: 1 {city}:drv:<id>  2 {city}:seen  3 {city}:geo:<category>  4 {city}:geo:online
+-- ARGV: 1 id  2 seq  3 now_ms  4 lat  5 lon  6 accuracy_m  7 heading  8 speed  9 expected category
+--       10 max accuracy (m)  11 max speed (m/s)  12 implausible streak that re-anchors the position
+-- returns {code, status, ride, flags}: code 1 applied, 0 stale, -1 offline, -2 category mismatch
+local s = redis.call('HMGET', KEYS[1], 'status', 'seq', 'cat', 'ride', 'plat', 'plon', 'pts', 'bad')
+if not s[1] or s[1] == 'OFFLINE' then return {-1, '', '', 0} end
+if s[3] ~= ARGV[9] then return {-2, s[3] or '', '', 0} end
+if s[2] and tonumber(ARGV[2]) <= tonumber(s[2]) then return {0, s[1], s[4] or '', 0} end
+local now, lat, lon = tonumber(ARGV[3]), tonumber(ARGV[4]), tonumber(ARGV[5])
+redis.call('HSET', KEYS[1], 'seq', ARGV[2], 'ts', ARGV[3])
+redis.call('ZADD', KEYS[2], now, ARGV[1])
+local flags = 0
+if tonumber(ARGV[6]) > tonumber(ARGV[10]) then
+  flags = 1                                                  -- poor accuracy: a sign of life only
+elseif s[5] then
+  local la1, lo1 = math.rad(tonumber(s[5])), math.rad(tonumber(s[6]))
+  local la2, lo2 = math.rad(lat), math.rad(lon)
+  local a = math.sin((la2 - la1) / 2) ^ 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ^ 2
+  local metres = 2 * 6371008.8 * math.asin(math.sqrt(a))
+  local secs = math.max((now - tonumber(s[7])) / 1000, 1)
+  local bad = (tonumber(s[8]) or 0) + 1
+  if metres / secs > tonumber(ARGV[11]) and bad < tonumber(ARGV[12]) then
+    redis.call('HSET', KEYS[1], 'bad', bad)
+    flags = 2                                                -- implausible jump: not used for matching
+  end
+end
+if flags == 0 then
+  redis.call('HSET', KEYS[1], 'plat', ARGV[4], 'plon', ARGV[5], 'pts', ARGV[3],
+             'acc', ARGV[6], 'hdg', ARGV[7], 'spd', ARGV[8], 'bad', 0)
+  redis.call('GEOADD', KEYS[4], lon, lat, ARGV[1])
+  if s[1] == 'AVAILABLE' then redis.call('GEOADD', KEYS[3], lon, lat, ARGV[1]) end
+end
+return {1, s[1], s[4] or '', flags}
+```
+
+The caller passes the GEO key of the category it believes the driver is in, learned from the driver's status messages. On `-2` it retries once with the category the script returned. The status always comes from the mirror, never from the app.
+
+**Candidate query** (`live_query.lua`), as measured in spike S-1:
+
+```lua
+-- KEYS: 1 {city}:geo:<category>  2 {city}:seen
+-- ARGV: 1 lon  2 lat  3 radius_m  4 k  5 oldest acceptable last-seen (ms)
+local res = redis.call('GEOSEARCH', KEYS[1], 'FROMLONLAT', ARGV[1], ARGV[2], 'BYRADIUS', ARGV[3], 'm',
+                       'ASC', 'COUNT', 2 * tonumber(ARGV[4]), 'WITHDIST')
+local out, k, oldest = {}, tonumber(ARGV[4]), tonumber(ARGV[5])
+for _, m in ipairs(res) do
+  local ts = redis.call('ZSCORE', KEYS[2], m[1])
+  if ts and tonumber(ts) >= oldest then
+    out[#out + 1] = {m[1], m[2], ts}
+    if #out >= k then break end
+  end
+end
+return out
+```
+
+**Status mirror** (`live_mirror.lua`), version-guarded so post-commit writes can arrive in any order:
+
+```lua
+-- KEYS: 1 {city}:drv:<id>  2 {city}:seen  3 {city}:geo:<category>  4 {city}:geo:online
+-- ARGV: 1 id  2 status  3 availability version  4 category  5 ride id or ''  6 tombstone TTL (s)
+local cur = redis.call('HMGET', KEYS[1], 'sv', 'plat', 'plon')
+if cur[1] and tonumber(cur[1]) >= tonumber(ARGV[3]) then return 0 end    -- not newer than what we hold
+if ARGV[2] == 'OFFLINE' then
+  redis.call('DEL', KEYS[1])
+  redis.call('HSET', KEYS[1], 'status', 'OFFLINE', 'sv', ARGV[3])        -- tombstone keeps the version
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  redis.call('ZREM', KEYS[3], ARGV[1])
+  redis.call('ZREM', KEYS[4], ARGV[1])
+  return 1
+end
+redis.call('PERSIST', KEYS[1])
+redis.call('HSET', KEYS[1], 'status', ARGV[2], 'sv', ARGV[3], 'cat', ARGV[4], 'ride', ARGV[5])
+if ARGV[2] == 'AVAILABLE' and cur[2] then
+  redis.call('GEOADD', KEYS[3], cur[3], cur[2], ARGV[1])
+else
+  redis.call('ZREM', KEYS[3], ARGV[1])
+end
+return 1
+```
+
+- The tombstone also clears the stored sequence number, so a driver who comes back online on a new device, whose sequence restarted, isn't ignored.
+- Because a driver's availability row is never deleted, its version only grows (§4.6), and a stale write can never overwrite a newer one.
+
+**Sweep** (`live_sweep.lua`): drivers that fell silent within the last minute leave the matching sets. Older silences were removed by earlier sweeps, and `ZREM` is idempotent.
+
+```lua
+-- KEYS: 1 {city}:seen  2..n {city}:geo:<category> for every category of the city
+-- ARGV: 1 silence cutoff (ms)  2 window start (ms, cutoff − 60 000)
+local silent = redis.call('ZRANGE', KEYS[1], ARGV[2], '(' .. ARGV[1], 'BYSCORE', 'LIMIT', 0, 5000)
+if #silent > 0 then
+  for i = 2, #KEYS do redis.call('ZREM', KEYS[i], unpack(silent)) end
+end
+return silent
+```
+
+**Operations snapshot** (`live_snapshot.lua`, V2): `GEOSEARCH {city}:geo:online … BYBOX … WITHCOORD COUNT max`, then `HMGET status, cat, ride, ts` for each member, returned in one reply.
+
+### 9.5 Quality rules (V2, FR-L4)
+
+| Rule | Threshold | Effect |
+|---|---|---|
+| Poor accuracy | Worse than 100 m | Counts as a sign of life (`seen`), not as a position; flag 1 |
+| Implausible jump | Implied speed above 150 km/h (41.7 m/s) since the last usable position | Not used; flag 2. The third in a row is accepted as the new position (a long tunnel), and logged for spoofing review |
+| Rate | More than 1 update per second per driver | Dropped before the script; counted as `rate_limited` |
+| Bounds | Outside the city's bounding box, or invalid numbers | Dropped; counted as `invalid` |
+
+In V1 the in-memory index applies the sequence and rate rules; the quality rules arrive with V2 in both implementations.
+
+### 9.6 Ingestion
+
+1. The driver comes from the access token (V1) or the WebSocket session (V2), never from the message.
+2. Rate limit: one request per second per driver. A replay batch of up to 100 updates counts as one request (location §3).
+3. Validate numbers and the city's bounding box.
+4. Updates are applied in sequence order, one script call each.
+5. If an update is applied and the driver has an active ride (V2): publish `driver_position` on `ride:{ride}` (§9.7) and buffer a trip point (§9.8).
+6. V3: produce the update to `location.updates` (§19.1).
+7. Count each outcome in `location_updates_total{result}`.
+
+V1's `POST /v1/drivers/me/location` answers `200` with counts of applied, stale and ignored updates and the highest applied sequence number.
+
+### 9.7 Tracking and ETA (V2)
+
+- A rider's `realtime` node subscribes to `ride:{id}` after checking ownership. The driver's node publishes each applied position there, with `seq` and the latest `eta_s`.
+- **ETA:** recomputed through the routing provider at most every 15 s per ride (location §7): to the pickup before arrival, to the drop-off during the trip. The value is kept in the driver's node; after a reconnect elsewhere it is recomputed sooner, which is harmless.
+- **"Driver arriving" notification** (FR-N1): the first time the pickup ETA drops to 2 min or less **(assumed)**, `SET {city}:arriving:<ride> 1 NX EX 3600` guards against repeats, and the node calls `NotificationApi.notify`.
+
+### 9.8 Trip points (V2, ADR-016)
+
+- Each `realtime` node buffers applied points of drivers with an active ride, replayed points included.
+- Flush every 2 s or 500 points: one multi-row `INSERT … ON CONFLICT DO NOTHING` into `location.trip_points`, with `received_day` = the UTC date of `received_at`.
+- **PostgreSQL unavailable:** keep buffering for up to 30 s or 50,000 points **(assumed)**, then drop the oldest and count `trip_points_dropped_total` (location §11).
+- **Reads:** `GET /v1/rides/{id}/route` returns the points in sequence order, thinned to at most 2,000 for display. Riders and drivers see their own rides; operations reads are audited (FR-A2).
+
+## 10. Pricing
+
+### 10.1 Zones and service areas
+
+One query answers both "is the pickup inside a service area?" and "which special area contains it?":
+
+```sql
+SELECT sa.city_id,
+       (SELECT sp.code FROM geography.special_areas sp
+         WHERE sp.city_id = sa.city_id AND sp.active AND ST_Covers(sp.area, p.pt)
+         ORDER BY sp.priority DESC LIMIT 1) AS special_area
+  FROM (SELECT ST_SetSRID(ST_MakePoint(:lon, :lat), 4326) AS pt) p
+  JOIN geography.service_areas sa ON sa.active AND ST_Covers(sa.area, p.pt)
+ LIMIT 1;
+```
+
+- No row → `422 OUTSIDE_SERVICE_AREA`.
+- The zone is `area:<code>` when a special area matched; otherwise the H3 resolution-7 cell of the point, from the `h3-java` library (ADR-012).
+
+### 10.2 Fare calculation
+
+Integer paise throughout, each product rounded half-up to the paisa, and one rounding of the total up to whole rupees at the end (FR-PR2):
+
+| Step | Formula |
+|---|---|
+| `distance` | `per_km_paise × distance_m ÷ 1000` |
+| `time` | `per_min_paise × duration_s ÷ 60` |
+| `pre_surge` | `base + distance + time` |
+| `surge` | `pre_surge × (multiplier − 1)` |
+| `minimum_topup` | `max(0, minimum − (pre_surge + surge))` |
+| `before_tax` | `pre_surge + surge + minimum_topup + booking_fee` |
+| `tax` | `before_tax × tax_bp ÷ 10 000` |
+| `total` | `before_tax + tax`, rounded up to a multiple of 100 paise; the difference is `rounding` (0–99 paise) |
+| `commission` | `(total − tax) × commission_bp ÷ 10 000` |
+
+Worked example (illustrative MINI rule: base ₹40, ₹14/km, ₹1.50/min, minimum ₹80, booking fee ₹10, tax 5%, commission 20%), for 8.4 km, 26 min and surge 1.2×:
+
+| Component | Paise |
+|---|---|
+| Base | 4,000 |
+| Distance: 1,400 × 8,400 ÷ 1,000 | 11,760 |
+| Time: 150 × 1,560 ÷ 60 | 3,900 |
+| Surge: 19,660 × 0.2 | 3,932 |
+| Minimum top-up | 0 |
+| Booking fee | 1,000 |
+| Tax: 24,592 × 5% = 1,229.6 | 1,230 |
+| Rounding: 25,822 → 25,900 | 78 |
+| **Total (₹259)** | **25,900** |
+| Commission: (25,900 − 1,230) × 20% | 4,934 |
+
+Property tests check that the components always add up to the total, that the rounding is 0–99 paise, and that the total never drops below the minimum fare.
+
+### 10.3 Surge (V1 rules)
+
+- Active rules for the city and zone whose days of the week and local time window contain the current time in the city's time zone. Windows may wrap past midnight.
+- The highest matching multiplier applies, capped at 2.0; no match means 1.0. Rules are cached in process for 60 s (HLD §5.4).
+- From V4, computed multipliers replace rules for cities set to computed surge (§19.2).
+
+### 10.4 Creating a quote
+
+1. Rate limit: 30 quotes per rider per minute.
+2. Category active in the city; pickup inside a service area (§10.1); otherwise `422`.
+3. Route from the routing provider: the mock in V1–V3; OSRM with a 300 ms timeout and fallback to the mock in V4, recorded as `MOCK_FALLBACK`. No route → `422 ROUTE_NOT_FOUND`.
+4. Fare rule and fee rule in effect now: the highest `effective_from ≤ now()` for the city and category.
+5. Surge (§10.3); fare (§10.2).
+6. Pickup ETA estimate: the nearest available driver from `LiveIndex.nearby(…, radius_max_m, k = 1)`, then the routing provider's duration from there. No driver: `pickup_eta_s` is null and the app says "no cars nearby" while still allowing the booking.
+7. Insert the quote with `expires_at = now() + 5 min` (database clock) and return `201`.
+
+### 10.5 Publishing rules
+
+- `POST /v1/admin/fare-rules` (and fee rules) inserts version n + 1 with `effective_from ≥ now()` (default now); a time in the past gets `422 RULE_EFFECTIVE_IN_PAST`. Existing versions are never updated, so a published price can't change under a quote (ADR-012).
+- The node that published reloads its cache at once; the others reload within 60 s. A quote always records the rule ID it used.
+- Surge rules and city-category settings are updated in place with a `version` check (`409 VERSION_CONFLICT`). Every change is audited.
+
+## 11. Payments
+
+Decisions in [ADR-014](decisions/ADR-014-payments.md). Within the payment module, locks are taken charge → attempt → refund.
+
+### 11.1 Creating charges
+
+The consumer `payment.charges` handles `TripCompleted` (purpose `FARE`) and `RideCancelled` that carries a fee (purpose `CANCELLATION_FEE` or `NO_SHOW_FEE`):
+
+1. `INSERT … ON CONFLICT (ride_id, purpose) DO NOTHING`. A second delivery or replay finds the charge and stops. This is the "no double charge" invariant's main mechanism, with the inbox as backstop.
+2. **Cash** (fare only): the charge is `SUCCEEDED` at once with method `CASH`, and the fare's earnings row is written.
+3. **Online:** the charge is `PENDING` with attempt 1 `PENDING`, using the payment method captured at booking, or the rider's current default if that method was removed. With no usable online method the charge is `FAILED` (`NO_PAYMENT_METHOD`) and becomes dues.
+4. Fees on a cash ride go to the rider's default online method. A rider with only cash ends up with dues, which block the next booking until paid online (FR-R4).
+
+### 11.2 The executor (worker role)
+
+The provider is called outside any database transaction:
+
+```text
+claim (own transaction):
+  UPDATE payment.charge_attempts SET status = 'IN_FLIGHT', sent_at = now(),
+         lease_until = now() + interval '30 seconds', version = version + 1
+   WHERE id = (SELECT id FROM payment.charge_attempts WHERE status = 'PENDING'
+                ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+  RETURNING …
+call:   provider.charge(idempotency key = attempt ID, amount, method reference)
+        connect timeout 1 s, read timeout 3 s, circuit breaker per provider
+record (own transaction): lock the charge, then the attempt (still IN_FLIGHT):
+  succeeded → attempt and charge SUCCEEDED; fee earnings (§11.8); outbox ChargeSucceeded; audit
+  declined  → attempt FAILED (failure code); charge FAILED (dues); outbox ChargeFailed; audit
+  timeout, connection error, 5xx → attempt and charge UNKNOWN; next_check_at = now() + 10 s
+```
+
+- An attempt left `IN_FLIGHT` past its lease (the process died during the call) becomes `UNKNOWN` and goes to status checks. It is never sent again, because the provider may already have charged it (FR-PY2).
+- An open circuit breaker leaves attempts `PENDING` and backs the executor off.
+
+### 11.3 Status checks
+
+- `UNKNOWN` attempts are claimed like `PENDING` ones, then `provider.status(attempt ID)` is called.
+- **Final answer:** applied as in §11.2.
+- **Still unknown:** the next check follows the schedule 10 s, 30 s, 2 min, 10 min, then hourly up to 24 h (HLD §12.2).
+- **Not found at the provider:** if the attempt is more than 2 min old, it becomes `FAILED` with code `NOT_RECEIVED`, so the charge becomes dues the rider can pay again; a success that arrives later is refunded automatically (§11.5).
+- **After 24 h unresolved:** the attempt stays `UNKNOWN` and appears in `GET /v1/ops/payments?status=UNKNOWN`, with an alert.
+
+### 11.4 Webhooks (FR-PY6)
+
+`POST /v1/webhooks/payments/{provider}`:
+
+1. Verify `X-Signature: t=<unix seconds>,v1=<hex>`: HMAC-SHA256 over `<t>.<raw body>` with the provider's secret, compared in constant time; `t` within 5 min. Otherwise `401 WEBHOOK_SIGNATURE_INVALID`.
+2. `INSERT INTO payment.provider_webhooks … ON CONFLICT DO NOTHING`, with the raw body stored byte-exact. A duplicate answers `200` and does nothing else.
+3. In the same transaction, find the attempt by the idempotency key in the payload. If it isn't final yet (`IN_FLIGHT` or `UNKNOWN`), apply the outcome as in §11.2. If it is already final, record the outcome `IGNORED`.
+4. Answer `200` quickly; the provider retries anything else.
+
+Because the attempt's status decides, a webhook can arrive before the executor records the API response, after it, or instead of it, with the same result.
+
+### 11.5 Late success
+
+An attempt that succeeds while its charge already succeeded through another attempt creates an automatic refund for the full attempt amount (`automatic = true`), and an audit entry ([ride lifecycle §6](ride-lifecycle.md#6-charges-and-refunds)).
+
+### 11.6 Refunds (FR-PY5)
+
+```text
+POST /v1/ops/charges/{id}/refunds {amount_paise, reason}           operations, Idempotency-Key
+tx: lock the charge: SUCCEEDED and not cash → else 409 CHARGE_NOT_REFUNDABLE
+    UPDATE payment.charges SET refunded_paise = refunded_paise + :amount, version = version + 1
+     WHERE id = :charge AND refunded_paise + :amount <= amount_paise     → else 422 REFUND_EXCEEDS_CHARGE
+    INSERT refund PENDING; audit
+then the executor sends it like an attempt (idempotency key = refund ID), with the same UNKNOWN handling.
+FAILED gives the reserved amount back; SUCCEEDED writes RefundSucceeded.
+```
+
+Refunding a fee reverses the driver's share of it with an `ADJUSTMENT` earnings row; refunds of fares are absorbed by the platform and leave earnings unchanged **(assumed)**.
+
+### 11.7 Rider dues (FR-PY3, FR-R4)
+
+- Dues are the rider's `FAILED` charges; `PaymentApi.outstandingDues` sums them inside the booking transaction.
+- `POST /v1/riders/me/dues/pay {payment_method_id?}` locks the rider's failed charges in ID order. For each, it creates a new attempt (`seq + 1`, `PENDING`) with the chosen online method and moves the charge to `PENDING`. It answers `202` with the charges; the executor does the rest. Cash can't pay dues (`422 PAYMENT_METHOD_INVALID`); nothing due gives `409 NO_DUES`.
+
+### 11.8 Driver earnings (FR-D4)
+
+| Event | Row |
+|---|---|
+| `TripCompleted` | `FARE`: gross = fare, commission from the event, net = gross − commission; `cash_collected` = fare for cash rides |
+| A fee charge succeeds | `CANCELLATION_FEE` or `NO_SHOW_FEE`: gross = fee, commission at the fee rule's rate |
+| A fee is refunded | `ADJUSTMENT` with negative amounts in proportion |
+
+- `earned_on` is the local date in the city's time zone.
+- `GET /v1/drivers/me/earnings?from&to` sums per day (at most 31 days per request), with totals.
+- Rows are unique per source and kind, so redelivered events don't double-count.
+
+### 11.9 The mock provider
+
+`MockPaymentProvider` runs in process and behaves like a remote provider:
+
+| Behaviour | Default **(assumed)** |
+|---|---|
+| Latency | Log-normal, median 300 ms, p99 2 s |
+| Declines | 5% |
+| Timeouts (the caller gives up after 3 s) | 2%, of which half succeeded at the provider |
+| Webhooks | Sent for every outcome over HTTP to the application's own endpoint, signed; 0–30 s late; 10% duplicated; 20% before the API response |
+| `status` | Knows every attempt it received; `NOT_FOUND` otherwise |
+
+Deterministic test tokens override the rates: `tok_ok`, `tok_decline`, `tok_timeout_failed`, `tok_timeout_succeeded`, `tok_webhook_only`.
+
+## 12. Identity and security
+
+Decisions in [ADR-015](decisions/ADR-015-identity.md).
+
+### 12.1 One-time codes
+
+```text
+POST /v1/auth/otp {phone}
+  rate limits (fail closed): 5 per phone per hour, 20 per IP per hour
+  code = 6 random digits (SecureRandom); challenge row with HMAC-SHA256(code, server secret), expires in 5 min
+  after commit: NotificationApi.sendOneTimeCode(phone, code), synchronous, never stored
+  202 {expires_at, resend_after_s: 30}, the same answer whether or not the phone has an account
+POST /v1/auth/token {phone, code}
+  latest unconsumed, unexpired challenge for the phone; compare HMACs in constant time
+  wrong: attempts + 1 (committed) → 401 CODE_INVALID; the fifth wrong attempt kills the challenge → 429 CODE_ATTEMPTS_EXCEEDED
+  right: consume; find the user, or create one with role RIDER; issue tokens (§12.2)
+```
+
+- The code is never stored or queued in plain text: only its HMAC is kept, so a database leak doesn't expose live codes.
+- Local and test profiles use a fixed code from configuration. Startup fails if a fixed code is configured in any other profile.
+
+### 12.2 Tokens
+
+| Token | Form | Lifetime | Contents |
+|---|---|---|---|
+| Access | JWT, ES256, `kid` header | 15 min | `iss` `ride-hailing`, `aud` `ride-api`, `sub` user ID, `roles`, `jti`, `iat`, `exp` |
+| Refresh | 256-bit random, base64url; stored as SHA-256 | 30 days | Belongs to a family that starts at sign-in |
+
+- `POST /v1/auth/refresh` rotates: the presented token gets `rotated_at`, and a new token in the same family is issued with a new access token.
+- **Reuse of a rotated token:**
+  - within 10 s of its rotation **(assumed)**, it is treated as a client retry whose response was lost: a new pair is issued and the pair from the first rotation is revoked;
+  - later, it means theft: the whole family is revoked, the answer is `401 REFRESH_TOKEN_INVALID`, and the audit log records `token.reuse_detected`.
+- `POST /v1/auth/logout` revokes the family.
+
+### 12.3 Keys
+
+- Signing keys come from configuration: a list of `(kid, private key)`. In AWS they come from Secrets Manager; locally they are generated at first start into a git-ignored file.
+- The first key signs; all of them verify. Rotation: add the new key for verification only, make it the signer on the next deploy, and remove the old one 15 min later.
+- Every role validates tokens with Spring Security's resource server against the configured public keys: signature, `iss`, `aud` and expiry, with 30 s of clock skew.
+
+### 12.4 Authorization
+
+| Endpoints | RIDER | DRIVER | OPS | ADMIN |
+|---|---|---|---|---|
+| `/v1/riders/me/**`, `POST /v1/quotes`, `POST /v1/rides` | ✓ | | | |
+| `/v1/drivers/me/**`, `/v1/offers/**` | | ✓ | | |
+| `GET /v1/rides/{id}`, `/cancel`, `/rating`, `/receipt`, `/route` (V2) | own | assigned | ✓ (route read audited) | |
+| `/arrive`, `/start`, `/complete`, `/no-show` | | assigned | | |
+| `POST /v1/realtime/tickets` (V2) | ✓ | ✓ | ✓ | |
+| `/v1/ops/**` | | | ✓ | ✓ |
+| `/v1/admin/**` | | | | ✓ |
+| `/v1/auth/**`, `/v1/webhooks/**` | public (rate-limited; webhooks signed) | | | |
+
+- Roles are checked by Spring Security; **ownership is checked in application services** (FR-I2): a rider reaches only rides with their `rider_id`; a driver reaches rides assigned to them now or before, and only their own offers.
+- A resource the caller may not see answers `404`, not `403`.
+- Every endpoint has a test that a user of the wrong role and a user of the right role but the wrong ride are both refused.
+
+### 12.5 Personal data
+
+- Phone numbers are masked in logs (`+91******3210`) and never appear in events, pushes, snapshots or the audit log.
+- PINs appear only in the rider's view of their ride.
+- Positions are logged only at debug level, and only with a ride ID. Traces of sampled location updates carry no coordinates.
+- Events carry IDs, amounts and statuses; names stay in the snapshots on the ride, visible only to its participants (NFR-10).
+
+### 12.6 Input limits
+
+- JSON bodies up to 64 KB; location batches up to 100 updates; strings bounded as in the OpenAPI document.
+- Coordinates must be valid WGS 84; pickups must be inside a service area; location updates inside the city's bounding box.
+- Admin polygons must pass `ST_IsValid` (`422 INVALID_GEOMETRY`).
+
+## 13. REST API
+
+The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if the implementation drifts from it (§17).
+
+### 13.1 Conventions
+
+| Topic | Rule |
+|---|---|
+| Versioning | `/v1` in the path; additive changes only within a version |
+| Format | JSON, `snake_case`; money as `{"amount_paise": 25900, "currency": "INR"}`; timestamps ISO-8601 UTC; null fields omitted |
+| Request IDs | An incoming `X-Request-Id` matching `[A-Za-z0-9._-]{1,64}` is kept, otherwise generated; echoed on every response and in error bodies |
+| Idempotency | `Idempotency-Key` on every command (§5.1); replays carry `Idempotent-Replayed: true` |
+| Errors | RFC 9457 `application/problem+json` with `code` and `request_id`; validation errors add `errors: [{field, message}]`; conflicts add `current_status` and `current_version` where useful. A `500` never carries exception text |
+| Pagination | `?cursor=&limit=` (default 20, maximum 100), ordered by `(created_at, id)` descending; responses carry `next_cursor` when more exist |
+| Rate limits | `429 RATE_LIMITED` with `Retry-After` |
+
+### 13.2 Error codes
+
+| Code | Status | When |
+|---|---|---|
+| `VALIDATION_FAILED` | 400 | Constraint violations; `errors` lists the fields |
+| `MALFORMED_REQUEST` | 400 | Unreadable body |
+| `IDEMPOTENCY_KEY_REQUIRED` | 400 | Missing on a command |
+| `UNAUTHENTICATED` | 401 | Missing, invalid or expired access token |
+| `CODE_INVALID` | 401 | Wrong or expired one-time code (deliberately not distinguished) |
+| `REFRESH_TOKEN_INVALID` | 401 | Unknown, expired, revoked or reused refresh token |
+| `WEBHOOK_SIGNATURE_INVALID` | 401 | Bad or stale webhook signature |
+| `FORBIDDEN` | 403 | The role may not call this endpoint |
+| `ACCOUNT_DISABLED` | 403 | The user is disabled |
+| `NOT_FOUND` | 404 | Unknown resource, or one the caller may not see |
+| `METHOD_NOT_ALLOWED` | 405 | |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | |
+| `IDEMPOTENCY_KEY_IN_PROGRESS` | 409 | The same key is still executing; `Retry-After` |
+| `INVALID_TRANSITION` | 409 | The ride's state doesn't allow the command; `current_status`, `current_version` |
+| `RIDE_REASSIGNED` | 409 | A driver command for a ride reassigned away from that driver |
+| `OFFER_NO_LONGER_AVAILABLE` | 409 | The offer expired, was withdrawn, or its ride moved on |
+| `QUOTE_EXPIRED`, `QUOTE_ALREADY_USED` | 409 | Booking with an unusable quote |
+| `ACTIVE_RIDE_EXISTS` | 409 | The rider already has an active ride |
+| `DUES_OUTSTANDING` | 409 | Unpaid dues; `dues` carries the amount |
+| `PIN_LOCKED` | 409 | Five wrong PINs on this ride |
+| `NO_SHOW_TOO_EARLY` | 409 | Less than the waiting time since arrival; `available_at` |
+| `DRIVER_NOT_ELIGIBLE` | 409 | Not verified, suspended, vehicle inactive or not theirs, or category not offered |
+| `DRIVER_HAS_ACTIVE_RIDE` | 409 | Going offline during a ride |
+| `PLACES_LIMIT_REACHED` | 409 | Ten saved places already |
+| `NO_DUES` | 409 | Paying dues when nothing is owed |
+| `CHARGE_NOT_REFUNDABLE` | 409 | The charge didn't succeed, or was paid in cash |
+| `RATING_NOT_OPEN` | 409 | Not a participant, ride not completed, or the 7-day window closed |
+| `ALREADY_RATED` | 409 | This side already rated the ride |
+| `RECEIPT_NOT_AVAILABLE` | 409 | The ride isn't completed |
+| `VERSION_CONFLICT` | 409 | An admin update with a stale `version` |
+| `FLAG_ALREADY_RESOLVED` | 409 | Resolving a resolved flag |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The same key with a different request |
+| `OUTSIDE_SERVICE_AREA` | 422 | Pickup outside every service area |
+| `CATEGORY_NOT_AVAILABLE` | 422 | The category isn't offered in the city |
+| `ROUTE_NOT_FOUND` | 422 | The routing provider can't connect pickup and drop-off |
+| `PAYMENT_METHOD_INVALID` | 422 | Not the rider's, inactive, or cash where cash isn't allowed |
+| `WRONG_PIN` | 422 | The PIN didn't match; `attempts_left` |
+| `REFUND_EXCEEDS_CHARGE` | 422 | The refund would exceed the refundable amount |
+| `INVALID_GEOMETRY` | 422 | An invalid polygon |
+| `RULE_EFFECTIVE_IN_PAST` | 422 | A rule version that would take effect in the past |
+| `CODE_ATTEMPTS_EXCEEDED` | 429 | Five wrong codes on one challenge |
+| `RATE_LIMITED` | 429 | Over a rate limit; `Retry-After` |
+| `INTERNAL_ERROR` | 500 | Anything unexpected, logged with its request ID |
+| `SERVICE_UNAVAILABLE` | 503 | The database is unreachable or load is being shed; `Retry-After` |
+
+## 14. Realtime (V2)
+
+Decisions in [ADR-006](decisions/ADR-006-realtime-transport.md) and [ADR-020](decisions/ADR-020-valkey-access.md). Message schemas: [schemas/websocket/](schemas/websocket/).
+
+### 14.1 Connecting
+
+1. `POST /v1/realtime/tickets` returns `{ticket, expires_at, url}`. The ticket is 32 random bytes (base64url), stored as `wsticket:<ticket>` → `{user_id, roles, city}` for 60 s.
+2. The client connects to `wss://…/ws?ticket=…`. The handshake takes the ticket with `GETDEL`, so it works once. A missing or used ticket gets `401` before the upgrade.
+3. The session holds the identity for its lifetime. After every connect the client fetches its current state over HTTPS: active ride, pending offer (ADR-006).
+
+### 14.2 Messages
+
+All messages are JSON text frames with a `type` field, under 1 KB, matching the 1 KB buffers chosen from spike S-3.
+
+| Direction | `type` | Purpose |
+|---|---|---|
+| Driver → server | `location` | One live update (location §2) |
+| Driver → server | `offer_seen` | The app displayed an offer (§8.5) |
+| Operations → server | `ops_viewport` | City and bounding box to stream |
+| Server → driver | `offer`, `offer_withdrawn` | Offers, with `expires_in_ms` |
+| Server → driver | `driver_status` | Availability changes made by the server: suspension, taken offline |
+| Server → rider and driver | `ride_status` | Ride status and version, with the driver, vehicle or rider summary |
+| Server → rider | `driver_position` | `lat`, `lon`, `heading_deg`, `seq`, `eta_s` during the ride |
+| Server → operations | `ops_snapshot` | Drivers in the viewport with status, every 2 s |
+| Server → any | `reconnect`, `error` | Drain notice (`after_ms`); protocol errors |
+
+Offline replays of up to 100 updates don't fit in 1 KB frames, so they go over `POST /v1/drivers/me/location`, which stays in V2 for that purpose only. Live updates use the socket.
+
+### 14.3 Channels and subscriptions
+
+| Channel | Subscribed by the node holding | Carries |
+|---|---|---|
+| `drv:{driverId}` | The driver's connection | `offer`, `offer_withdrawn`, `driver_status`, `ride_status` |
+| `rdr:{riderId}` | The rider's connection | `ride_status` |
+| `ride:{rideId}` | The rider's connection, from assignment until the ride ends | `driver_position` |
+
+- **Personal channels** (`drv:`, `rdr:`) are subscribed at connect.
+- **A rider's node subscribes to `ride:{id}`** when it relays a `ride_status` with an active status for that ride on the rider's own channel, so ownership is already proven. It unsubscribes at a terminal status or when the rider disconnects. On connect it also subscribes to the active ride found in the resync.
+- Status pushes are published after commit by the module that changed the state. Positions are published by the driver's node (§9.6).
+- `rdr:{riderId}` is new in this design; ADR-006 named only the driver and ride channels.
+
+### 14.4 Sending
+
+- Each session sends through Spring's `ConcurrentWebSocketSessionDecorator`, with a 2 s send-time limit and a 16 KB buffer limit **(assumed)**. Hitting either closes the session; the client reconnects and resyncs.
+- `driver_position` messages are coalesced per session: a newer position replaces one not yet sent, so a slow rider receives the latest position, not a backlog.
+- The server pings every 25 s and closes a session that hasn't answered for 60 s. A driver's location updates also count as signs of life.
+
+### 14.5 Draining (NFR-12)
+
+On shutdown:
+1. Readiness goes down, so the load balancer stops sending new connections.
+2. Each session gets `reconnect` with a random `after_ms` between 0 and 25 s.
+3. After 30 s, the remaining sessions are closed with code 1001.
+
+The ECS deregistration delay is 35 s (ADR-018).
+
+### 14.6 Operations map
+
+An operations session sends `ops_viewport`. Every 2 s the node runs the snapshot script (§9.4) for that box, up to 5,000 drivers, and sends `ops_snapshot`. Drivers silent for more than 30 s are marked stale, not hidden.
+
+## 15. Events
+
+Envelope and rules: [ADR-008](decisions/ADR-008-outbox-and-events.md), [HLD §9](architecture.md#9-events-and-messaging). Schemas: [schemas/events/](schemas/events/).
+
+### 15.1 Catalog
+
+Every payload carries IDs, amounts and statuses only: no phone numbers, PINs or comments (§12.5).
+
+| Event (v1) | Producer | Aggregate | Kafka key (V3) | Payload |
+|---|---|---|---|---|
+| `RideRequested` | ride | ride | ride | `ride_id`, `rider_id`, `city_id`, `category`, `pickup`, `dropoff`, `pickup_zone`, `fare`, `payment_method_type`, `quote_id`, `requested_at` |
+| `DriverAssigned` | ride | ride | ride | `ride_id`, `rider_id`, `driver_id`, `vehicle_id`, `offer_id`, `promised_pickup_eta_s`, `reassign_count`, `assigned_at` |
+| `DriverUnassigned` | ride | ride | ride | `ride_id`, `rider_id`, `driver_id`, `reason` (`DRIVER_CANCELLED`, `DRIVER_UNREACHABLE`), `search_generation`, `unassigned_at` |
+| `DriverArrived` | ride | ride | ride | `ride_id`, `rider_id`, `driver_id`, `distance_to_pickup_m`, `arrived_at` |
+| `TripStarted` | ride | ride | ride | `ride_id`, `rider_id`, `driver_id`, `started_at`, `device_time` |
+| `TripCompleted` | ride | ride | ride | `ride_id`, `rider_id`, `driver_id`, `city_id`, `category`, `fare`, `commission`, `payment_method_id`, `payment_method_type`, `completed_at`, `device_time` |
+| `RideCancelled` | ride | ride | ride | `ride_id`, `rider_id`, `driver_id`, `city_id`, `status`, `cancelled_by`, `reason`, `fee` (`purpose`, `amount`, `commission`, `fee_rule_id`), `payment_method_id`, `payment_method_type`, `cancelled_at` |
+| `RideNotMatched` | ride | ride | ride | `ride_id`, `rider_id`, `city_id`, `category`, `searched_for_s`, `ended_at` |
+| `RatingSubmitted` | rating | rating | ride | `rating_id`, `ride_id`, `rater_role`, `rater_id`, `ratee_id`, `stars`, `has_comment`, `submitted_at` |
+| `OfferCreated` | dispatch | offer | ride | `offer_id`, `ride_id`, `driver_id`, `attempt`, `rank`, `distance_m`, `strategy`, `expires_at` |
+| `OfferAccepted` | dispatch | offer | ride | `offer_id`, `ride_id`, `driver_id`, `responded_at` |
+| `OfferDeclined` | dispatch | offer | ride | `offer_id`, `ride_id`, `driver_id`, `reason` (`DRIVER`, `DRIVER_OFFLINE`), `responded_at` |
+| `OfferExpired` | dispatch | offer | ride | `offer_id`, `ride_id`, `driver_id`, `seen`, `expired_at` |
+| `OfferWithdrawn` | dispatch | offer | ride | `offer_id`, `ride_id`, `driver_id`, `reason`, `withdrawn_at` |
+| `DriverWentOnline` | dispatch | availability | driver | `driver_id`, `city_id`, `category`, `vehicle_id`, `online_at` |
+| `DriverWentOffline` | dispatch | availability | driver | `driver_id`, `city_id`, `reason`, `online_seconds`, `offline_at` |
+| `DriverVerified` | driver | driver | driver | `driver_id`, `city_id`, `verified_at`, `verified_by` |
+| `DriverSuspended`, `DriverReinstated` | driver | driver | driver | `driver_id`, `reason`, `by`, `at` |
+| `ChargeSucceeded` | payment | charge | ride | `charge_id`, `ride_id`, `rider_id`, `driver_id`, `purpose`, `amount`, `method_type`, `attempt_id`, `succeeded_at` |
+| `ChargeFailed` | payment | charge | ride | `charge_id`, `ride_id`, `rider_id`, `purpose`, `amount`, `method_type`, `failure_code`, `attempt_id`, `failed_at` |
+| `RefundSucceeded` | payment | refund | ride | `refund_id`, `charge_id`, `ride_id`, `rider_id`, `amount`, `automatic`, `succeeded_at` |
+
+The Kafka key is stored on the outbox row as `partition_key`, because offer and payment events order per ride, not per offer or charge (§19.1).
+
+### 15.2 Consumers (V1 in process, V3 Kafka groups)
+
+| Consumer | Events | Effect |
+|---|---|---|
+| `payment.charges` | `TripCompleted`, `RideCancelled` | Charges (§11.1) |
+| `payment.earnings` | `TripCompleted` | Fare earnings (§11.8) |
+| `rating.windows` | `TripCompleted` | Opens the 7-day rating window |
+| `notification.rides` | `DriverAssigned`, `DriverUnassigned`, `DriverArrived`, `TripStarted`, `TripCompleted`, `RideCancelled`, `RideNotMatched` | Notifications to rider and driver (§15.4) |
+| `notification.payments` | `ChargeSucceeded`, `ChargeFailed` | Payment notifications |
+| `notification.drivers` | `DriverWentOffline` (unresponsive), `DriverSuspended` | Tell the driver why |
+
+The operations timeline reads ride transitions, offers, decisions, charges and notifications through module APIs, and events from the outbox by `partition_key`. It needs no consumer of its own. Rating summaries are updated in the same transaction as the rating.
+
+### 15.3 Schemas and compatibility
+
+- `docs/schemas/events/<EventType>.v<version>.json` (JSON Schema 2020-12), plus `envelope.v1.json` and `common.json` with shared definitions (UUID, money, point, timestamp).
+- **Producer tests** validate every event the code writes against its schema. **Consumer tests** validate their fixtures against the producer's schema.
+- **A compatibility test** compares each schema with its last released copy and fails if a field was removed, retyped or made required without a new version.
+
+### 15.4 Notifications
+
+- The consumers create one notification per recipient and kind (unique per event), each with a `PUSH` delivery. SMS carries one-time codes only (§12.1).
+- **Deliveries** are claimed with `SKIP LOCKED` every 500 ms and sent through `NotificationProvider`; V1 uses log-only mocks.
+- Failures back off 1 s, 5 s, 30 s, 2 min, 5 min, then the delivery is `DEAD` (FR-N2). A failed notification never touches the ride.
+- From V2, connected apps also see changes through `ride_status` pushes; notifications stand in for mobile push (FCM, APNs), which is out of scope.
+
+## 16. Observability
+
+Decisions in [ADR-017](decisions/ADR-017-observability.md); metric list in [HLD §15](architecture.md#15-observability).
+
+### 16.1 Where metrics are recorded
+
+| Metric | Recorded |
+|---|---|
+| `ride_requests_total` | Booking commit (T1) |
+| `dispatch_first_offer_seconds` | Commit of the first offer of a ride's first search: offer time − `requested_at` |
+| `ride_assignment_seconds` | Acceptance commit: `assigned_at − requested_at` |
+| `offers_total{outcome}` | Each offer's final status |
+| `dispatch_search_attempts_total{outcome}`, `dispatch_reservation_conflicts_total` | Each search attempt (§8.3) |
+| `rides_not_matched_total`, `rides_stuck{status}` | T3; stuck-ride detector |
+| `location_updates_total{result}`, `location_pipeline_seconds` | Ingestion (§9.6): receive → script applied and position published |
+| `live_drivers{status}`, `active_rides{status}` | Gauges refreshed every 15 s from the database (per city and category labels) |
+| `websocket_connections{kind}` | Realtime sessions (V2) |
+| `payment_charges_total{outcome}`, `notification_deliveries_total{channel,outcome}` | Executor; delivery job |
+| `outbox_oldest_unpublished_seconds`, `timers_overdue_seconds`, `search_tasks_due` | Gauges every 5 s |
+| `sweeper_safety_valve_total{rule}`, `live_index_mirror_failures_total` | §8.9, §8.10 |
+
+- Counters with outcome labels are registered at zero for every outcome at startup, so an alert on `increase(…) > 0` sees the first occurrence.
+- Labels are limited to city, category, status, outcome, channel and kind (ADR-017).
+
+### 16.2 Traces and logs
+
+- **Span names:** `HTTP <method> <route>`, `ride.<command>`, `dispatch.attempt`, `timer <kind>`, `outbox.relay`, `consume <consumer>`, `provider <name>.<operation>`, `valkey <script>`, `ws <type>`.
+- **Context crosses asynchronous hops:** `trace_parent` is stored on outbox rows and timers. A timer's firing span links to the span that created it. Offer and status pushes carry the trace ID.
+- **Sampling:** commands, dispatch and events at 100%; location updates at 1% (ADR-017), with no coordinates on spans.
+- **Logs:** JSON with the fields of §1.4; `correlation_id` is the ride ID in every ride flow.
+
+### 16.3 Alerts
+
+The HLD's SLO burn-rate and platform alerts, plus `rides_stuck > 0` for 5 min, any increase of `sweeper_safety_valve_total`, `live_index_mirror_failures_total` above 1/s, and parked timers. Rules and their `promtool` tests ship with V7; dashboards and runbooks too.
+
+## 17. Testing
+
+### 17.1 Levels
+
+| Level | Covers | Tools |
+|---|---|---|
+| Unit | State-machine tables, fee and fare rules (property tests), ranking, quality rules, PIN handling, token logic | JUnit 5, jqwik |
+| Architecture | Module boundaries and allowed dependencies, schema ownership of SQL, coding rules | Spring Modulith, ArchUnit |
+| Integration | Repositories, conditional updates, `SKIP LOCKED` claims, idempotency, outbox and inbox, timers, leases, migrations | Testcontainers: the project's PostgreSQL + PostGIS image |
+| Live index contract | One suite run against the in-memory and the Valkey implementation | Testcontainers: `valkey/valkey:8` (single node and a 3-shard cluster for sharded pub/sub) |
+| Contract | Requests and responses against `openapi.yaml`; events and WebSocket messages against their JSON Schemas | `networknt` JSON Schema validator, as in the Payment Orchestrator |
+| End to end | Quote → book → offer → accept → arrive → start → complete → charge → rating, through public APIs | `scripts/demo.sh` (V1); the simulator (V2+) |
+| Concurrency | The race scenarios, each run hundreds of times, then the invariant checks (§17.3) | JUnit, executors, barriers |
+| Failure | Database, Valkey and Kafka outages; provider timeouts; duplicated, delayed and reordered events and webhooks | Testcontainers pause and stop; Toxiproxy |
+| Load | Laptop tier on release candidates; cloud tier in V6 | Simulator, k6 |
+
+### 17.2 Concurrency harness
+
+- `RaceRunner` starts N commands on N threads behind a barrier, through the public API of an application started on a random port, so idempotency, transactions and locking run as in production.
+- Each scenario repeats 200 times on fresh data **(assumed)**, then runs the invariant checks.
+
+| Scenario | Expectation |
+|---|---|
+| 2–10 searches reserve the same driver | One offer; the others moved on |
+| Accept at the moment of expiry, or of the search timeout | Exactly one outcome |
+| Rider cancels during acceptance, or during a search attempt | No assignment on a cancelled ride; no offer left pending |
+| Driver cancels during trip start; operations cancel during completion | One transition wins; the other gets `409` |
+| Two bookings by one rider; the same booking twice with one key | One ride; the second gets the stored response |
+| Duplicated `TripCompleted`, duplicated and early webhooks | One charge, one outcome |
+| Suspension during acceptance | Either the accept wins and the ride continues, or the offer is withdrawn |
+| Go online twice; go offline while an offer arrives | One session; no offer left on an offline driver |
+
+### 17.3 Invariant checks
+
+Each module implements `InvariantCheck` over its own tables; operations runs them all and compares across modules through APIs. From V2 they are served at `GET /v1/ops/invariants`, which the simulator calls after every run.
+
+| # | Invariant | Module |
+|---|---|---|
+| I1 | No driver in two active rides; no rider in two active rides | ride |
+| I2 | No driver and no ride with two pending offers; no ride offered twice to one driver | dispatch |
+| I3 | `OFFERED` availability ⇔ a `PENDING` offer for that driver | dispatch |
+| I4 | `ASSIGNED`/`ON_TRIP` availability ⇔ an active ride with that driver | operations, across ride and dispatch |
+| I5 | Every transition row follows the transition table | ride |
+| I6 | A terminal ride has no pending offer, no search task and no timer | operations |
+| I7 | One charge per ride and purpose; refunds never exceed their charge | payment |
+
+### 17.4 Time in tests
+
+- The application clock is a mutable test clock.
+- The database clock can't be faked, so tests move stored timestamps instead, for example `assigned_at = now() - interval '3 minutes'` to test the free-cancellation window, or set a timer's `due_at` in the past to fire it at once.
+
+## 18. Simulator and demo web app (V2)
+
+Decisions in [ADR-021](decisions/ADR-021-simulator.md) and [ADR-022](decisions/ADR-022-demo-web-app.md).
+
+### 18.1 Simulator layout
+
+```text
+simulator/
+  cmd/sim/            run, verify
+  internal/api/       REST and WebSocket client: retries with the same idempotency key, resync on reconnect
+  internal/agent/     driver and rider state machines
+  internal/router/    osrm, recorded, straight
+  internal/scenario/  scenario files and the demand model
+  internal/faults/    disconnects, restarts, delays, duplicates, reordering, offline replays, clock skew
+  internal/report/    percentiles, rates, the JSON report
+  scenarios/          weekday-peak.yaml, airport-wave.yaml, stadium-exit.yaml, chaos.yaml
+  testdata/routes/    a small recorded route set, so CI runs without OSRM
+```
+
+### 18.2 Scenario file
+
+```yaml
+name: stadium-exit
+seed: 42
+city: blr
+duration: 45m
+drivers:
+  count: 2000
+  shift: {start_spread: 10m}
+  acceptance: {base: 0.85, per_km_penalty: 0.08}       # probability falls with pickup distance
+  response_time: {median: 4s, p95: 11s}
+  cancel_after_accept: 0.02
+riders:
+  patience: {median: 4m, p95: 9m}                       # cancel if no driver by then
+  cancel_after_assign: 0.05
+  no_show: 0.01
+demand:
+  base_per_hour: 3600
+  zone_weights: zones/blr-weekday.csv                  # H3 res-7 cell, hour, weight
+  destinations: zones/blr-od.csv                       # origin zone → destination zone weights
+  events:
+    - {zone: area:BLR-STADIUM, start: 20m, duration: 15m, multiplier: 10}
+faults:
+  disconnect: {rate_per_hour: 0.2, duration: {median: 20s}}
+  duplicate_updates: 0.01
+  reorder_updates: 0.01
+  offline_replay: {rate_per_hour: 0.05, duration: {median: 90s}}
+  clock_skew: {share: 0.1, max: 3m}
+```
+
+### 18.3 Agents
+
+| Agent | States | Notes |
+|---|---|---|
+| Driver | `off_shift → idle → offered → to_pickup → at_pickup → on_trip → idle …` | Sends `location` every 4 s while online; idle drivers drift towards high-demand zones; acknowledges offers with `offer_seen`; arrives when within 50 m; uses the PIN its rider agent hands over |
+| Rider | `planning → quoting → searching → waiting → riding → rating` | Quotes then books with one idempotency key per booking; cancels when patience runs out; rates 80% of rides |
+
+### 18.4 Demo web app
+
+```text
+web/
+  src/screens/   Operations, Rider, Driver
+  src/api/       REST client with idempotency keys; WebSocket client with ticket, resync and backoff
+  src/map/       MapLibre layers: drivers by status, active rides, route lines
+  public/        style.json (Protomaps basemap), attribution
+```
+
+The `simulator` Compose profile runs the simulator as a one-off job, and nginx serving the web app, the PMTiles file and the style. A set-up script downloads the PMTiles extract for Bengaluru and builds the OSRM data (ADR-013, ADR-021).
+
+## 19. Later versions
+
+### 19.1 V3: Kafka
+
+| Topic | Key | Partitions (local / cloud) | Retention | Consumer groups |
+|---|---|---|---|---|
+| `rides.events` | Ride | 3 / 12 | 7 days | `payment.charges`, `payment.earnings`, `rating.windows`, `notification.rides`, analytics |
+| `dispatch.events` | Ride | 3 / 12 | 7 days | Analytics |
+| `drivers.events` | Driver | 3 / 12 | 7 days | `notification.drivers`, analytics |
+| `payments.events` | Ride | 3 / 12 | 7 days | `notification.payments`, analytics |
+| `location.updates` | Driver | 3 / 12 | 24 h | Trip-route archiver (designed-for tier), analytics |
+| `<topic>.dlq.<group>` | As the source | 1 / 3 | 14 days | Dead-letter mirror |
+
+- **Outbox:** a `partition_key` column (default `aggregate_id`) carries the Kafka key, and the event type maps to its topic.
+- **Relay:** idempotent producer (`acks=all`, `enable.idempotence=true`, at most 5 in-flight requests, `linger.ms=5`, zstd). It sends a batch in ID order, waits for the acknowledgements, then marks the rows published under its fencing token. Per-key order holds because the idempotent producer keeps order per partition.
+- **Envelope:** the record value is the full envelope; headers repeat `event_type`, `event_version`, `event_id` and `traceparent`.
+- **Consumers:** Spring Kafka listener containers, one consumer group per `EventConsumer`. The handler runs the consumer's transaction (inbox + effects), and the offset is acknowledged after commit. Errors: 3 retries in place (1 s, 2 s, 4 s), then the dead-letter topic; deserialization errors go there at once.
+- **Dead letters:** a small consumer mirrors each dead-letter topic into `platform.dead_letters`. `POST /v1/ops/dead-letters/{id}/redrive` runs the original handler on the stored record; the inbox makes a repeat harmless.
+- **Replay** (FR-O6): `POST /v1/ops/replays {consumer, from, to, reprocess}` re-delivers outbox events in the time range to one consumer. Normally the inbox skips what was handled; `reprocess: true` first deletes that consumer's inbox rows for the range, for use after a consumer bug fix.
+- **Location stream:** the `realtime` node produces each applied update asynchronously (`acks=1`, `linger.ms=20`, keyed by driver). Losses are tolerated (location §2).
+- **Spike S-4** runs at the start of V3: relay throughput with one lease, and per-ride ordering under relay failover. If one relay can't keep up, the outbox is partitioned by key hash with one lease per partition (ADR-008).
+- **What stays out of Kafka:** timers, search tasks and pushes (ADR-007). Two consumers named in the requirements for V3 aren't needed: tracking fan-out goes through Valkey pub/sub (ADR-006), and demand and supply for surge are counted from the database and the live index (§19.2), which keeps surge working while Kafka is down.
+
+### 19.2 V4: dispatch, routing and surge
+
+- **Routing:** `OsrmRoutingProvider` calls `/route/v1/driving` (300 ms timeout) and `/table/v1/driving` (300 ms) on the `routing` profile.
+  - Durations are multiplied by a time-of-day factor per zone **(assumed)**, because OSRM has no live traffic.
+  - Results are cached in Valkey per H3 resolution-9 cell pair for 10 min.
+  - On a timeout or error, the mock answers, and the quote records `MOCK_FALLBACK` (ADR-013).
+- **Rankers:**
+  - `EtaRanker`: the 10 nearest by distance, re-ranked by OSRM table duration; falls back to distance if the table call fails.
+  - `WeightedScoreRanker`: `score = w_eta·eta + w_accept·(1 − acceptance_rate) + w_idle·(−idle_minutes) + w_heading·heading_penalty`, with weights per city. `acceptance_rate` comes from `driver_stats`, with a prior for new drivers.
+  - A city can split rides between rankers by percentage; decisions record the ranker.
+- **City ownership:** the lease `city-owner:<city>` (§5.5) picks one `dispatch` node per city for the city's singleton work: computed surge and the batch-matching experiment. Sequential search attempts stay leaderless.
+- **Computed surge**, every 60 s per city by its owner:
+  - demand per zone = rides requested in the last 5 min + 0.2 × quotes in the last 5 min **(assumed)**, from `rides_by_zone` and `quotes_by_zone`;
+  - supply per zone = available drivers in the zone, plus half of those in the neighbouring ring, bucketed from the live index;
+  - target = step table lookup on demand ÷ max(supply, 1);
+  - new multiplier = the target clamped to ±0.2 of the previous value, within 1.0–2.0;
+  - written to `pricing.surge_multipliers`, `surge_history` and the Valkey hash `{city}:surge` (2 min TTL).
+
+  Quotes in cities set to computed surge read the hash, falling back to the table and then to rules.
+- **Batch-matching experiment:** `BatchOfferPolicy` runs on the city owner every 2 s for the zones where it is switched on.
+  1. Claim the due search tasks of the section (`SKIP LOCKED`).
+  2. Take share locks on their rides in ID order.
+  3. Build an ETA matrix to the available drivers nearby.
+  4. Solve with the Hungarian algorithm up to 200 × 200, greedy-with-regret above that.
+  5. Reserve the chosen drivers in driver-ID order with the same conditional update as §8.3, and create all the window's offers in one transaction.
+
+  Evaluated with simulator hotspot scenarios against the adoption rule in [dispatch §8](dispatch-design.md#8-batch-matching-v4-experiment).
+- **Back-to-back trips:** designed only ([dispatch §10](dispatch-design.md#10-back-to-back-trips-designed-for-v4)).
+
+### 19.3 V5–V8
+
+| Version | Settled now | Detailed when it starts |
+|---|---|---|
+| V5 | Extraction only with a measured reason; first candidate the `realtime` role with location ingestion (ADR-001, ADR-006) | The gateway's API to the core, deployment, contract tests across processes |
+| V6 | Second city; city in every key, topic and table; read replica for operations and history queries | Partitioning by city group, replica routing, cloud-tier load and hotspot runs |
+| V7 | AWS layout, Terraform, temporary environments (ADR-018) | Sizes, autoscaling policies, dashboards, alert tests, runbooks, budget |
+| V8 | Fault injection against NFR-7 (HLD §12) | Scenario list, tooling (Toxiproxy, ECS task stops, AWS FIS), pass criteria |
+
+## 20. Configuration reference
+
+Properties are typed and validated at startup. Per-city and per-category settings live in the database (§4.4), not here.
+
+| Property | Default | Meaning |
+|---|---|---|
+| `ride.roles` | `api,realtime,dispatch,worker` | Roles of this process (§1.3) |
+| `ride.location.store` | `memory` (V1), `valkey` (V2+) | Live index, rate limiter and push bus implementation |
+| `ride.location.freshness` | `30s` | Candidates must have been heard from within this |
+| `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |
+| `ride.location.offline-after` | `10m` | Available driver silence before going offline |
+| `ride.location.max-accuracy-m`, `max-speed-kmh` | `100`, `150` | Quality rules (V2) |
+| `ride.dispatch.poll-interval`, `workers`, `tasks-per-tick` | `250ms`, `4`, `20` | Search-task poller |
+| `ride.dispatch.candidates`, `max-reservation-tries` | `20`, `5` | Search attempt |
+| `ride.dispatch.retry-after`, `contention-retry-after` | `5s`, `1s` | When nothing was reserved |
+| `ride.dispatch.max-consecutive-expired` | `3` | Seen offers left to expire before going offline |
+| `ride.dispatch.sweeper.interval`, `safety-valve-share`, `safety-valve-min` | `5s`, `0.10`, `5` | §8.9 |
+| `ride.dispatch.reconcile-interval` | `30s` | §8.10 |
+| `ride.timers.poll-interval`, `workers`, `per-tick`, `max-failures` | `250ms`, `4`, `50`, `10` | §5.4 |
+| `ride.outbox.idle-poll`, `batch-size`, `retention` | `100ms`, `500`, `7d` | §5.2 |
+| `ride.idempotency.ttl` | `24h` | §5.1 |
+| `ride.quotes.ttl` | `5m` | FR-PR1 |
+| `ride.rides.pin-max-attempts`, `arrived-far-m` | `5`, `300` | §7.5, §7.6 |
+| `ride.payments.provider` | `mock` | Payment provider |
+| `ride.payments.check-schedule` | `10s,30s,2m,10m,1h` | Status checks, hourly to 24 h |
+| `ride.payments.mock.*` | §11.9 | Mock behaviour |
+| `ride.security.jwt.issuer`, `access-ttl`, `refresh-ttl`, `refresh-reuse-grace` | `ride-hailing`, `15m`, `30d`, `10s` | §12.2 |
+| `ride.security.otp.ttl`, `max-attempts`, `fixed-code` | `5m`, `5`, unset | §12.1; `fixed-code` only in local and test profiles |
+| `ride.rate-limits.*` | HLD §14 | Bucket sizes |
+| `ride.valkey.uri`, `cluster`, `timeouts.*` | — | V2 (ADR-020) |
+| `ride.kafka.*` | — | V3 (§19.1) |
+| `ride.routing.provider`, `osrm.url`, `timeout` | `mock`, —, `300ms` | V4 |
+| `DB_URL`, `DB_USER`, `DB_PASSWORD`, `DB_POOL_SIZE` | local values, pool `20` | Database (pool per role in the cloud, HLD §5.1) |
+
+---
+
+## Appendix A — Assumptions introduced here
+
+| Item | Value |
+|---|---|
+| Statement timeouts | 2 s on request paths, 5 s in jobs |
+| Pollers | 4 workers per node for timers and search tasks; outbox idle poll 100 ms |
+| Leases | TTL 10 s, renewed every 3 s |
+| Valkey timeouts | 50 ms for dispatch queries and mirror writes; 100 ms for location updates and pushes |
+| Sweeper safety valve | No action when the index epoch is younger than the rule's threshold, or when a rule would act on more than max(5, 10%) of a city's drivers in that state |
+| Offline tombstones | 10 min |
+| Refresh-token reuse grace | 10 s |
+| Seed data | 500 riders, one operations and one admin account (2,000 drivers from the HLD) |
+| Retention | Unused quotes deleted 24 h after expiry; inbox rows 14 days |
+| Payment executor | 30 s lease per call; unknown attempts not found at the provider after 2 min become failed |
+| Mock provider | Latency median 300 ms; 5% declines; 2% timeouts; webhooks 0–30 s late, 10% duplicated, 20% before the response |
+| Refunds and earnings | Fee refunds reduce the driver's earnings proportionally; fare refunds don't |
+| WebSocket sending | 2 s send-time limit; 16 KB buffer limit per session |
+| "Driver arriving" notification | When the pickup ETA first drops to 2 min or less |
+| Trip-point buffer during a database outage | 30 s or 50,000 points per node |
+| Concurrency tests | 200 repetitions per scenario |
+| Surge (V4) | Demand = rides + 0.2 × quotes in the last 5 min; supply includes half of the neighbouring ring; time-of-day factors on OSRM durations |
+
+## Appendix B — Answers to the HLD's open questions
+
+| # | Question ([HLD Appendix C](architecture.md#appendix-c--open-questions-for-the-lld)) | Answer |
+|---|---|---|
+| 1 | Tables, columns, indexes, migrations | §4; migrations per module (§4.9, ADR-019) |
+| 2 | Module APIs, the cross-module transaction, lock order | §2.2–§2.3; §6; acceptance in §8.4 |
+| 3 | OpenAPI and problem codes | [openapi.yaml](openapi.yaml); §13 |
+| 4 | Event and WebSocket schemas | [schemas/](schemas/); §15, §14.2 |
+| 5 | Valkey Functions or `EVALSHA` | `EVALSHA` with `EVAL` fallback ([ADR-020](decisions/ADR-020-valkey-access.md)); scripts in §9.4 |
+| 6 | Fare rule representation | Typed, versioned columns (§4.4) |
+| 7 | Simulator and demo web app | Go simulator ([ADR-021](decisions/ADR-021-simulator.md)); React + MapLibre + PMTiles ([ADR-022](decisions/ADR-022-demo-web-app.md)); §18 |
+| 8 | Implementation plan | [implementation-plan.md](implementation-plan.md) |

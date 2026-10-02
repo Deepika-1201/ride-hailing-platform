@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/websocket/server-messages.v1.json",
+  "title": "WebSocket messages from the server, version 1",
+  "description": "Pushes are best effort (ADR-006): every message carries a version, sequence number or expiry, and clients ignore anything older than what they hold and resync over HTTPS after every reconnect. Pushes never carry PINs or phone numbers.",
+  "oneOf": [
+    {"$ref": "#/$defs/offer"},
+    {"$ref": "#/$defs/offer_withdrawn"},
+    {"$ref": "#/$defs/driver_status"},
+    {"$ref": "#/$defs/ride_status"},
+    {"$ref": "#/$defs/driver_position"},
+    {"$ref": "#/$defs/ops_snapshot"},
+    {"$ref": "#/$defs/reconnect"},
+    {"$ref": "#/$defs/error"}
+  ],
+  "$defs": {
+    "person": {
+      "type": "object",
+      "required": ["first_name"],
+      "additionalProperties": false,
+      "properties": {
+        "first_name": {"type": "string"},
+        "rating": {"$ref": "../events/common.json#/$defs/rating_summary"}
+      }
+    },
+    "offer": {
+      "type": "object",
+      "description": "To a driver on drv:{id}.",
+      "required": ["type", "offer_id", "ride_id", "category", "pickup", "dropoff", "pickup_distance_m", "fare",
+                   "expires_at", "expires_in_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "offer"},
+        "offer_id": {"$ref": "../events/common.json#/$defs/uuid"},
+        "ride_id": {"$ref": "../events/common.json#/$defs/uuid"},
+        "category": {"$ref": "../events/common.json#/$defs/category"},
+        "pickup": {"$ref": "../events/common.json#/$defs/point"},
+        "dropoff": {"$ref": "../events/common.json#/$defs/point"},
+        "pickup_distance_m": {"type": "integer", "minimum": 0},
+        "fare": {"$ref": "../events/common.json#/$defs/money"},
+        "rider": {"$ref": "#/$defs/person"},
+        "expires_at": {"$ref": "../events/common.json#/$defs/timestamp"},
+        "expires_in_ms": {"type": "integer", "minimum": 0, "description": "Computed by the server at send time."},
+        "trace_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+      }
+    },
+    "offer_withdrawn": {
+      "type": "object",
+      "description": "To a driver: the offer ended without their answer.",
+      "required": ["type", "offer_id", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "offer_withdrawn"},
+        "offer_id": {"$ref": "../events/common.json#/$defs/uuid"},
+        "reason": {"enum": ["EXPIRED", "RIDER_CANCELLED", "SEARCH_TIMEOUT", "OPS_CANCELLED", "SUSPENDED"]}
+      }
+    },
+    "driver_status": {
+      "type": "object",
+      "description": "To a driver: an availability change the server made, such as suspension or being taken offline.",
+      "required": ["type", "status", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "driver_status"},
+        "status": {"$ref": "../events/common.json#/$defs/availability_status"},
+        "version": {"type": "integer", "minimum": 0},
+        "category": {"$ref": "../events/common.json#/$defs/category"},
+        "reason": {"enum": ["DRIVER", "SILENT", "UNREACHABLE", "UNRESPONSIVE", "SUSPENDED"]}
+      }
+    },
+    "ride_status": {
+      "type": "object",
+      "description": "To the rider on rdr:{id} and the driver on drv:{id}. Fetch the ride over HTTPS for full details, including the rider's PIN.",
+      "required": ["type", "ride_id", "status", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "ride_status"},
+        "ride_id": {"$ref": "../events/common.json#/$defs/uuid"},
+        "status": {"$ref": "../events/common.json#/$defs/ride_status"},
+        "version": {"type": "integer", "minimum": 0},
+        "driver": {"$ref": "#/$defs/person"},
+        "vehicle": {
+          "type": "object",
+          "required": ["make", "model", "colour", "plate"],
+          "additionalProperties": false,
+          "properties": {
+            "make": {"type": "string"},
+            "model": {"type": "string"},
+            "colour": {"type": "string"},
+            "plate": {"type": "string"}
+          }
+        },
+        "rider": {"$ref": "#/$defs/person"},
+        "promised_pickup_eta_s": {"type": "integer", "minimum": 0}
+      }
+    },
+    "driver_position": {
+      "type": "object",
+      "description": "To the rider on ride:{id}, between assignment and drop-off only.",
+      "required": ["type", "ride_id", "lat", "lon", "seq"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "driver_position"},
+        "ride_id": {"$ref": "../events/common.json#/$defs/uuid"},
+        "lat": {"type": "number", "minimum": -90, "maximum": 90},
+        "lon": {"type": "number", "minimum": -180, "maximum": 180},
+        "heading_deg": {"type": "number", "minimum": 0, "exclusiveMaximum": 360},
+        "seq": {"type": "integer", "minimum": 0},
+        "eta_s": {"type": "integer", "minimum": 0, "description": "To the pickup before arrival, to the drop-off during the trip."}
+      }
+    },
+    "ops_snapshot": {
+      "type": "object",
+      "description": "To operations, every 2 s for the requested viewport.",
+      "required": ["type", "city_id", "at", "drivers"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "ops_snapshot"},
+        "city_id": {"$ref": "../events/common.json#/$defs/city_id"},
+        "at": {"$ref": "../events/common.json#/$defs/timestamp"},
+        "truncated": {"type": "boolean"},
+        "drivers": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": {
+            "type": "object",
+            "required": ["driver_id", "lat", "lon", "status", "stale"],
+            "additionalProperties": false,
+            "properties": {
+              "driver_id": {"$ref": "../events/common.json#/$defs/uuid"},
+              "lat": {"type": "number"},
+              "lon": {"type": "number"},
+              "status": {"$ref": "../events/common.json#/$defs/availability_status"},
+              "category": {"$ref": "../events/common.json#/$defs/category"},
+              "ride_id": {"$ref": "../events/common.json#/$defs/uuid"},
+              "stale": {"type": "boolean", "description": "Silent for more than 30 s."}
+            }
+          }
+        }
+      }
+    },
+    "reconnect": {
+      "type": "object",
+      "description": "The node is draining: reconnect after the delay (NFR-12).",
+      "required": ["type", "after_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "reconnect"},
+        "after_ms": {"type": "integer", "minimum": 0, "maximum": 30000}
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["type", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "error"},
+        "code": {"enum": ["INVALID_MESSAGE", "RATE_LIMITED", "FORBIDDEN"]},
+        "message": {"type": "string"}
+      }
+    }
+  },
+  "examples": [
+    {"type": "offer", "offer_id": "0199a3f0-8a11-7e22-9f33-a44b55c66d77", "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+     "category": "MINI", "pickup": {"lat": 12.97194, "lon": 77.64115}, "dropoff": {"lat": 12.93524, "lon": 77.62448},
+     "pickup_distance_m": 840, "fare": {"amount_paise": 25900, "currency": "INR"},
+     "rider": {"first_name": "Asha", "rating": {"average": 4.8, "count": 37}},
+     "expires_at": "2026-10-02T08:15:17.410Z", "expires_in_ms": 14850},
+    {"type": "offer_withdrawn", "offer_id": "0199a3f0-8a11-7e22-9f33-a44b55c66d77", "reason": "RIDER_CANCELLED"},
+    {"type": "driver_status", "status": "OFFLINE", "version": 42, "reason": "UNRESPONSIVE"},
+    {"type": "ride_status", "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10", "status": "DRIVER_ASSIGNED", "version": 1,
+     "driver": {"first_name": "Ravi", "rating": {"average": 4.9, "count": 100}},
+     "vehicle": {"make": "Maruti", "model": "Swift Dzire", "colour": "White", "plate": "KA 01 AB 1234"},
+     "promised_pickup_eta_s": 240},
+    {"type": "driver_position", "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10", "lat": 12.97012, "lon": 77.63871,
+     "heading_deg": 45, "seq": 1850, "eta_s": 180},
+    {"type": "ops_snapshot", "city_id": "blr", "at": "2026-10-02T08:16:00.000Z",
+     "drivers": [{"driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8", "lat": 12.97012, "lon": 77.63871,
+                  "status": "ASSIGNED", "category": "MINI", "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10", "stale": false}]},
+    {"type": "reconnect", "after_ms": 12500},
+    {"type": "error", "code": "INVALID_MESSAGE", "message": "Unknown type"}
+  ]
+}

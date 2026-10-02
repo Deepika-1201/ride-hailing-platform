@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/RatingSubmitted.v1.json",
+  "title": "RatingSubmitted v1",
+  "description": "A rider or driver rated the other party. The comment stays in the rating module. Aggregate: rating; key: ride.",
+  "type": "object",
+  "required": ["rating_id", "ride_id", "rater_role", "rater_id", "ratee_id", "stars", "has_comment", "submitted_at"],
+  "additionalProperties": false,
+  "properties": {
+    "rating_id": {"$ref": "common.json#/$defs/uuid"},
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rater_role": {"enum": ["RIDER", "DRIVER"]},
+    "rater_id": {"$ref": "common.json#/$defs/uuid"},
+    "ratee_id": {"$ref": "common.json#/$defs/uuid"},
+    "stars": {"type": "integer", "minimum": 1, "maximum": 5},
+    "has_comment": {"type": "boolean"},
+    "submitted_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "rating_id": "0199a3fb-1234-7abc-8def-0123456789ab",
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rater_role": "RIDER",
+      "rater_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "ratee_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "stars": 5,
+      "has_comment": false,
+      "submitted_at": "2026-10-02T08:49:00.000Z"
+    }
+  ]
+}

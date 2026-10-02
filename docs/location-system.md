@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Part of | [HLD](architecture.md) §7 |
-| Status | Draft for approval |
+| Status | Approved 2026-10-02 (refined by the [LLD](low-level-design.md#9-location-and-the-live-index)) |
 | Decisions | [ADR-004](decisions/ADR-004-live-location-index.md) (live index), [ADR-006](decisions/ADR-006-realtime-transport.md) (transport), [ADR-016](decisions/ADR-016-trip-routes.md) (trip routes), [ADR-007](decisions/ADR-007-message-broker.md) (location stream) |
 | Requirements | FR-L1–FR-L6, FR-A2, NFR-5, NFR-6, NFR-10, Q17 |
 | Evidence | [Spike S-1](../spikes/results/s1-live-index.md), [spike S-3](../spikes/results/s3-websockets.md) |
@@ -24,7 +24,7 @@ A driver's app sends one message per update on its WebSocket ([ADR-006](decision
 
 ```json
 {"type": "location", "seq": 1842, "lat": 12.97571, "lon": 77.60502, "accuracy_m": 8.5,
- "heading_deg": 91, "speed_mps": 7.2, "device_time": "2026-10-02T08:15:04.120Z", "replay": false}
+ "heading_deg": 91, "speed_mps": 7.2, "device_time": "2026-10-02T08:15:04.120Z"}
 ```
 
 The driver's `realtime` node handles it in this order:
@@ -44,7 +44,7 @@ S-1 measured step 5 at 0.6 ms p50 at the cloud tier, so the whole path stays far
 - **Order matters per driver only.** Each update carries the app's sequence number, which increases with every update the app records, including those taken offline.
 - The live-index script ignores any update whose sequence isn't greater than the stored one. That covers duplicates, retries and updates overtaken in flight (brief scenario 9).
 - **Freshness uses the server's receive time**, never the device time, because device clocks can be minutes off (A-3). The device time is stored with trip points for reconstructing the route.
-- **Offline replays:** after a tunnel or network loss, the app sends its buffered updates marked `replay: true`, up to 100 per message, oldest first, then resumes live updates.
+- **Offline replays:** after a tunnel or network loss, the app sends its buffered updates marked `replay: true`, oldest first, in batches of up to 100 over `POST /v1/drivers/me/location`, then resumes live updates on the socket. WebSocket frames are sized under 1 KB (spike S-3), which a 100-point batch would exceed.
   - Replayed points go into the trip route, deduplicated by ride and sequence.
   - Only a point newer than the stored one can move the live position.
 
@@ -56,6 +56,8 @@ S-1 measured step 5 at 0.6 ms p50 at the cloud tier, so the whole path stays far
 | 2 min while `ASSIGNED` | Ride reassigned and driver taken offline ([ride lifecycle T7](ride-lifecycle.md#3-transitions)) | Sweeper → ride module |
 | 10 min while `AVAILABLE` | Driver taken offline (FR-L3) | Sweeper → dispatch module |
 | Any silence while `ON_TRIP` | Nothing: the trip continues and the app's queued commands arrive later (FR-RD8) | — |
+
+The 2-min and 10-min rules have a safety valve. They take no action while the live index is younger than the rule's threshold (after a loss of Valkey, nobody's silence means anything yet), or when a rule would act on more than 10% of a city's drivers at once (mass silence means the platform lost contact, not that drivers left). An alert fires instead ([LLD §8.9](low-level-design.md#89-sweeper)).
 
 ## 5. GPS quality
 
@@ -91,7 +93,7 @@ The status comes from the mirror, not from the app, so a driver can't make thems
 | `AVAILABLE` (online, offer declined or expired, ride ended) | `status = AVAILABLE`, `ride` cleared, `GEOADD` at the last position |
 | `OFFERED` | `status = OFFERED`, removed from the GEO set |
 | `ASSIGNED`, `ON_TRIP` | `status` set, `ride = <rideId>`, removed from the GEO set |
-| Offline (row deleted) | Hash deleted, removed from the GEO set and from last-seen |
+| Offline | The hash becomes a tombstone that keeps the status version for 10 min; removed from the GEO sets and from last-seen |
 
 The mirror is written after commit, so it can briefly lag or, if Valkey errors, be missed. A **reconciler** in `dispatch` compares each city's online drivers in PostgreSQL with the mirror every 30 s and repairs differences. A stale entry can only produce a candidate whose reservation then fails, because PostgreSQL decides (ADR-004).
 

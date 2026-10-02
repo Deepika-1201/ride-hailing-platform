@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/websocket/client-messages.v1.json",
+  "title": "WebSocket messages from clients, version 1",
+  "description": "Text frames under 1 KB (LLD §14.2). Offline replays go over POST /v1/drivers/me/location instead.",
+  "oneOf": [
+    {"$ref": "#/$defs/location"},
+    {"$ref": "#/$defs/offer_seen"},
+    {"$ref": "#/$defs/ops_viewport"}
+  ],
+  "$defs": {
+    "location": {
+      "type": "object",
+      "description": "A driver's live location update, every 4 s.",
+      "required": ["type", "seq", "lat", "lon", "accuracy_m", "device_time"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "location"},
+        "seq": {"type": "integer", "minimum": 0},
+        "lat": {"type": "number", "minimum": -90, "maximum": 90},
+        "lon": {"type": "number", "minimum": -180, "maximum": 180},
+        "accuracy_m": {"type": "number", "minimum": 0},
+        "heading_deg": {"type": "number", "minimum": 0, "exclusiveMaximum": 360},
+        "speed_mps": {"type": "number", "minimum": 0},
+        "device_time": {"$ref": "../events/common.json#/$defs/timestamp"}
+      }
+    },
+    "offer_seen": {
+      "type": "object",
+      "description": "The driver's app displayed an offer; only seen offers count towards going offline after 3 expiries.",
+      "required": ["type", "offer_id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "offer_seen"},
+        "offer_id": {"$ref": "../events/common.json#/$defs/uuid"}
+      }
+    },
+    "ops_viewport": {
+      "type": "object",
+      "description": "Operations only: the city and map area to stream as ops_snapshot.",
+      "required": ["type", "city_id", "bbox"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "ops_viewport"},
+        "city_id": {"$ref": "../events/common.json#/$defs/city_id"},
+        "bbox": {
+          "type": "object",
+          "required": ["min_lat", "min_lon", "max_lat", "max_lon"],
+          "additionalProperties": false,
+          "properties": {
+            "min_lat": {"type": "number", "minimum": -90, "maximum": 90},
+            "min_lon": {"type": "number", "minimum": -180, "maximum": 180},
+            "max_lat": {"type": "number", "minimum": -90, "maximum": 90},
+            "max_lon": {"type": "number", "minimum": -180, "maximum": 180}
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {"type": "location", "seq": 1842, "lat": 12.97571, "lon": 77.60502, "accuracy_m": 8.5, "heading_deg": 91,
+     "speed_mps": 7.2, "device_time": "2026-10-02T08:15:04.120Z"},
+    {"type": "offer_seen", "offer_id": "0199a3f0-8a11-7e22-9f33-a44b55c66d77"},
+    {"type": "ops_viewport", "city_id": "blr",
+     "bbox": {"min_lat": 12.90, "min_lon": 77.55, "max_lat": 13.02, "max_lon": 77.70}}
+  ]
+}

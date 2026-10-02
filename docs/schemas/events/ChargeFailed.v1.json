@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/ChargeFailed.v1.json",
+  "title": "ChargeFailed v1",
+  "description": "A charge failed and became rider dues. Aggregate: charge; key: ride.",
+  "type": "object",
+  "required": ["charge_id", "ride_id", "rider_id", "purpose", "amount", "method_type", "failure_code", "failed_at"],
+  "additionalProperties": false,
+  "properties": {
+    "charge_id": {"$ref": "common.json#/$defs/uuid"},
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "purpose": {"$ref": "common.json#/$defs/charge_purpose"},
+    "amount": {"$ref": "common.json#/$defs/money"},
+    "method_type": {"$ref": "common.json#/$defs/method_type"},
+    "failure_code": {"type": "string", "examples": ["DECLINED", "NOT_RECEIVED", "NO_PAYMENT_METHOD"]},
+    "attempt_id": {"$ref": "common.json#/$defs/uuid", "description": "Absent when no attempt could be made."},
+    "failed_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "charge_id": "0199a3f9-aaaa-7bbb-8ccc-dddd1111eeee",
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "purpose": "FARE",
+      "amount": {"amount_paise": 25900, "currency": "INR"},
+      "method_type": "UPI",
+      "failure_code": "DECLINED",
+      "attempt_id": "0199a3f9-bbbb-7ccc-8ddd-eeee2222ffff",
+      "failed_at": "2026-10-02T08:47:13.950Z"
+    }
+  ]
+}

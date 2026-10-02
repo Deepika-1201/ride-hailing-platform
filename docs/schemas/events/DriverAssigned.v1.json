@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/DriverAssigned.v1.json",
+  "title": "DriverAssigned v1",
+  "description": "A driver accepted the ride's offer (T2). Aggregate: ride. Never carries the PIN.",
+  "type": "object",
+  "required": ["ride_id", "rider_id", "driver_id", "vehicle_id", "offer_id", "promised_pickup_eta_s",
+               "reassign_count", "assigned_at"],
+  "additionalProperties": false,
+  "properties": {
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "vehicle_id": {"$ref": "common.json#/$defs/uuid"},
+    "offer_id": {"$ref": "common.json#/$defs/uuid"},
+    "promised_pickup_eta_s": {"type": "integer", "minimum": 0},
+    "reassign_count": {"type": "integer", "minimum": 0},
+    "assigned_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "vehicle_id": "0199a3d2-a001-7b2c-8d3e-4f5a6b7c8d9e",
+      "offer_id": "0199a3f0-8a11-7e22-9f33-a44b55c66d77",
+      "promised_pickup_eta_s": 240,
+      "reassign_count": 0,
+      "assigned_at": "2026-10-02T08:15:21.402Z"
+    }
+  ]
+}

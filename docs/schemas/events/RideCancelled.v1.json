@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/RideCancelled.v1.json",
+  "title": "RideCancelled v1",
+  "description": "The ride ended without a trip (T4, T8, T10, T11, T13). A fee, when due, is charged by the payment module. Aggregate: ride.",
+  "type": "object",
+  "required": ["ride_id", "rider_id", "city_id", "status", "cancelled_by", "payment_method_id",
+               "payment_method_type", "cancelled_at"],
+  "additionalProperties": false,
+  "properties": {
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "driver_id": {"$ref": "common.json#/$defs/uuid", "description": "Present when a driver was assigned."},
+    "city_id": {"$ref": "common.json#/$defs/city_id"},
+    "status": {"enum": ["CANCELLED_BY_RIDER", "CANCELLED_BY_DRIVER", "CANCELLED_BY_SYSTEM"]},
+    "cancelled_by": {"enum": ["RIDER", "DRIVER", "SYSTEM"]},
+    "reason": {"type": "string", "maxLength": 500, "description": "NO_SHOW for a no-show; free text otherwise."},
+    "fee": {
+      "type": "object",
+      "required": ["purpose", "amount", "commission", "fee_rule_id"],
+      "additionalProperties": false,
+      "properties": {
+        "purpose": {"enum": ["CANCELLATION_FEE", "NO_SHOW_FEE"]},
+        "amount": {"$ref": "common.json#/$defs/money"},
+        "commission": {"$ref": "common.json#/$defs/money"},
+        "fee_rule_id": {"$ref": "common.json#/$defs/uuid"}
+      }
+    },
+    "payment_method_id": {"$ref": "common.json#/$defs/uuid"},
+    "payment_method_type": {"$ref": "common.json#/$defs/method_type"},
+    "cancelled_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "city_id": "blr",
+      "status": "CANCELLED_BY_DRIVER",
+      "cancelled_by": "DRIVER",
+      "reason": "NO_SHOW",
+      "fee": {
+        "purpose": "NO_SHOW_FEE",
+        "amount": {"amount_paise": 5000, "currency": "INR"},
+        "commission": {"amount_paise": 1000, "currency": "INR"},
+        "fee_rule_id": "0199a300-0000-7000-8000-000000000001"
+      },
+      "payment_method_id": "0199a3e1-5555-7666-8777-888899990000",
+      "payment_method_type": "CARD",
+      "cancelled_at": "2026-10-02T08:25:10.000Z"
+    }
+  ]
+}

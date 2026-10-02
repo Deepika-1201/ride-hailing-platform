@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/OfferDeclined.v1.json",
+  "title": "OfferDeclined v1",
+  "description": "The driver declined, or went offline while the offer was pending. Aggregate: offer; key: ride.",
+  "type": "object",
+  "required": ["offer_id", "ride_id", "driver_id", "reason", "responded_at"],
+  "additionalProperties": false,
+  "properties": {
+    "offer_id": {"$ref": "common.json#/$defs/uuid"},
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "reason": {"enum": ["DRIVER", "DRIVER_OFFLINE"]},
+    "responded_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "offer_id": "0199a3f0-8a11-7e22-9f33-a44b55c66d77",
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "reason": "DRIVER",
+      "responded_at": "2026-10-02T08:15:09.020Z"
+    }
+  ]
+}

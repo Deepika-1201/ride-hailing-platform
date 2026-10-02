@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/DriverWentOnline.v1.json",
+  "title": "DriverWentOnline v1",
+  "description": "The driver went online with a vehicle. Aggregate: availability; key: driver.",
+  "type": "object",
+  "required": ["driver_id", "city_id", "category", "vehicle_id", "online_at"],
+  "additionalProperties": false,
+  "properties": {
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "city_id": {"$ref": "common.json#/$defs/city_id"},
+    "category": {"$ref": "common.json#/$defs/category"},
+    "vehicle_id": {"$ref": "common.json#/$defs/uuid"},
+    "online_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "city_id": "blr",
+      "category": "MINI",
+      "vehicle_id": "0199a3d2-a001-7b2c-8d3e-4f5a6b7c8d9e",
+      "online_at": "2026-10-02T07:58:00.000Z"
+    }
+  ]
+}

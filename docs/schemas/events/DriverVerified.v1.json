@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/DriverVerified.v1.json",
+  "title": "DriverVerified v1",
+  "description": "An admin verified the driver, who may now go online. Aggregate: driver; key: driver.",
+  "type": "object",
+  "required": ["driver_id", "city_id", "verified_at", "verified_by"],
+  "additionalProperties": false,
+  "properties": {
+    "driver_id": {"$ref": "common.json#/$defs/uuid"},
+    "city_id": {"$ref": "common.json#/$defs/city_id"},
+    "verified_at": {"$ref": "common.json#/$defs/timestamp"},
+    "verified_by": {"$ref": "common.json#/$defs/uuid"}
+  },
+  "examples": [
+    {
+      "driver_id": "0199a3d2-9e8f-7c6b-a5d4-c3b2a1f0e9d8",
+      "city_id": "blr",
+      "verified_at": "2026-10-01T10:00:00.000Z",
+      "verified_by": "0199a300-0000-7000-8000-0000000000aa"
+    }
+  ]
+}

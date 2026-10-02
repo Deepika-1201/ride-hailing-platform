@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/RideNotMatched.v1.json",
+  "title": "RideNotMatched v1",
+  "description": "No driver accepted before the search timeout; the ride ended as DRIVER_NOT_FOUND (T3). Aggregate: ride.",
+  "type": "object",
+  "required": ["ride_id", "rider_id", "city_id", "category", "searched_for_s", "ended_at"],
+  "additionalProperties": false,
+  "properties": {
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "city_id": {"$ref": "common.json#/$defs/city_id"},
+    "category": {"$ref": "common.json#/$defs/category"},
+    "searched_for_s": {"type": "integer", "minimum": 0},
+    "ended_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "city_id": "blr",
+      "category": "XL",
+      "searched_for_s": 180,
+      "ended_at": "2026-10-02T08:18:02.300Z"
+    }
+  ]
+}

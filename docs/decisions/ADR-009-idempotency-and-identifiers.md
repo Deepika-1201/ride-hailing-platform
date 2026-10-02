@@ -56,3 +56,7 @@ How does every layer make a repeat harmless, and which identifiers tie requests,
 ## Revisit when
 
 - Keys need to live longer than 24 h, for example offline commands replayed days later; the retention then rises for that endpoint.
+
+## Amendments
+
+- **2026-10-02, low-level design** ([LLD §5.1](../low-level-design.md#51-idempotency-adr-009), [review](../architecture-review.md) R-25): keys are required on commands that change a ride, an offer, a driver's status, a payment or a rating, not on every state-changing `POST`. Sign-in and token calls are exempt because a stored response would hand the same tokens to anyone replaying the key; quotes because a repeat is just another quote; location updates, tickets and webhooks because sequence numbers, single use and provider event IDs already deduplicate them.

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/events/RideRequested.v1.json",
+  "title": "RideRequested v1",
+  "description": "A rider booked a ride (T1). Aggregate: ride.",
+  "type": "object",
+  "required": ["ride_id", "rider_id", "city_id", "category", "pickup", "dropoff", "pickup_zone", "fare",
+               "payment_method_type", "quote_id", "requested_at"],
+  "additionalProperties": false,
+  "properties": {
+    "ride_id": {"$ref": "common.json#/$defs/uuid"},
+    "rider_id": {"$ref": "common.json#/$defs/uuid"},
+    "city_id": {"$ref": "common.json#/$defs/city_id"},
+    "category": {"$ref": "common.json#/$defs/category"},
+    "pickup": {"$ref": "common.json#/$defs/point"},
+    "dropoff": {"$ref": "common.json#/$defs/point"},
+    "pickup_zone": {"$ref": "common.json#/$defs/zone_id"},
+    "fare": {"$ref": "common.json#/$defs/money"},
+    "payment_method_type": {"$ref": "common.json#/$defs/method_type"},
+    "quote_id": {"$ref": "common.json#/$defs/uuid"},
+    "requested_at": {"$ref": "common.json#/$defs/timestamp"}
+  },
+  "examples": [
+    {
+      "ride_id": "0199a3f0-7c2e-7a41-9b3d-5f2e8c1d4a10",
+      "rider_id": "0199a3e1-2b4c-7d10-8e9f-1a2b3c4d5e6f",
+      "city_id": "blr",
+      "category": "MINI",
+      "pickup": {"lat": 12.97194, "lon": 77.64115},
+      "dropoff": {"lat": 12.93524, "lon": 77.62448},
+      "pickup_zone": "8761892e5ffffff",
+      "fare": {"amount_paise": 25900, "currency": "INR"},
+      "payment_method_type": "CARD",
+      "quote_id": "0199a3ef-1111-7222-8333-944455566677",
+      "requested_at": "2026-10-02T08:15:02.118Z"
+    }
+  ]
+}
