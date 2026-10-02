@@ -12,6 +12,8 @@ spring:
       maximum-pool-size: ${DB_POOL_SIZE:20}
       connection-timeout: 3000
       validation-timeout: 1000
+      # LLD §1.4: every statement, jobs included; longer only with SET LOCAL.
+      connection-init-sql: SET statement_timeout = '2s'
   jackson:
     property-naming-strategy: SNAKE_CASE
     default-property-inclusion: non_null

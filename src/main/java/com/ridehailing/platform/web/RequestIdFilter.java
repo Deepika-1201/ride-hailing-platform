@@ -1,5 +1,7 @@
 package com.ridehailing.platform.web;
 
+import com.ridehailing.platform.LogContext;
+import com.ridehailing.platform.Role;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -13,13 +15,15 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-/** Gives every request an ID: echoed in {@code X-Request-Id} and logged as {@code request_id} (LLD §13.1). */
+/**
+ * Gives every request an ID: echoed in {@code X-Request-Id} and logged as {@code request_id} (LLD §13.1). Requests
+ * are the {@code api} role's entry point, so the role goes into the logging context too.
+ */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 final class RequestIdFilter extends OncePerRequestFilter {
 
     static final String HEADER = "X-Request-Id";
-    static final String MDC_KEY = "request_id";
 
     private static final Pattern ACCEPTED = Pattern.compile("[A-Za-z0-9._-]{1,64}");
 
@@ -28,11 +32,13 @@ final class RequestIdFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String requestId = acceptOrGenerate(request.getHeader(HEADER));
         response.setHeader(HEADER, requestId);
-        MDC.put(MDC_KEY, requestId);
+        MDC.put(LogContext.REQUEST_ID, requestId);
+        MDC.put(LogContext.ROLE, Role.API.id());
         try {
             chain.doFilter(request, response);
         } finally {
-            MDC.remove(MDC_KEY);
+            MDC.remove(LogContext.REQUEST_ID);
+            MDC.remove(LogContext.ROLE);
         }
     }
 

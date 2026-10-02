@@ -4,12 +4,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ridehailing.support.IntegrationTest;
 import java.net.http.HttpResponse;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** A process running one role other than {@code api}: healthy, but no public API on port 8080. */
 abstract class BackgroundRoleTests extends IntegrationTest {
 
     abstract String role();
+
+    /** The role-bound loops this role runs. */
+    abstract List<String> loops();
+
+    @Test
+    void runsOnlyItsOwnBackgroundLoops() {
+        assertThat(backgroundLoops()).containsExactlyElementsOf(loops());
+    }
 
     @Test
     void infoReportsOnlyItsRole() {

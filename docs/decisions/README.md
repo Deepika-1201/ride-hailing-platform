@@ -8,10 +8,10 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-002](ADR-002-java-spring-boot-jdbc.md) | Java 25 and Spring Boot 4.1, with plain JDBC, Flyway and ArchUnit-enforced module boundaries | Accepted |
 | [ADR-003](ADR-003-postgresql-postgis.md) | PostgreSQL 18 with PostGIS as the system of record (not for live positions) | Accepted |
 | [ADR-004](ADR-004-live-location-index.md) | Live driver positions in Valkey GEO sets, sharded by city (spike S-1) | Accepted |
-| [ADR-005](ADR-005-durable-timers.md) | Durable timers in a PostgreSQL table, claimed with `SKIP LOCKED` (spike S-2) | Accepted |
+| [ADR-005](ADR-005-durable-timers.md) | Durable timers in a PostgreSQL table, claimed with `SKIP LOCKED` (spike S-2) | Accepted (amended 2026-10-02) |
 | [ADR-006](ADR-006-realtime-transport.md) | WebSockets for streams, HTTPS for commands, Valkey pub/sub to reach connections (spike S-3) | Accepted (amended 2026-10-02) |
 | [ADR-007](ADR-007-message-broker.md) | Apache Kafka (KRaft) as the message broker, from V3 | Accepted |
-| [ADR-008](ADR-008-outbox-and-events.md) | Transactional outbox, event envelope and versioning | Accepted |
+| [ADR-008](ADR-008-outbox-and-events.md) | Transactional outbox, event envelope and versioning | Accepted (amended 2026-10-02) |
 | [ADR-009](ADR-009-idempotency-and-identifiers.md) | Idempotency at every layer, and the identifiers that carry it | Accepted (amended 2026-10-02) |
 | [ADR-010](ADR-010-state-machines.md) | Explicit state machines with versioned conditional updates | Accepted (amended 2026-10-02) |
 | [ADR-011](ADR-011-dispatch-protocol.md) | Dispatch through search tasks in PostgreSQL, sequential offers reserved at offer time | Accepted |
@@ -26,5 +26,6 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-020](ADR-020-valkey-access.md) | Valkey access: Lettuce, scripts by `EVALSHA`, sharded pub/sub | Accepted |
 | [ADR-021](ADR-021-simulator.md) | A Go simulator that drives the platform through its public APIs | Accepted |
 | [ADR-022](ADR-022-demo-web-app.md) | Demo web app: React and MapLibre on self-hosted OpenStreetMap tiles | Accepted |
+| [ADR-023](ADR-023-recurring-jobs.md) | Recurring jobs scheduled by the expiry of a database lease | Accepted |
 
 Amendments are dated sections at the end of an ADR; the original decision text stays as it was.

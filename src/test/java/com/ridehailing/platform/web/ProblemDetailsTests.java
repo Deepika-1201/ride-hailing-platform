@@ -17,6 +17,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -116,6 +117,16 @@ class ProblemDetailsTests {
     }
 
     @Test
+    void moduleErrorCanAddRetryAfterAndExtraMembers() throws Exception {
+        mvc.perform(get("/test/problems/retry-later"))
+                .andExpect(status().isConflict())
+                .andExpect(header().string("Retry-After", "2"))
+                .andExpect(jsonPath("$.code").value("INVALID_TRANSITION"))
+                .andExpect(jsonPath("$.current_status").value("COMPLETED"))
+                .andExpect(jsonPath("$.current_version").value(7));
+    }
+
+    @Test
     void unexpectedErrorHidesItsMessage() throws Exception {
         MvcResult result = mvc.perform(get("/test/problems/boom"))
                 .andExpect(status().isInternalServerError())
@@ -148,6 +159,12 @@ class ProblemDetailsTests {
         @GetMapping("/test/problems/conflict")
         Map<String, Object> conflict() {
             throw new ApiException(HttpStatus.CONFLICT, "ACTIVE_RIDE_EXISTS", "You already have an active ride.");
+        }
+
+        @GetMapping("/test/problems/retry-later")
+        Map<String, Object> retryLater() {
+            throw new ApiException(HttpStatus.CONFLICT, "INVALID_TRANSITION", "The ride is completed.",
+                    Duration.ofMillis(1_500), Map.of("current_status", "COMPLETED", "current_version", 7));
         }
 
         @GetMapping("/test/problems/boom")

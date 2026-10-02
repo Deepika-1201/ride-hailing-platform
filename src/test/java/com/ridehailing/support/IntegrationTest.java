@@ -9,10 +9,13 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestComponent;
 import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -20,9 +23,16 @@ import org.springframework.web.bind.annotation.GetMapping;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
-/** The whole application on random ports against the shared PostGIS container. Subclasses choose the roles. */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "management.server.port=0")
-@Import(IntegrationTest.RoleProbeController.class)
+/**
+ * The whole application on random ports against the shared PostGIS container. Subclasses choose the roles. Background
+ * loops are stopped, so tests drive them step by step, and consumer retries are quick.
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
+    "management.server.port=0",
+    "ride.workers.autostart=false",
+    "ride.outbox.retry-delays=10ms,10ms,10ms"
+})
+@Import({IntegrationTest.RoleProbeController.class, IdempotencyProbeController.class, TestHandlers.class})
 public abstract class IntegrationTest {
 
     protected static final String API_PROBE = "/test/role-probe";
@@ -42,17 +52,34 @@ public abstract class IntegrationTest {
     @LocalManagementPort
     protected int managementPort;
 
+    @Autowired
+    private ApplicationContext context;
+
+    /** The role-bound background loops this process has: the relay (worker) and the timer poller (dispatch). */
+    protected List<String> backgroundLoops() {
+        return Stream.of("outboxRelay", "timerPoller").filter(context::containsBean).toList();
+    }
+
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     protected HttpResponse<String> get(int targetPort, String path) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + targetPort + path))
-                .timeout(Duration.ofSeconds(10))
-                .GET()
-                .build();
+        return send(HttpRequest.newBuilder(URI.create("http://localhost:" + targetPort + path)).GET());
+    }
+
+    protected HttpResponse<String> postJson(String path, Map<String, String> headers, String body) {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        headers.forEach(request::header);
+        return send(request);
+    }
+
+    private HttpResponse<String> send(HttpRequest.Builder request) {
+        HttpRequest built = request.timeout(Duration.ofSeconds(10)).build();
         try {
-            return http.send(request, HttpResponse.BodyHandlers.ofString());
+            return http.send(built, HttpResponse.BodyHandlers.ofString());
         } catch (IOException e) {
-            throw new AssertionError("GET " + path + " failed", e);
+            throw new AssertionError(built.method() + " " + built.uri() + " failed", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AssertionError(e);

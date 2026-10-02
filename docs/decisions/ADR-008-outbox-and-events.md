@@ -57,3 +57,11 @@ How are events published reliably, in order per aggregate, in a format that can 
 
 - S-4 shows the relay can't keep up: partition the outbox, or move to change data capture.
 - A schema registry becomes worthwhile, for example with many external consumers.
+
+## Amendments
+
+- **2026-10-02, phase 2** ([LLD §5.2](../low-level-design.md#52-outbox-and-relay-adr-008), [§5.3](../low-level-design.md#53-consumers-and-the-inbox)):
+  - Published rows are deleted after 7 days **unless a consumer's delivery of the event is still set aside**, because a re-drive reads the event from its outbox row.
+  - A consumer that fails 3 retries has the event set aside in `platform.failed_deliveries` for that consumer only; other consumers and later events continue. `FailedDeliveries.redrive` delivers it again through the inbox.
+  - The relay renews its lease between events and releases it on shutdown. Its "mark published" update checks holder and token in the same statement: the token alone tells a stale relay from its successor when a restarted container reuses the host name and process ID.
+  - The envelope's `producer` is derived from the payload's module and the role in the logging context; `correlation_id` defaults to the partition key, and `causation_id` to the event being handled or else the request ID.

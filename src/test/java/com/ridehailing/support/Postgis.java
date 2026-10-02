@@ -1,6 +1,9 @@
 package com.ridehailing.support;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -32,5 +35,11 @@ public final class Postgis {
             shared.start();
         }
         return shared;
+    }
+
+    /** A session of its own, outside the application's pool, for holding locks the application must meet. */
+    public static Connection connection() throws SQLException {
+        PostgreSQLContainer database = shared();
+        return DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword());
     }
 }

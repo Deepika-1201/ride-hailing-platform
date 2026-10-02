@@ -52,3 +52,11 @@ Where do timers live, and how are they fired exactly when due, despite crashes, 
 - A requirement needs precision tighter than ~250 ms.
 - Timer rates grow far beyond the designed-for tier (~2,000/s).
 - Batch matching in V4 moves dispatch to per-city owners, where in-memory scheduling per city (option B) becomes natural.
+
+## Amendments
+
+- **2026-10-02, low-level design and phase 2** ([LLD §5.4](../low-level-design.md#54-timers-adr-005)):
+  - Pollers claim **one timer per transaction**, not batches of 200, so a slow or failing handler can't hold or roll back others; the cost is a few more round trips per timer.
+  - A failed firing is no longer simply due again. A second transaction adds 1 to `attempts`, stores `last_error` and backs the timer off by min(2^attempts, 60) s; after 10 failures it is parked and an alert fires.
+  - A poller claims only the kinds that have a handler in its own process, so during a rolling deployment an old node never takes, and parks, a kind that only the new version knows.
+  - Cancelling uses `SKIP LOCKED` and never waits for a timer being fired; that handler finds the state moved on.

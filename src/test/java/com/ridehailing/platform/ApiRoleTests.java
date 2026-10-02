@@ -18,4 +18,9 @@ class ApiRoleTests extends IntegrationTest {
     void servesThePublicApi() {
         assertThat(get(port, API_PROBE).statusCode()).isEqualTo(200);
     }
+
+    @Test
+    void runsNoBackgroundLoop() {
+        assertThat(backgroundLoops()).isEmpty();
+    }
 }

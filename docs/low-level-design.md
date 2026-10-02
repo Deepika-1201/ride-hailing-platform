@@ -87,6 +87,7 @@ spikes/                           throwaway measurements (not product code)
 
 - `ride.roles` (environment `RIDE_ROLES`): a comma-separated subset of `api`, `realtime`, `dispatch`, `worker`. Default: all four. An empty or unknown value fails startup.
 - `@ApiController` = `@RestController` + `@ConditionalOnRole(API)`. Jobs use `@RoleComponent(DISPATCH)` and similar. An ArchUnit rule rejects a bare `@RestController` or `@Scheduled` method.
+- **Background loops** (relay, pollers, recurring jobs) run on virtual threads that put their role in the logging context. They start with the application unless `ride.workers.autostart=false`, which tests use to drive each loop step by step, and they stop before the connection pool closes.
 - Port 8080 serves the public REST API (role `api`) and WebSockets (role `realtime`, V2). Port 8081 serves management: health, info (active roles), Prometheus metrics.
 - **V1 runs on PostgreSQL alone** (ADR-001): the live index, rate limiter and push bus use in-memory implementations of their ports (§9.2, §5.8). Those implementations are only correct inside one process, so startup fails if `ride.location.store=memory` is combined with a role set that doesn't include both `api` and `dispatch`.
 
@@ -94,14 +95,14 @@ spikes/                           throwaway measurements (not product code)
 
 | Topic | Rule |
 |---|---|
-| Identifiers | UUIDv7 generated in the application by `IdGenerator` (monotonic within a millisecond per JVM), so IDs exist before the insert and tests can fix them. Key columns also default to `uuidv7()` for rows written by SQL, such as seed data |
+| Identifiers | UUIDv7 generated in the application by `Ids.newId()` in `shared`, so IDs exist before the insert and tests can fix them. Monotonic per JVM: a 12-bit counter below the millisecond (RFC 9562, method 3), and 62 random bits from `SecureRandom`. Key columns also default to `uuidv7()` for rows written by SQL, such as seed data |
 | Time | The **database clock** decides everything compared in SQL: due timers, expiries, leases. The **application clock** is UTC with microsecond ticks (matching `timestamptz`) and evaluates domain windows measured in minutes (free cancellation, no-show wait). All timestamps are stored in UTC; days for earnings use the city's time zone (`Asia/Kolkata`) |
 | Money | `Money(long paise, Currency)`; INR only; integer arithmetic; percentages in basis points (`tax_bp = 500` is 5%); one rounding step, up to whole rupees, at the end of a fare calculation (§10.2) |
 | Coordinates | `GeoPoint(lat, lon)` as doubles, validated to WGS 84 ranges; stored as `lat`/`lon` columns. Distances by haversine with Earth radius 6,371,008.8 m. PostGIS types only for polygons and spatial queries |
 | JSON | Jackson 3; `snake_case`; ISO-8601 UTC timestamps; null fields omitted; unknown request fields ignored |
 | Validation | Jakarta Bean Validation on request records; domain rules in `domain` |
 | Logs | JSON (ECS) in containers, plain text locally. Context: `request_id`, `correlation_id`, `trace_id`, `span_id`, `role`, `module`, and `ride_id` or `driver_id` when known |
-| Transactions | `READ COMMITTED`. `statement_timeout` 2 s on request paths, 5 s in jobs **(assumed)**. Deadlocks (`40P01`) and serialization failures (`40001`) are retried up to 3 times by the transaction template; nothing else is retried automatically |
+| Transactions | `READ COMMITTED`. `statement_timeout` 2 s, the HLD's request-path value, set on every pooled connection when it opens, so jobs get it too; work that needs longer, such as a heavy migration, raises it with `SET LOCAL` for its own transaction. Deadlocks (`40P01`) and serialization failures (`40001`) are retried up to 3 times by `Transactions.execute` when it started the transaction; nothing else is retried automatically |
 
 ### 1.5 Local runs, image and CI
 
@@ -262,11 +263,23 @@ public interface AuditLog { void record(AuditEntry entry); }   // joins the call
 
 // platform
 public interface Outbox { void append(DomainEvent event); }    // joins the caller's transaction
+public interface EventConsumer { String name(); Set<String> eventTypes(); void handle(EventEnvelope event); }  // §5.3
+public interface FailedDeliveries { boolean redrive(String consumer, UUID eventId); }
 public interface Timers {
     void schedule(TimerKind kind, UUID aggregateId, Instant dueAt, Map<String, Object> payload);
-    void cancel(TimerKind kind, UUID aggregateId);          // never waits (§6.2)
+    int cancel(TimerKind kind, UUID aggregateId);           // never waits (§6.2)
 }
-public interface Idempotency { <T> CommandResponse<T> execute(IdempotentCall call, Supplier<CommandResponse<T>> command); }
+public interface TimerHandler { TimerKind kind(); void fire(DueTimer timer); }               // §5.4
+public interface Idempotency {
+    ResponseEntity<?> execute(IdempotentCall call, Supplier<? extends ResponseEntity<?>> command);
+}
+public interface Leases {                                   // §5.5
+    OptionalLong acquire(String name, String holder, Duration ttl);
+    boolean renew(String name, String holder, long token, Duration ttl);
+    void release(String name, String holder, long token);
+}
+public interface RecurringJob { String name(); Role role(); Duration interval(); void run(); }  // §5.7
+public interface Transactions { <T> T execute(Supplier<T> work); }                           // §1.4
 ```
 
 ### 2.3 The dispatch participant
@@ -364,6 +377,7 @@ CREATE TABLE platform.inbox (
   processed_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (consumer, event_id)
 );
+CREATE INDEX inbox_processed ON platform.inbox (processed_at);                -- retention
 
 CREATE TABLE platform.failed_deliveries (            -- V1–V2 dead letters; Kafka topics from V3
   consumer     text        NOT NULL,
@@ -394,19 +408,20 @@ ALTER TABLE platform.timers SET (autovacuum_vacuum_scale_factor = 0, autovacuum_
                                  autovacuum_vacuum_cost_delay = 0);    -- churns by design (ADR-005)
 
 CREATE TABLE platform.idempotency_keys (
-  principal       text        NOT NULL,              -- user ID, or the webhook provider
-  key             text        NOT NULL CHECK (length(key) BETWEEN 1 AND 255),
-  request_hash    bytea       NOT NULL,              -- SHA-256 of method, path template, path values, body
-  response_status int         NOT NULL,              -- 0 while the owning transaction runs
-  response_body   text,
-  resource_id     uuid,
-  created_at      timestamptz NOT NULL DEFAULT now(),
-  expires_at      timestamptz NOT NULL,
+  principal             text        NOT NULL,        -- user ID, or the webhook provider
+  key                   text        NOT NULL CHECK (length(key) BETWEEN 1 AND 255),
+  request_hash          bytea       NOT NULL,        -- SHA-256 of the operation (method and path) and the body
+  response_status       int         NOT NULL,        -- 0 while the owning transaction runs
+  response_content_type text,                        -- set for problem responses
+  response_location     text,
+  response_body         text,
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  expires_at            timestamptz NOT NULL,
   PRIMARY KEY (principal, key)
 );
 CREATE INDEX idempotency_expiry ON platform.idempotency_keys (expires_at);
 
-CREATE TABLE platform.leases (
+CREATE TABLE platform.leases (                       -- a row is created by its first acquisition
   name       text PRIMARY KEY,                       -- outbox-relay, job:<name>, reconciler:<city>, city-owner:<city>
   holder     text,
   token      bigint NOT NULL DEFAULT 0,              -- fencing token, +1 on every acquisition
@@ -431,7 +446,7 @@ CREATE TABLE audit.audit_log (
   before_state   jsonb,
   after_state    jsonb,
   PRIMARY KEY (occurred_at, id)
-) PARTITION BY RANGE (occurred_at);                  -- monthly partitions, created 2 months ahead
+) PARTITION BY RANGE (occurred_at);                  -- monthly partitions (audit_log_yyyy_mm), kept 2 months ahead
 CREATE INDEX audit_by_entity ON audit.audit_log (entity_type, entity_id, occurred_at);
 -- Append-only: a trigger raises on UPDATE and DELETE. Dropping a whole expired partition is still possible.
 CREATE FUNCTION audit.reject_change() RETURNS trigger LANGUAGE plpgsql AS
@@ -1029,15 +1044,16 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
 - Each module's `V1__schema_owner.sql` records its owner on the schema (`COMMENT ON SCHEMA`), so every module has its schema and history from phase 1, before it has tables.
 - The PostGIS extension is created by the first migration that needs it (`geography`, phase 4), which also settles its schema; phase 1 only checks that the image provides it.
 - Forward-only. A change that a running version still depends on goes expand → migrate data → contract, across at least two releases (HLD §16.3).
-- Partitions (audit monthly, trip points daily) are created ahead by the maintenance job (§5.7), never by migrations, so a missed migration can't stop writes.
+- Migrations share the pool's 2 s statement timeout (§1.4). One that may run longer, such as creating the PostGIS extension or an index on a large table, starts with `SET LOCAL statement_timeout = 0`; Flyway runs each migration in its own transaction, so the setting ends with it.
+- Partitions (audit monthly, trip points daily) are kept ahead by the maintenance job (§5.7), so writes never depend on a migration running at the right time. The migration that creates a partitioned table also creates its first partitions (audit: the current month and the next two), because an `api`-only process may write before any `worker` has run the job.
 - Seed data for local runs and demos lives in `db/seed/` and loads only in the `local` profile: Bengaluru with its service area, airport and station areas, four categories, fare and fee rules, a few surge rules, 2,000 verified drivers with vehicles, 500 riders, and one operations and one admin account **(assumed counts for riders and staff)**.
 
 ## 5. Platform mechanisms
 
 ### 5.1 Idempotency (ADR-009)
 
-1. Every command that changes a ride, an offer, a driver's status, a payment or a rating requires `Idempotency-Key` (1–255 visible ASCII characters). The endpoint computes `request_hash` = SHA-256 of method, path template, path values and the canonical JSON body.
-2. Inside the command's transaction, before anything else, with `SET LOCAL lock_timeout = '1s'`:
+1. Every command that changes a ride, an offer, a driver's status, a payment or a rating requires `Idempotency-Key` (1–255 visible ASCII characters). The controller passes an `IdempotentCall`: the principal, the key, the operation (method and concrete path, such as `POST /v1/rides/0199…/cancel`, so path values count) and the parsed body. `request_hash` = SHA-256 of the operation and the body as JSON with sorted map keys, so formatting doesn't matter. A missing key is `400 IDEMPOTENCY_KEY_REQUIRED`; a malformed one is `400 VALIDATION_FAILED` with the header named in `errors`.
+2. Inside the command's transaction, before anything else: an expired row for the key is deleted, so the key can be used again. Then, with `SET LOCAL lock_timeout = '1s'`, reset to the default right after, so the command's own statements wait normally:
 
    ```sql
    INSERT INTO platform.idempotency_keys (principal, key, request_hash, response_status, expires_at)
@@ -1045,10 +1061,10 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
    ON CONFLICT (principal, key) DO NOTHING
    ```
 
-   - **Inserted:** run the command. Its response (status and JSON body) is written to the row just before commit, whatever the status, so a rejection that changed state (a wrong PIN, §7.6) replays exactly.
+   - **Inserted:** run the command. Its response (status, JSON body, `Location`, and the content type of a problem response) is written to the row just before commit, whatever the status, so a rejection that changed state (a wrong PIN, §7.6) replays exactly.
    - **Conflict:** the row exists and is committed. A different hash returns `422 IDEMPOTENCY_KEY_REUSED`; otherwise the stored response is returned with `Idempotent-Replayed: true`.
    - **Lock timeout:** another transaction holds the same key uncommitted, so it is still running: `409 IDEMPOTENCY_KEY_IN_PROGRESS` with `Retry-After: 1`.
-3. If the command's transaction rolls back (an exception, a business rejection that changed nothing, a crash), the key row disappears with it, and a retry runs the command again. That is safe because nothing happened.
+3. If the command's transaction rolls back (an exception, a business rejection that changed nothing, a crash), the key row disappears with it, and a retry runs the command again. That is safe because nothing happened. A deadlock or serialization failure is retried this way by `Transactions.execute`, key insert included (§1.4).
 4. Exempt endpoints, each because a repeat is harmless or has its own deduplication:
    - sign-in and token calls (§12): a stored response would hand the same tokens to anyone replaying the key;
    - quotes: a duplicate quote is just another quote;
@@ -1058,7 +1074,11 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
 
 ### 5.2 Outbox and relay (ADR-008)
 
-- `Outbox.append(event)` inserts one row in the caller's transaction. It takes the trace context and correlation ID from the current context and fails if there is no transaction.
+- `Outbox.append(event)` inserts one row in the caller's transaction, and fails if there is none. The envelope is filled from the context:
+  - `producer`: the module that owns the payload's package, and the role in the logging context, which every entry point sets (request filter, background loops); a missing role is a programming error;
+  - `correlation_id`: the context's correlation ID, else the partition key, which is the ride ID in ride flows;
+  - `causation_id`: the event being handled (consumers, §5.3), else the request ID;
+  - `trace_parent`: empty until tracing is wired (§16.2).
 - **The relay** runs in the `worker` role under the lease `outbox-relay` (§5.5), in a loop:
 
   ```sql
@@ -1068,8 +1088,9 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
   - **V1–V2:** each event is delivered to every in-process consumer subscribed to its type (§5.3), in ID order. Then the batch is marked published with a fenced update (`… WHERE id = ANY(:ids) AND <lease token still ours>`).
   - **V3+:** the batch is produced to Kafka (§19.1) and marked published after the acknowledgements.
   - It polls every 100 ms when idle **(assumed)** and loops at once while batches are full.
+  - It renews the lease between events when 3 s have passed, so slow retries can't outlive it, and stops at once if renewal fails. On shutdown it releases the lease, so another node takes over without waiting for the TTL.
 - **Order:** rows of one aggregate are inserted only after the previous transaction on that aggregate committed (it held the aggregate's row lock), so their IDs increase with the aggregate version. The same holds for events that share a partition key and are causally ordered, such as a ride's offers: the next offer can only be created after the previous one ended. Independent facts about one ride, such as the rider's and the driver's ratings, may be published in either order. The relay never skips a row: it selects by the published flag, not by a high-water mark, so a late commit with a lower ID is picked up by the next batch.
-- **Retention:** published rows are deleted after 7 days.
+- **Retention:** published rows are deleted after 7 days, except rows with an unresolved failed delivery, which a re-drive still needs.
 
 ### 5.3 Consumers and the inbox
 
@@ -1082,7 +1103,9 @@ public interface EventConsumer {
 ```
 
 - **Delivery (V1–V2):** for each event and subscribed consumer, the relay opens a transaction, inserts `(consumer, event_id)` into `platform.inbox` (`ON CONFLICT DO NOTHING`; zero rows means already handled, so it commits and moves on), calls `handle`, and commits.
-- **Failures:** a failing handler is retried 3 times with backoff (0.5 s, 1 s, 2 s). After that, the event goes to `platform.failed_deliveries` for that consumer, and delivery continues with the next event, so one poison event can't stall the stream (HLD §12.2). Operations can re-drive it.
+- **Failures:** a failing handler is retried 3 times with backoff (0.5 s, 1 s, 2 s). After that, the event goes to `platform.failed_deliveries` for that consumer, and delivery continues with the next event, so one poison event can't stall the stream (HLD §12.2). Other consumers of the event are unaffected.
+- **Re-drive:** `FailedDeliveries.redrive(consumer, eventId)` delivers the stored event once more through the inbox. Success marks the row `redriven_at`; another failure updates `attempts` and `last_error`. Operations call it from phase 11.
+- **Context:** while a handler runs, the logging context carries the event's `correlation_id` and its `event_id` as the causation, so events it appends are linked to it.
 - **Rules for handlers:** only database work inside the transaction; no network calls. The payment consumer records a charge and its first attempt; the provider call happens later in the payment executor (§11.2). This keeps a slow provider from stalling the relay.
 - **Mapping:** a handler maps `event.payload()` (a JSON tree) into its own record type, validated against the producer's JSON Schema in contract tests (ADR-019).
 - **V3:** the same `EventConsumer` beans run behind Kafka listeners instead of the relay (§19.1).
@@ -1096,12 +1119,12 @@ public interface EventConsumer {
     SELECT id FROM platform.timers WHERE aggregate_id = :id AND kind = :kind FOR UPDATE SKIP LOCKED)
   ```
 
-- **The poller** runs in the `dispatch` role every 250 ms with a few virtual-thread workers per node (default 4 **(assumed)**). Each worker repeats, until nothing is due or 50 timers were handled:
+- **The poller** runs in the `dispatch` role every 250 ms with a few virtual-thread workers per node (default 4 **(assumed)**). Each worker repeats until nothing is due, and claims only kinds that have a handler in its own process, so during a rolling deployment an old node never takes, and parks, a kind that only the new version knows:
 
   ```sql
   BEGIN;
   SELECT * FROM platform.timers
-   WHERE due_at <= clock_timestamp() AND parked_at IS NULL
+   WHERE due_at <= clock_timestamp() AND parked_at IS NULL AND kind = ANY(:handled_kinds)
    ORDER BY due_at LIMIT 1 FOR UPDATE SKIP LOCKED;
   -- run the handler for its kind, in this transaction
   DELETE FROM platform.timers WHERE id = :id;
@@ -1122,22 +1145,26 @@ Other waits are not timers. A no-show is allowed from 5 min after arrival; free 
 ### 5.5 Leases
 
 ```sql
--- acquire or take over an expired lease
-UPDATE platform.leases SET holder = :me, token = token + 1, expires_at = now() + :ttl
- WHERE name = :name AND (holder IS NULL OR expires_at < now())
+-- acquire, or take over an expired lease; the first acquisition creates the row
+INSERT INTO platform.leases (name, holder, token, expires_at) VALUES (:name, :me, 1, now() + :ttl)
+ON CONFLICT (name) DO UPDATE SET holder = :me, token = platform.leases.token + 1, expires_at = now() + :ttl
+ WHERE platform.leases.holder IS NULL OR platform.leases.expires_at < now()
 RETURNING token;
 -- renew, only while still the holder
 UPDATE platform.leases SET expires_at = now() + :ttl
- WHERE name = :name AND holder = :me AND token = :token;
+ WHERE name = :name AND holder = :me AND token = :token AND expires_at >= now();
+-- release
+UPDATE platform.leases SET holder = NULL, expires_at = NULL WHERE name = :name AND holder = :me AND token = :token;
 ```
 
+- The holder is the instance ID: host name, process ID and a random suffix, so two processes on one host differ.
 - TTL 10 s, renewed every 3 s **(assumed)**. A holder that fails to renew stops working at once.
 - Writes that must not come from a stale holder carry the token: the relay's "mark published" update checks the lease row in the same statement. This is the Job Scheduler's fencing pattern.
 - Users: `outbox-relay`; `job:<name>` for maintenance jobs; `reconciler:<city>`; `city-owner:<city>` from V4 (§19.2).
 
 ### 5.6 Audit log
 
-- `AuditLog.record` inserts into `audit.audit_log` in the caller's transaction.
+- `AuditLog.record` inserts into `audit.audit_log` in the caller's transaction, and fails if there is none. `occurred_at` comes from the application clock; `request_id` and `correlation_id` from the logging context.
 - Recorded: every ride transition, availability change caused by a person or a sweeper, verification and suspension change, charge, attempt and refund outcome, fare, fee and surge rule change, operations and admin action, and trip-route read by operations (FR-A1, FR-A2).
 - `before_state` and `after_state` hold the changed fields only. Phone numbers, PINs and positions are never written to it.
 
@@ -1156,6 +1183,10 @@ UPDATE platform.leases SET expires_at = now() + :ttl
 | Mirror reconciler | dispatch | Every 30 s per city, under its lease | §8.10 |
 
 Jobs that must run once per cluster take a `job:<name>` lease; pollers that use `SKIP LOCKED` need none.
+
+- **Recurring jobs** ([ADR-023](decisions/ADR-023-recurring-jobs.md)) implement `RecurringJob` (name, role, interval, run). Every node running the job's role checks every quarter interval (between 1 s and 1 min) whether the lease `job:<name>` is free, and takes it with a TTL of one interval. The lease is neither renewed nor released: it expires one interval after the run started, which spaces runs one interval apart across the cluster and needs no clock other than the database's. A failed run waits for the next interval. A run longer than its interval may overlap the next one, so jobs are idempotent.
+- **Retention belongs to each table's module.** The platform's job covers the platform tables, plus re-driven failed deliveries after 14 days; each module adds a job for its own tables when it creates them (one-time codes and refresh tokens in phase 3, quotes in phase 5, decisions in phase 7). Deletes run in batches of 10,000 rows until a batch comes back short.
+- **Audit partitions:** the audit module's job creates any missing partition for the current month and the next two, and drops partitions that ended more than 3 years ago. Its DDL runs with `lock_timeout = '2s'`, so it never queues inserts behind a long transaction for longer than that; if it times out, it tries again an hour later.
 
 ### 5.8 Rate limits
 
@@ -2389,9 +2420,13 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.dispatch.max-consecutive-expired` | `3` | Seen offers left to expire before going offline |
 | `ride.dispatch.sweeper.interval`, `safety-valve-share`, `safety-valve-min` | `5s`, `0.10`, `5` | §8.9 |
 | `ride.dispatch.reconcile-interval` | `30s` | §8.10 |
-| `ride.timers.poll-interval`, `workers`, `per-tick`, `max-failures` | `250ms`, `4`, `50`, `10` | §5.4 |
-| `ride.outbox.idle-poll`, `batch-size`, `retention` | `100ms`, `500`, `7d` | §5.2 |
-| `ride.idempotency.ttl` | `24h` | §5.1 |
+| `ride.timers.poll-interval`, `workers`, `max-failures` | `250ms`, `4`, `10` | §5.4 |
+| `ride.outbox.idle-poll`, `batch-size`, `retry-delays` | `100ms`, `500`, `500ms,1s,2s` | §5.2, §5.3 |
+| `ride.leases.ttl`, `renew-every` | `10s`, `3s` | §5.5 |
+| `ride.idempotency.ttl`, `lock-timeout` | `24h`, `1s` | §5.1 |
+| `ride.retention.interval`, `batch-size`, `outbox`, `inbox`, `failed-deliveries` | `1h`, `10000`, `7d`, `14d`, `14d` | §5.7 |
+| `ride.audit.partitions-ahead`, `retention` | `2` months, `3y` | §5.7 |
+| `ride.workers.autostart` | `true` | §1.3; tests set `false` and drive the loops |
 | `ride.quotes.ttl` | `5m` | FR-PR1 |
 | `ride.rides.pin-max-attempts`, `arrived-far-m` | `5`, `300` | §7.5, §7.6 |
 | `ride.payments.provider` | `mock` | Payment provider |
@@ -2411,7 +2446,7 @@ Properties are typed and validated at startup. Per-city and per-category setting
 
 | Item | Value |
 |---|---|
-| Statement timeouts | 2 s on request paths, 5 s in jobs |
+| Statement timeout | 2 s on every pooled connection, jobs included; longer only with `SET LOCAL` |
 | Pollers | 4 workers per node for timers and search tasks; outbox idle poll 100 ms |
 | Leases | TTL 10 s, renewed every 3 s |
 | Valkey timeouts | 50 ms for dispatch queries and mirror writes; 100 ms for location updates and pushes |

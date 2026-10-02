@@ -31,6 +31,11 @@ class AllRolesTests extends IntegrationTest {
     }
 
     @Test
+    void runsEveryBackgroundLoop() {
+        assertThat(backgroundLoops()).containsExactly("outboxRelay", "timerPoller");
+    }
+
+    @Test
     void exposesPrometheusMetricsOnTheManagementPortOnly() {
         HttpResponse<String> metrics = get(managementPort, "/actuator/prometheus");
 

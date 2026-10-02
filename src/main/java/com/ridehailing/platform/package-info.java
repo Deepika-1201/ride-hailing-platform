@@ -1,4 +1,7 @@
-/** Infrastructure every module uses: roles, HTTP conventions, migrations; later idempotency, outbox, timers and jobs. */
+/**
+ * Infrastructure every module uses: roles, HTTP conventions, migrations, transactions, idempotency keys, the outbox
+ * and its relay, timers, leases and recurring jobs.
+ */
 @ApplicationModule(displayName = "Platform", allowedDependencies = "shared")
 package com.ridehailing.platform;
 

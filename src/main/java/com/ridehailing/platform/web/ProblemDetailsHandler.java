@@ -1,6 +1,7 @@
 package com.ridehailing.platform.web;
 
 import com.ridehailing.platform.ApiException;
+import com.ridehailing.platform.LogContext;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +33,11 @@ final class ProblemDetailsHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ApiException.class)
     ResponseEntity<Object> handleApiException(ApiException exception, WebRequest request) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(exception.status(), exception.getMessage());
-        return handleExceptionInternal(exception, problem, new HttpHeaders(), exception.status(), request);
+        exception.properties().forEach(problem::setProperty);
+        HttpHeaders headers = new HttpHeaders();
+        exception.retryAfter().ifPresent(delay -> headers.set(HttpHeaders.RETRY_AFTER, Long.toString(
+                Math.ceilDiv(delay.toMillis(), 1000))));
+        return handleExceptionInternal(exception, problem, headers, exception.status(), request);
     }
 
     @ExceptionHandler(Exception.class)
@@ -47,7 +52,7 @@ final class ProblemDetailsHandler extends ResponseEntityExceptionHandler {
             Exception exception, Object body, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
         ProblemDetail problem = body instanceof ProblemDetail detail ? detail : ProblemDetail.forStatus(status);
         problem.setProperty("code", codeFor(exception, status));
-        String requestId = MDC.get(RequestIdFilter.MDC_KEY);
+        String requestId = MDC.get(LogContext.REQUEST_ID);
         if (requestId != null) {
             problem.setProperty("request_id", requestId);
         }
