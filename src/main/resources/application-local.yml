@@ -2,3 +2,11 @@
 logging:
   level:
     com.ridehailing: DEBUG
+
+ride:
+  seed:
+    enabled: true
+  security:
+    otp:
+      # Allowed only in the local and test profiles (LLD §12.1).
+      fixed-code: "123456"

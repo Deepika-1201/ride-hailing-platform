@@ -17,6 +17,9 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
 ```
 
 - `RIDE_ROLES` chooses what a process runs: any of `api`, `realtime`, `dispatch` and `worker` (default: all four).
+- Both local runs use the `local` profile: the sign-in code is always `123456`, and two staff accounts are seeded,
+  operations `+919000000001` and admin `+919000000002`. `scripts/sign-in-smoke.sh` signs in as the admin, refreshes
+  and logs out against a running stack.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.

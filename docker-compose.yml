@@ -26,6 +26,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      SPRING_PROFILES_ACTIVE: local
       DB_URL: jdbc:postgresql://postgres:5432/ridehailing
       DB_USER: ridehailing
       DB_PASSWORD: ridehailing

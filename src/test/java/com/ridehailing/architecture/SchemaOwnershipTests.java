@@ -16,11 +16,12 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
-/** No module names another module's schema, in its migrations or in the SQL of its code (ADR-019). */
+/** No module names another module's schema, in its migrations, its seeds or the SQL of its code (ADR-019). */
 class SchemaOwnershipTests {
 
     private static final Path SOURCES = Path.of("src/main/java/com/ridehailing");
-    private static final Path MIGRATIONS = Path.of("src/main/resources/db/migration");
+    private static final List<Path> SCRIPTS = List.of(
+            Path.of("src/main/resources/db/migration"), Path.of("src/main/resources/db/seed"));
 
     private static final Pattern TEXT_BLOCK = Pattern.compile("\"\"\"(.*?)\"\"\"", Pattern.DOTALL);
     private static final Pattern STRING = Pattern.compile("\"((?:[^\"\\\\\\n]|\\\\.)*)\"");
@@ -40,10 +41,13 @@ class SchemaOwnershipTests {
                 }
             }
         }
-        for (Path folder : directories(MIGRATIONS)) {
-            String owner = folder.getFileName().toString();
-            for (Path script : files(folder, ".sql")) {
-                foreignSchemas(owner, Files.readString(script)).forEach(schema -> violations.add(script + " names " + schema));
+        for (Path scripts : SCRIPTS) {
+            for (Path folder : directories(scripts)) {
+                String owner = folder.getFileName().toString();
+                for (Path script : files(folder, ".sql")) {
+                    foreignSchemas(owner, Files.readString(script))
+                            .forEach(schema -> violations.add(script + " names " + schema));
+                }
             }
         }
 

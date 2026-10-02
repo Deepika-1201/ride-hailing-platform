@@ -1,6 +1,7 @@
 package com.ridehailing.support;
 
 import com.ridehailing.platform.ApiController;
+import com.ridehailing.platform.PublicEndpoint;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -17,6 +18,7 @@ import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -32,7 +34,9 @@ import tools.jackson.databind.json.JsonMapper;
     "ride.workers.autostart=false",
     "ride.outbox.retry-delays=10ms,10ms,10ms"
 })
-@Import({IntegrationTest.RoleProbeController.class, IdempotencyProbeController.class, TestHandlers.class})
+@Import({IntegrationTest.RoleProbeController.class, IdempotencyProbeController.class, TestHandlers.class,
+    AccessProbes.ByMethod.class, AccessProbes.DriverByClass.class, TestUsers.class})
+@ActiveProfiles("test")
 public abstract class IntegrationTest {
 
     protected static final String API_PROBE = "/test/role-probe";
@@ -66,6 +70,13 @@ public abstract class IntegrationTest {
         return send(HttpRequest.newBuilder(URI.create("http://localhost:" + targetPort + path)).GET());
     }
 
+    /** A GET on the API port with an {@code Authorization} header value, such as {@code Bearer ey…}. */
+    protected HttpResponse<String> getAs(String authorization, String path) {
+        return send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+                .header("Authorization", authorization)
+                .GET());
+    }
+
     protected HttpResponse<String> postJson(String path, Map<String, String> headers, String body) {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
                 .header("Content-Type", "application/json")
@@ -97,6 +108,7 @@ public abstract class IntegrationTest {
     /** Stands in for a module's public controller until the modules have their own. */
     @TestComponent
     @ApiController
+    @PublicEndpoint
     static class RoleProbeController {
 
         @GetMapping(API_PROBE)

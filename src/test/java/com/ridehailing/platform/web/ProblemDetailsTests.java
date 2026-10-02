@@ -13,6 +13,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.ApiException;
+import com.ridehailing.platform.PublicEndpoint;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -21,6 +22,12 @@ import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration;
+import org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration;
+import org.springframework.boot.security.autoconfigure.web.servlet.SecurityFilterAutoConfiguration;
+import org.springframework.boot.security.autoconfigure.web.servlet.ServletWebSecurityAutoConfiguration;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.OAuth2ResourceServerAutoConfiguration;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.web.OAuth2ResourceServerWebSecurityAutoConfiguration;
 import org.springframework.boot.test.context.TestComponent;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
@@ -33,8 +40,18 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 
-/** The error model of LLD §13: RFC 9457 problem details with a stable {@code code} and the {@code request_id}. */
-@WebMvcTest
+/**
+ * The error model of LLD §13: RFC 9457 problem details with a stable {@code code} and the {@code request_id}. Spring
+ * Security is left out of this slice; its 401 is covered with real tokens in {@code AccessTests}.
+ */
+@WebMvcTest(controllers = ProblemDetailsTests.ProblemFixtureController.class, excludeAutoConfiguration = {
+    SecurityAutoConfiguration.class,
+    ServletWebSecurityAutoConfiguration.class,
+    SecurityFilterAutoConfiguration.class,
+    UserDetailsServiceAutoConfiguration.class,
+    OAuth2ResourceServerAutoConfiguration.class,
+    OAuth2ResourceServerWebSecurityAutoConfiguration.class
+})
 @Import(ProblemDetailsTests.ProblemFixtureController.class)
 class ProblemDetailsTests {
 
@@ -139,6 +156,7 @@ class ProblemDetailsTests {
 
     @TestComponent
     @ApiController
+    @PublicEndpoint
     static class ProblemFixtureController {
 
         @GetMapping("/test/problems/ok")

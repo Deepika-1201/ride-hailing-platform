@@ -36,7 +36,10 @@ final class ProblemDetailsHandler extends ResponseEntityExceptionHandler {
         exception.properties().forEach(problem::setProperty);
         HttpHeaders headers = new HttpHeaders();
         exception.retryAfter().ifPresent(delay -> headers.set(HttpHeaders.RETRY_AFTER, Long.toString(
-                Math.ceilDiv(delay.toMillis(), 1000))));
+                Math.max(1, Math.ceilDiv(delay.toMillis(), 1000)))));
+        if (exception.status() == HttpStatus.UNAUTHORIZED) {
+            headers.set(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
+        }
         return handleExceptionInternal(exception, problem, headers, exception.status(), request);
     }
 

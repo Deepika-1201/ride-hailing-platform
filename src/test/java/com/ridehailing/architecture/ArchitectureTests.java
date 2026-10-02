@@ -1,16 +1,26 @@
 package com.ridehailing.architecture;
 
+import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.methods;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noMethods;
 
+import com.ridehailing.platform.AllowedRoles;
+import com.ridehailing.platform.ApiController;
+import com.ridehailing.platform.PublicEndpoint;
+import com.tngtech.archunit.core.domain.JavaMethod;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
+import com.tngtech.archunit.lang.ArchCondition;
 import com.tngtech.archunit.lang.ArchRule;
+import com.tngtech.archunit.lang.ConditionEvents;
+import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.library.GeneralCodingRules;
+import java.util.stream.Stream;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Controller;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /** Coding rules (ADR-019). Module boundaries are Spring Modulith's job ({@link ModularityTests}). */
@@ -59,4 +69,24 @@ class ArchitectureTests {
             .that().areDeclaredInClassesThat().resideOutsideOfPackages(TRANSACTION_OWNERS)
             .should().beAnnotatedWith(Transactional.class)
             .because("transactions start in application services and nowhere else (LLD §1.2)");
+
+    @ArchTest
+    static final ArchRule apiHandlersDeclareWhoMayCallThem = methods()
+            .that().areDeclaredInClassesThat().areMetaAnnotatedWith(ApiController.class)
+            .and().areMetaAnnotatedWith(RequestMapping.class)
+            .should(declareAccess())
+            .because("an endpoint is closed unless it declares who may call it (LLD §12.4)");
+
+    private static ArchCondition<JavaMethod> declareAccess() {
+        return new ArchCondition<>("declare @AllowedRoles or @PublicEndpoint on the method or its class") {
+            @Override
+            public void check(JavaMethod method, ConditionEvents events) {
+                boolean declared = Stream.of(AllowedRoles.class, PublicEndpoint.class).anyMatch(annotation ->
+                        method.isAnnotatedWith(annotation) || method.getOwner().isAnnotatedWith(annotation));
+                if (!declared) {
+                    events.add(SimpleConditionEvent.violated(method, method.getFullName() + " declares no access"));
+                }
+            }
+        };
+    }
 }

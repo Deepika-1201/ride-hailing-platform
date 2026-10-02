@@ -55,6 +55,8 @@ jobs:
           curl -fsS localhost:8081/actuator/info | grep -q '"roles":\["api","realtime","dispatch","worker"\]'
           curl -sS localhost:8080/v1/nothing-here | grep -q '"code":"NOT_FOUND"'
           docker compose logs app | grep -q '"@timestamp"'
+      - name: Sign in as the seeded admin, refresh and log out
+        run: ./scripts/sign-in-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

@@ -53,3 +53,7 @@ Who issues identities and tokens, and how are they checked?
 ## Amendments
 
 - **2026-10-02, low-level design** ([LLD §12.2](../low-level-design.md#122-tokens), [review](../architecture-review.md) R-15): reuse of a rotated refresh token within 10 s of its rotation **(assumed)** is treated as a client retry whose response was lost. A new pair is issued and the pair from the first rotation is revoked. Later reuse still revokes the whole family.
+- **2026-10-02, phase 3** ([LLD §12.1–§12.4](../low-level-design.md#12-identity-and-security), [ADR-024](ADR-024-endpoint-access.md)):
+  - Tokens are verified against the configured public keys (EC P-256 JWKs in `ride.security.jwt.keys`), not a JWKS endpoint, because every role runs in the same deployable. In the `local` and `test` profiles, missing keys and a missing code secret are generated in memory; elsewhere startup fails, and a fixed sign-in code is refused.
+  - Roles are checked per endpoint by `@AllowedRoles`/`@PublicEndpoint` declarations, denied by default (ADR-024).
+  - Seeded staff accounts sign in like anyone else, with the local profile's fixed code.

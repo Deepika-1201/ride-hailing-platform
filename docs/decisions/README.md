@@ -18,7 +18,7 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-012](ADR-012-pricing-and-zones.md) | Upfront quotes, versioned fare rules and H3 zones | Accepted |
 | [ADR-013](ADR-013-routing-provider.md) | Routing-provider interface: a mock first, then self-hosted OSRM | Accepted |
 | [ADR-014](ADR-014-payments.md) | Thin payments: provider interface, realistic mock, charge after the trip | Accepted |
-| [ADR-015](ADR-015-identity.md) | In-house phone sign-in with short-lived JWTs | Accepted (amended 2026-10-02) |
+| [ADR-015](ADR-015-identity.md) | In-house phone sign-in with short-lived JWTs | Accepted (amended 2026-10-02, twice) |
 | [ADR-016](ADR-016-trip-routes.md) | Trip routes in daily PostgreSQL partitions, archived to object storage at scale | Accepted |
 | [ADR-017](ADR-017-observability.md) | OpenTelemetry everywhere, with SLOs and tested alerts | Accepted |
 | [ADR-018](ADR-018-aws-deployment.md) | AWS: ECS Fargate in Mumbai, temporary environments, Terraform | Accepted (sizes at V7) |
@@ -27,5 +27,6 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-021](ADR-021-simulator.md) | A Go simulator that drives the platform through its public APIs | Accepted |
 | [ADR-022](ADR-022-demo-web-app.md) | Demo web app: React and MapLibre on self-hosted OpenStreetMap tiles | Accepted |
 | [ADR-023](ADR-023-recurring-jobs.md) | Recurring jobs scheduled by the expiry of a database lease | Accepted |
+| [ADR-024](ADR-024-endpoint-access.md) | Endpoints declare who may call them; access is denied by default | Accepted |
 
 Amendments are dated sections at the end of an ADR; the original decision text stays as it was.

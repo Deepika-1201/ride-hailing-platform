@@ -1,0 +1,14 @@
+# Each cached test context keeps its own pool; small, lazily filled pools keep them under PostgreSQL's 100 connections.
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 1
+
+ride:
+  security:
+    otp:
+      fixed-code: "123456"
+  rate-limits:
+    # Every test request comes from 127.0.0.1; SignInRateLimitTests checks the real per-IP limit in its own context.
+    otp-per-ip: {capacity: 100000, period: 1h}

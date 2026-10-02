@@ -26,6 +26,11 @@ public class ApiException extends RuntimeException {
         this.properties = Map.copyOf(properties);
     }
 
+    /** A resource that doesn't exist or that the caller may not see: both answer {@code 404} (LLD §12.4). */
+    public static ApiException notFound() {
+        return new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Not found.");
+    }
+
     public HttpStatus status() {
         return status;
     }

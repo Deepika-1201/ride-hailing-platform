@@ -86,7 +86,7 @@ spikes/                           throwaway measurements (not product code)
 ### 1.3 Runtime roles
 
 - `ride.roles` (environment `RIDE_ROLES`): a comma-separated subset of `api`, `realtime`, `dispatch`, `worker`. Default: all four. An empty or unknown value fails startup.
-- `@ApiController` = `@RestController` + `@ConditionalOnRole(API)`. Jobs use `@RoleComponent(DISPATCH)` and similar. An ArchUnit rule rejects a bare `@RestController` or `@Scheduled` method.
+- `@ApiController` = `@RestController` + `@ConditionalOnRole(API)`. Every handler in one declares who may call it, with `@AllowedRoles` or `@PublicEndpoint` (§12.4). Jobs use `@RoleComponent(DISPATCH)` and similar. An ArchUnit rule rejects a bare `@RestController` or `@Scheduled` method.
 - **Background loops** (relay, pollers, recurring jobs) run on virtual threads that put their role in the logging context. They start with the application unless `ride.workers.autostart=false`, which tests use to drive each loop step by step, and they stop before the connection pool closes.
 - Port 8080 serves the public REST API (role `api`) and WebSockets (role `realtime`, V2). Port 8081 serves management: health, info (active roles), Prometheus metrics.
 - **V1 runs on PostgreSQL alone** (ADR-001): the live index, rate limiter and push bus use in-memory implementations of their ports (§9.2, §5.8). Those implementations are only correct inside one process, so startup fails if `ride.location.store=memory` is combined with a role set that doesn't include both `api` and `dispatch`.
@@ -106,7 +106,7 @@ spikes/                           throwaway measurements (not product code)
 
 ### 1.5 Local runs, image and CI
 
-- **Local:** `docker compose up` starts PostgreSQL + PostGIS and the application with all roles. Profiles add Valkey (V2 default), Kafka, observability, routing and the simulator as their versions arrive (HLD §16.1). Host ports: the API on 8080, management on 8081, PostgreSQL on **5434**, because the sibling projects' stacks use 5432 and 5433.
+- **Local:** `docker compose up` starts PostgreSQL + PostGIS and the application with all roles, in the `local` profile, so seed data, the fixed sign-in code and in-memory signing keys apply (§4.9, §12). Profiles add Valkey (V2 default), Kafka, observability, routing and the simulator as their versions arrive (HLD §16.1). Host ports: the API on 8080, management on 8081, PostgreSQL on **5434**, because the sibling projects' stacks use 5432 and 5433.
 - **Without Compose:** `./gradlew bootTestRun` starts the application with the `local` profile against a PostgreSQL + PostGIS container that Testcontainers starts and stops with it.
 - **Tests** use Testcontainers with the same PostgreSQL image, built from `docker/postgres/Dockerfile` on first use and cached by Docker. The siblings' embedded PostgreSQL has no PostGIS, so it isn't used. On macOS with Colima, Testcontainers needs `docker.host` pointing at Colima's socket (in `~/.testcontainers.properties`), and the build sets `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` so the cleanup container can mount the socket inside the VM; the same setting is correct on Linux CI.
 - **Image:** two stages (JDK 25 build, JRE 25 run), layered jar, non-root user, `-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError`.
@@ -120,7 +120,7 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 
 | Module | May depend on | Why |
 |---|---|---|
-| `shared` | — | Open module: `Money`, `GeoPoint`, `Actor`, `Page`, `CityId` |
+| `shared` | — | Open module: `Money`, `GeoPoint`, `Actor`, `UserRole`, `Page`, `CityId`, `Ids`, phone masking |
 | `platform` | `shared` | Infrastructure used by every module |
 | `audit` | `platform`, `shared` | Every module writes audit entries |
 | `notification` | `platform`, `shared` | One-time-code SMS for identity; consumes events as JSON |
@@ -254,7 +254,7 @@ public interface RoutingProvider {
     DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);
 }
 public interface RatingApi { RatingSummary summary(UUID userId, Party party); }
-public interface IdentityApi { UUID createUser(String phone, Set<Role> roles); }
+public interface IdentityApi { UUID createUser(String phone, Set<UserRole> roles); }
 public interface NotificationApi {
     void sendOneTimeCode(String phone, String code);       // synchronous, never stored (§12.1)
     void notify(Notice notice);                             // joins the caller's transaction
@@ -280,6 +280,9 @@ public interface Leases {                                   // §5.5
 }
 public interface RecurringJob { String name(); Role role(); Duration interval(); void run(); }  // §5.7
 public interface Transactions { <T> T execute(Supplier<T> work); }                           // §1.4
+public interface RateLimiter { RateDecision tryAcquire(String limit, String key); }          // §5.8
+public interface AccessTokens { AccessToken issue(UUID userId, Set<UserRole> roles); }      // §12.2
+public record Caller(UUID userId, Set<UserRole> roles) { }   // a controller parameter (§12.4)
 ```
 
 ### 2.3 The dispatch participant
@@ -469,7 +472,7 @@ CREATE TABLE identity.users (
 CREATE TABLE identity.otp_challenges (
   id          uuid PRIMARY KEY,
   phone       text NOT NULL,
-  code_hmac   bytea NOT NULL,                        -- HMAC-SHA256(code, server secret); never the code itself
+  code_hmac   bytea NOT NULL,                        -- HMAC-SHA256(challenge ID and code, server secret); never the code
   attempts    smallint NOT NULL DEFAULT 0,
   expires_at  timestamptz NOT NULL,
   consumed_at timestamptz,
@@ -480,6 +483,7 @@ CREATE INDEX otp_by_phone ON identity.otp_challenges (phone, created_at DESC);
 CREATE TABLE identity.refresh_tokens (
   id         uuid PRIMARY KEY,
   family_id  uuid NOT NULL,
+  parent_id  uuid,                                   -- the token this one replaced; NULL at sign-in
   user_id    uuid NOT NULL REFERENCES identity.users (id),
   token_hash bytea NOT NULL UNIQUE,                  -- SHA-256 of a 256-bit random token
   issued_at  timestamptz NOT NULL,
@@ -488,6 +492,8 @@ CREATE TABLE identity.refresh_tokens (
   revoked_at timestamptz
 );
 CREATE INDEX refresh_by_family ON identity.refresh_tokens (family_id);
+CREATE INDEX refresh_by_parent ON identity.refresh_tokens (parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX refresh_expiry ON identity.refresh_tokens (expires_at);           -- retention
 
 CREATE TABLE rider.riders (
   user_id    uuid PRIMARY KEY,
@@ -1047,6 +1053,7 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
 - Migrations share the pool's 2 s statement timeout (§1.4). One that may run longer, such as creating the PostGIS extension or an index on a large table, starts with `SET LOCAL statement_timeout = 0`; Flyway runs each migration in its own transaction, so the setting ends with it.
 - Partitions (audit monthly, trip points daily) are kept ahead by the maintenance job (§5.7), so writes never depend on a migration running at the right time. The migration that creates a partitioned table also creates its first partitions (audit: the current month and the next two), because an `api`-only process may write before any `worker` has run the job.
 - Seed data for local runs and demos lives in `db/seed/` and loads only in the `local` profile: Bengaluru with its service area, airport and station areas, four categories, fare and fee rules, a few surge rules, 2,000 verified drivers with vehicles, 500 riders, and one operations and one admin account **(assumed counts for riders and staff)**.
+- Seeds are Flyway migrations with **their own history per module** (`<module>.flyway_seed_history`), run after every module's schema migrations when `ride.seed.enabled` is true (the `local` profile). Keeping them out of the schema history lets a seeded database run later without seeds while Flyway's validation stays clean.
 
 ## 5. Platform mechanisms
 
@@ -1190,10 +1197,10 @@ Jobs that must run once per cluster take a `job:<name>` lease; pollers that use 
 
 ### 5.8 Rate limits
 
-- `RateLimiter.tryAcquire(scope, id, cost)` returns allowed, or rejected with a retry delay. Buckets come from HLD §14.
-- **V1:** token buckets in process memory, per node. **V2+:** one Valkey script per call on `rl:{scope}:{id}` (token bucket with the refill computed from the stored timestamp), so limits hold across nodes.
+- `RateLimiter.tryAcquire(limit, key)` takes one token from the key's bucket under a named limit (`ride.rate-limits.<name>`), and returns allowed, or rejected with a retry delay. Buckets come from HLD §14.
+- **V1:** token buckets in process memory, per node. A bucket holds `capacity` tokens and refills continuously at `capacity` per `period`; buckets that have refilled completely are dropped at most once a minute, so memory follows the keys in active use. **V2+:** one Valkey script per call on `rl:{scope}:{id}` (token bucket with the refill computed from the stored timestamp), so limits hold across nodes.
 - If Valkey is unavailable, the limiter allows the request (fails open), except for one-time codes, which fail closed (HLD §12.1).
-- A rejected request gets `429 RATE_LIMITED` with `Retry-After`. Its `Idempotency-Key` isn't consumed, because the check runs before the command's transaction.
+- A rejected request gets `429 RATE_LIMITED` with `Retry-After`: the seconds until a token is available, rounded up. Its `Idempotency-Key` isn't consumed, because the check runs before the command's transaction.
 
 ## 6. Concurrency rules
 
@@ -1948,8 +1955,14 @@ POST /v1/auth/token {phone, code}
   right: consume; find the user, or create one with role RIDER; issue tokens (§12.2)
 ```
 
-- The code is never stored or queued in plain text: only its HMAC is kept, so a database leak doesn't expose live codes.
+- The code is never stored or queued in plain text: only its HMAC is kept, so a database leak doesn't expose live codes. The HMAC covers the challenge ID too, so equal codes in two challenges have different HMACs. The secret is `ride.security.otp.hmac-secret`.
 - Local and test profiles use a fixed code from configuration. Startup fails if a fixed code is configured in any other profile.
+- **Details settled in phase 3:**
+  - The rate limits run before the transaction. The IP is the remote address Tomcat sees; behind the load balancer (V7), `server.forward-headers-strategy=native` makes it the client's address.
+  - The challenge is locked (`FOR UPDATE`) while a code is checked, so concurrent guesses are counted one by one and never exceed 5. A wrong code's attempt commits before the `401` or `429` is raised.
+  - A disabled user's correct code is consumed, then answered with `403 ACCOUNT_DISABLED`.
+  - A first sign-in creates the user with role `RIDER`. The rider module creates the profile row on first use (phase 4), since `identity` doesn't depend on `rider`.
+  - The mock SMS provider logs the masked phone number, never the code.
 
 ### 12.2 Tokens
 
@@ -1963,12 +1976,19 @@ POST /v1/auth/token {phone, code}
   - within 10 s of its rotation **(assumed)**, it is treated as a client retry whose response was lost: a new pair is issued and the pair from the first rotation is revoked;
   - later, it means theft: the whole family is revoked, the answer is `401 REFRESH_TOKEN_INVALID`, and the audit log records `token.reuse_detected`.
 - `POST /v1/auth/logout` revokes the family.
+- **Details settled in phase 3:**
+  - Each refresh token lives 30 days from its own issue, so an active session slides forward; it records the token it replaced (`parent_id`).
+  - Concurrent refreshes with one token are serialized by locking its row (`FOR UPDATE`).
+  - The grace-window retry revokes every token issued after the presented one in its family, then issues a new child of it. The presented token keeps its first `rotated_at`, so repeated retries can't extend the window.
+  - Theft and disabled users: the family's revocation and the audit entry commit before the `401` (or `403 ACCOUNT_DISABLED`) is raised.
+  - Logout answers `204` even for an unknown token, so it can't be used to test tokens.
+  - Bearer tokens are ignored on `/v1/auth/**`, so a client that attaches an expired access token to its refresh call isn't refused.
 
 ### 12.3 Keys
 
-- Signing keys come from configuration: a list of `(kid, private key)`. In AWS they come from Secrets Manager; locally they are generated at first start into a git-ignored file.
+- Signing keys come from configuration: `ride.security.jwt.keys`, a list of EC P-256 private keys as JWK JSON, each with its `kid`. In AWS they come from Secrets Manager. In the `local` and `test` profiles, an empty list means one key is generated in memory at startup: access tokens from before a restart then fail, and clients refresh, which works because refresh tokens live in the database. Startup fails without keys in any other profile.
 - The first key signs; all of them verify. Rotation: add the new key for verification only, make it the signer on the next deploy, and remove the old one 15 min later.
-- Every role validates tokens with Spring Security's resource server against the configured public keys: signature, `iss`, `aud` and expiry, with 30 s of clock skew.
+- Every role validates tokens with Spring Security's resource server against the configured public keys: ES256 only, signature, `iss`, `aud` and expiry, with 30 s of clock skew.
 
 ### 12.4 Authorization
 
@@ -1983,9 +2003,14 @@ POST /v1/auth/token {phone, code}
 | `/v1/admin/**` | | | | ✓ |
 | `/v1/auth/**`, `/v1/webhooks/**` | public (rate-limited; webhooks signed) | | | |
 
-- Roles are checked by Spring Security; **ownership is checked in application services** (FR-I2): a rider reaches only rides with their `rider_id`; a driver reaches rides assigned to them now or before, and only their own offers.
+- Roles are checked at the endpoint, as described below; **ownership is checked in application services** (FR-I2): a rider reaches only rides with their `rider_id`; a driver reaches rides assigned to them now or before, and only their own offers.
 - A resource the caller may not see answers `404`, not `403`.
 - Every endpoint has a test that a user of the wrong role and a user of the right role but the wrong ride are both refused.
+- **How it is enforced (phase 3, [ADR-024](decisions/ADR-024-endpoint-access.md)):**
+  - Spring Security only authenticates: a request with an invalid or expired bearer token is refused by its filter with `401 UNAUTHENTICATED` as a problem detail. Any other request reaches the dispatcher, so an unknown path stays `404`.
+  - Every handler of an `@ApiController` declares `@AllowedRoles(…)` or `@PublicEndpoint`, on the method or its class. An interceptor enforces it: no token gives `401 UNAUTHENTICATED`, a token without an allowed role gives `403 FORBIDDEN`, and a handler with neither annotation refuses everyone. An ArchUnit rule fails the build if a handler declares neither, so access is denied by default.
+  - Controllers take a `Caller` parameter (user ID and roles from the token) and pass it to application services, which check ownership.
+  - `ACCOUNT_DISABLED` is checked at sign-in and refresh; an access token already issued stays valid until it expires, at most 15 min.
 
 ### 12.5 Personal data
 
@@ -2433,8 +2458,10 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.payments.check-schedule` | `10s,30s,2m,10m,1h` | Status checks, hourly to 24 h |
 | `ride.payments.mock.*` | §11.9 | Mock behaviour |
 | `ride.security.jwt.issuer`, `access-ttl`, `refresh-ttl`, `refresh-reuse-grace` | `ride-hailing`, `15m`, `30d`, `10s` | §12.2 |
-| `ride.security.otp.ttl`, `max-attempts`, `fixed-code` | `5m`, `5`, unset | §12.1; `fixed-code` only in local and test profiles |
-| `ride.rate-limits.*` | HLD §14 | Bucket sizes |
+| `ride.security.jwt.keys` | empty: generated in `local` and `test` only | §12.3; EC P-256 private JWKs |
+| `ride.security.otp.ttl`, `max-attempts`, `fixed-code`, `hmac-secret` | `5m`, `5`, unset, unset | §12.1; `fixed-code` only in local and test profiles; `hmac-secret` generated there when unset |
+| `ride.rate-limits.<name>.capacity`, `period` | HLD §14; `otp-per-phone` 5 per `1h`, `otp-per-ip` 20 per `1h` | §5.8 |
+| `ride.seed.enabled` | `false`; `true` in `local` | §4.9 |
 | `ride.valkey.uri`, `cluster`, `timeouts.*` | — | V2 (ADR-020) |
 | `ride.kafka.*` | — | V3 (§19.1) |
 | `ride.routing.provider`, `osrm.url`, `timeout` | `mock`, —, `300ms` | V4 |

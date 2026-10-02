@@ -23,6 +23,10 @@ server:
 
 ride:
   roles: ${RIDE_ROLES:api,realtime,dispatch,worker}
+  # HLD §14, LLD §5.8.
+  rate-limits:
+    otp-per-phone: {capacity: 5, period: 1h}
+    otp-per-ip: {capacity: 20, period: 1h}
 
 management:
   server:

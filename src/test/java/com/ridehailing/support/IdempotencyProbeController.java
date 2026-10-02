@@ -3,6 +3,7 @@ package com.ridehailing.support;
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.Idempotency;
 import com.ridehailing.platform.IdempotentCall;
+import com.ridehailing.platform.PublicEndpoint;
 import com.ridehailing.shared.Ids;
 import java.net.URI;
 import java.util.Map;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 /** A command behind {@link Idempotency}, for testing the HTTP side: headers and problem codes. */
 @TestComponent
 @ApiController
+@PublicEndpoint
 public class IdempotencyProbeController {
 
     public static final String PATH = "/test/idempotent";
