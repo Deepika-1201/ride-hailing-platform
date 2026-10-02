@@ -4,7 +4,7 @@
 |---|---|
 | Phase | 2 — Requirements (baseline) |
 | Status | Approved: Phase 1 defaults accepted on 2026-10-02 |
-| Next | [ADR-001](decisions/ADR-001-architecture-style.md) (accepted) → design spikes (§12) → HLD (`architecture.md`) → LLD (`low-level-design.md`) |
+| Next | [ADR-001](decisions/ADR-001-architecture-style.md) (accepted) → design spikes (§12, done) → [HLD](architecture.md) → LLD (`low-level-design.md`) |
 
 Items marked **(assumed)** were not explicitly discussed and stay open for challenge.
 
