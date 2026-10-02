@@ -1,0 +1,4 @@
+# Developer machine only.
+logging:
+  level:
+    com.ridehailing: DEBUG

@@ -6,6 +6,21 @@ The focus is the real-time layer: ingesting a continuous stream of driver locati
 
 > **Status:** design approved on 2026-10-02; V1 phase 1 (scaffolding) in progress. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-022.
 
+## Quick start
+
+JDK 25 and Docker are required (on macOS, Colima works).
+
+```bash
+./gradlew build            # compile (-Werror), module-boundary and architecture checks, all tests
+./gradlew bootTestRun      # run against a throwaway PostgreSQL + PostGIS container: API :8080, management :8081
+docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the app in containers, with JSON logs
+```
+
+- `RIDE_ROLES` chooses what a process runs: any of `api`, `realtime`, `dispatch` and `worker` (default: all four).
+- Tests use Testcontainers. With Colima, point it at Colima's socket once:
+  `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
+- The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.
+
 ## Documentation
 
 | Document | Contents |

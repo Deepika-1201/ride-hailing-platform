@@ -1,0 +1,38 @@
+# Local development only: the credentials below are not secrets. Later versions add their services (LLD §1.5).
+name: ride-hailing-platform
+
+services:
+  postgres:
+    build: docker/postgres
+    image: ride-hailing/postgres-postgis:18
+    environment:
+      POSTGRES_DB: ridehailing
+      POSTGRES_USER: ridehailing
+      POSTGRES_PASSWORD: ridehailing
+    ports:
+      - "5434:5432"
+    volumes:
+      # PostgreSQL 18 images keep their data under /var/lib/postgresql/18.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ridehailing -d ridehailing"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/ridehailing
+      DB_USER: ridehailing
+      DB_PASSWORD: ridehailing
+      RIDE_ROLES: api,realtime,dispatch,worker
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+
+volumes:
+  postgres-data:

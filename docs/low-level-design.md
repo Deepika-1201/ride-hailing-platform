@@ -105,8 +105,9 @@ spikes/                           throwaway measurements (not product code)
 
 ### 1.5 Local runs, image and CI
 
-- **Local:** `docker compose up` starts PostgreSQL + PostGIS and the application with all roles. Profiles add Valkey (V2 default), Kafka, observability, routing and the simulator as their versions arrive (HLD §16.1).
-- **Tests** use Testcontainers with the same PostgreSQL image built from `docker/postgres/Dockerfile`. The siblings' embedded PostgreSQL has no PostGIS, so it isn't used.
+- **Local:** `docker compose up` starts PostgreSQL + PostGIS and the application with all roles. Profiles add Valkey (V2 default), Kafka, observability, routing and the simulator as their versions arrive (HLD §16.1). Host ports: the API on 8080, management on 8081, PostgreSQL on **5434**, because the sibling projects' stacks use 5432 and 5433.
+- **Without Compose:** `./gradlew bootTestRun` starts the application with the `local` profile against a PostgreSQL + PostGIS container that Testcontainers starts and stops with it.
+- **Tests** use Testcontainers with the same PostgreSQL image, built from `docker/postgres/Dockerfile` on first use and cached by Docker. The siblings' embedded PostgreSQL has no PostGIS, so it isn't used. On macOS with Colima, Testcontainers needs `docker.host` pointing at Colima's socket (in `~/.testcontainers.properties`), and the build sets `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` so the cleanup container can mount the socket inside the VM; the same setting is correct on Linux CI.
 - **Image:** two stages (JDK 25 build, JRE 25 run), layered jar, non-root user, `-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError`.
 - **CI (GitHub Actions):** compile with `-Werror`; unit, architecture, integration and contract tests; build the image; start `docker compose` and wait for readiness. Terraform jobs arrive in V7.
 
@@ -1024,7 +1025,9 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
 
 ### 4.9 Migrations
 
-- One folder and one history table per module (ADR-019); `platform` and `audit` migrate first, then the rest in the dependency order of §2.1.
+- One folder and one history table per module (ADR-019); `platform` and `audit` migrate first, then the rest in the dependency order of §2.1. `shared` and `operations` own no tables, so they have no schema.
+- Each module's `V1__schema_owner.sql` records its owner on the schema (`COMMENT ON SCHEMA`), so every module has its schema and history from phase 1, before it has tables.
+- The PostGIS extension is created by the first migration that needs it (`geography`, phase 4), which also settles its schema; phase 1 only checks that the image provides it.
 - Forward-only. A change that a running version still depends on goes expand → migrate data → contract, across at least two releases (HLD §16.3).
 - Partitions (audit monthly, trip points daily) are created ahead by the maintenance job (§5.7), never by migrations, so a missed migration can't stop writes.
 - Seed data for local runs and demos lives in `db/seed/` and loads only in the `local` profile: Bengaluru with its service area, airport and station areas, four categories, fare and fee rules, a few surge rules, 2,000 verified drivers with vehicles, 500 riders, and one operations and one admin account **(assumed counts for riders and staff)**.
@@ -1997,6 +2000,7 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 | `ACCOUNT_DISABLED` | 403 | The user is disabled |
 | `NOT_FOUND` | 404 | Unknown resource, or one the caller may not see |
 | `METHOD_NOT_ALLOWED` | 405 | |
+| `NOT_ACCEPTABLE` | 406 | No representation matches `Accept` |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | |
 | `IDEMPOTENCY_KEY_IN_PROGRESS` | 409 | The same key is still executing; `Retry-After` |
 | `INVALID_TRANSITION` | 409 | The ride's state doesn't allow the command; `current_status`, `current_version` |
