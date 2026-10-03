@@ -6,7 +6,7 @@ import com.ridehailing.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.context.TestPropertySource;
 
-@TestPropertySource(properties = "ride.roles=api")
+@TestPropertySource(properties = {"ride.roles=api", "ride.location.single-process-check=false"})
 class ApiRoleTests extends IntegrationTest {
 
     @Test

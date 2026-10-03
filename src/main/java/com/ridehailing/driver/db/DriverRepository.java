@@ -51,6 +51,12 @@ public class DriverRepository {
                 .optional();
     }
 
+    /** Blocks changes to the driver, such as a suspension, until the transaction ends. */
+    public Optional<DriverRow> lockForShare(UUID id) {
+        return jdbc.sql(COLUMNS + "WHERE id = :id FOR SHARE").param("id", id).query(DriverRepository::driver)
+                .optional();
+    }
+
     /** Newest first, after the cursor; {@code cityId} and {@code verification} filter when not null. */
     public List<DriverRow> list(String cityId, Verification verification, Cursor after, int limit) {
         return jdbc.sql(COLUMNS + """

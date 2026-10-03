@@ -5,6 +5,7 @@ import com.ridehailing.geography.db.CategoryRepository;
 import com.ridehailing.geography.db.CityRepository;
 import com.ridehailing.geography.db.SpatialQueries;
 import com.ridehailing.geography.db.SpecialAreaRepository;
+import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import java.time.ZoneId;
 import java.util.Optional;
@@ -52,6 +53,11 @@ class GeographyService implements GeographyApi {
     public Optional<Location> locate(GeoPoint point) {
         return spatial.containing(point).map(found -> new Location(found.cityId(),
                 found.specialArea() != null ? AREA_PREFIX + found.specialArea() : zones.cellOf(point)));
+    }
+
+    @Override
+    public Optional<BoundingBox> bounds(String cityId) {
+        return cities.bounds(cityId);
     }
 
     @Override

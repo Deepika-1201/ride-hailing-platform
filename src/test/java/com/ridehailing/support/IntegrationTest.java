@@ -35,7 +35,8 @@ import tools.jackson.databind.json.JsonMapper;
     "ride.outbox.retry-delays=10ms,10ms,10ms"
 })
 @Import({IntegrationTest.RoleProbeController.class, IdempotencyProbeController.class, TestHandlers.class,
-    AccessProbes.ByMethod.class, AccessProbes.DriverByClass.class, TestUsers.class, TestCities.class, TestPrices.class})
+    AccessProbes.ByMethod.class, AccessProbes.DriverByClass.class, TestUsers.class, TestCities.class, TestPrices.class,
+    TestDrivers.class})
 @ActiveProfiles("test")
 public abstract class IntegrationTest {
 

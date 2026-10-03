@@ -80,7 +80,7 @@ class QuoteTests extends IntegrationTest {
         assertThat(Duration.between(created, Instant.parse(quote.get("expires_at").asString())))
                 .isEqualTo(Duration.ofMinutes(5));
         assertThat(quote.get("surge_multiplier").decimalValue()).isEqualByComparingTo("1.00");
-        assertThat(quote.has("pickup_eta_s")).as("no live index before phase 6").isFalse();
+        assertThat(quote.has("pickup_eta_s")).as("no driver nearby").isFalse();
         JsonNode fare = quote.get("fare");
         long parts = 0;
         for (String part : new String[] {"base", "distance", "time", "surge", "minimum_topup", "booking_fee", "tax",

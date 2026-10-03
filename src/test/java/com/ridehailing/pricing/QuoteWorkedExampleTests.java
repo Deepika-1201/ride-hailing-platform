@@ -16,7 +16,9 @@ import com.ridehailing.support.TestUsers;
 import com.uber.h3core.H3Core;
 import java.io.IOException;
 import java.net.http.HttpResponse;
+import java.time.Instant;
 import java.time.ZonedDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -96,7 +98,7 @@ class QuoteWorkedExampleTests extends IntegrationTest {
     @Test
     void thePickupEtaIsTheNearestDriversRouteToThePickup() {
         GeoPoint driver = city.at(0.21, 0.2);
-        liveIndex.candidates.add(new LiveIndex.Candidate(Ids.newId(), driver, 1_100));
+        liveIndex.candidates.add(new LiveIndex.Candidate(Ids.newId(), driver, 1_100, Instant.now()));
 
         JsonNode quote = assertAnswered("POST", "/v1/quotes", quote(), 201);
 
@@ -133,6 +135,7 @@ class QuoteWorkedExampleTests extends IntegrationTest {
         return fare.get(part).get("amount_paise").asLong();
     }
 
+    /** Answers {@code nearby} from a list and records the calls; quotes use nothing else. */
     static class FakeLiveIndex implements LiveIndex {
 
         final List<Candidate> candidates = new CopyOnWriteArrayList<>();
@@ -142,6 +145,41 @@ class QuoteWorkedExampleTests extends IntegrationTest {
         public List<Candidate> nearby(String cityId, String category, GeoPoint at, int radiusM, int k) {
             calls.add(cityId + " " + category + " " + radiusM + " " + k);
             return candidates.stream().limit(k).toList();
+        }
+
+        @Override
+        public UpdateResult update(String cityId, UUID driverId, String category, LocationUpdate update) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Optional<LivePosition> position(String cityId, UUID driverId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean mirror(String cityId, UUID driverId, MirrorState state) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<UUID> sweep(String cityId, Instant silentBefore) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Map<UUID, Instant> lastSeen(String cityId, Collection<UUID> drivers) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Instant epoch(String cityId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Map<UUID, MirrorState> mirrored(String cityId) {
+            throw new UnsupportedOperationException();
         }
     }
 
@@ -174,6 +212,7 @@ class QuoteWorkedExampleTests extends IntegrationTest {
         }
 
         @Bean
+        @Primary
         FakeLiveIndex liveIndex() {
             return new FakeLiveIndex();
         }

@@ -1,5 +1,6 @@
 package com.ridehailing.geography.db;
 
+import com.ridehailing.shared.BoundingBox;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
@@ -53,6 +54,19 @@ public class CityRepository {
 
     public List<CityRow> list() {
         return jdbc.sql(COLUMNS + "ORDER BY id").query(this::city).list();
+    }
+
+    /** The envelope of the city's bounds. */
+    public Optional<BoundingBox> bounds(String id) {
+        return jdbc.sql("""
+                        SELECT ST_YMin(bounds) AS min_lat, ST_XMin(bounds) AS min_lon,
+                               ST_YMax(bounds) AS max_lat, ST_XMax(bounds) AS max_lon
+                        FROM geography.cities WHERE id = :id
+                        """)
+                .param("id", id)
+                .query((rs, row) -> new BoundingBox(rs.getDouble("min_lat"), rs.getDouble("min_lon"),
+                        rs.getDouble("max_lat"), rs.getDouble("max_lon")))
+                .optional();
     }
 
     /** Applies the changes only at the expected version; empty if the version moved on or the city is unknown. */

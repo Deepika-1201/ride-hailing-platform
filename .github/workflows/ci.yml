@@ -61,6 +61,8 @@ jobs:
         run: ./scripts/reference-data-smoke.sh
       - name: Quote a Bengaluru trip as a seeded rider
         run: ./scripts/quote-smoke.sh
+      - name: Take a seeded driver online, send a location, find them in a quote and go offline
+        run: ./scripts/driver-online-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

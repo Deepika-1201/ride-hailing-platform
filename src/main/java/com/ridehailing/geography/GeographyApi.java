@@ -1,5 +1,6 @@
 package com.ridehailing.geography;
 
+import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import java.time.ZoneId;
 import java.util.Optional;
@@ -17,6 +18,9 @@ public interface GeographyApi {
 
     /** The service area containing the point, with its zone; empty outside every service area. */
     Optional<Location> locate(GeoPoint point);
+
+    /** The envelope of the city's bounds, for validating locations; empty for an unknown city. */
+    Optional<BoundingBox> bounds(String cityId);
 
     /** An H3 resolution-7 cell, or {@code area:<code>} of an active special area in the city. */
     boolean isZone(String cityId, String zoneId);

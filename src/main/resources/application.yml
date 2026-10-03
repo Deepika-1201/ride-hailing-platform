@@ -28,6 +28,7 @@ ride:
     otp-per-phone: {capacity: 5, period: 1h}
     otp-per-ip: {capacity: 20, period: 1h}
     quotes-per-rider: {capacity: 30, period: 1m}
+    location-per-driver: {capacity: 1, period: 1s}
 
 management:
   server:

@@ -57,7 +57,7 @@ S-1 measured step 5 at 0.6 ms p50 at the cloud tier, so the whole path stays far
 | 10 min while `AVAILABLE` | Driver taken offline (FR-L3) | Sweeper → dispatch module |
 | Any silence while `ON_TRIP` | Nothing: the trip continues and the app's queued commands arrive later (FR-RD8) | — |
 
-The 2-min and 10-min rules have a safety valve. They take no action while the live index is younger than the rule's threshold (after a loss of Valkey, nobody's silence means anything yet), or when a rule would act on more than 10% of a city's drivers at once (mass silence means the platform lost contact, not that drivers left). An alert fires instead ([LLD §8.9](low-level-design.md#89-sweeper)).
+The 2-min and 10-min rules have a safety valve. When a rule would take drivers offline, it takes no action while the live index is younger than the rule's threshold (after a loss of Valkey, nobody's silence means anything yet), or when it would act on more than max(5, 10%) of a city's drivers in that state at once (mass silence means the platform lost contact, not that drivers left). An alert fires instead ([LLD §8.9](low-level-design.md#89-sweeper)).
 
 ## 5. GPS quality
 

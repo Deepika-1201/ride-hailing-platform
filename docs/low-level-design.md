@@ -89,7 +89,7 @@ spikes/                           throwaway measurements (not product code)
 - `@ApiController` = `@RestController` + `@ConditionalOnRole(API)`. Every handler in one declares who may call it, with `@AllowedRoles` or `@PublicEndpoint` (§12.4). Jobs use `@RoleComponent(DISPATCH)` and similar. An ArchUnit rule rejects a bare `@RestController` or `@Scheduled` method.
 - **Background loops** (relay, pollers, recurring jobs) run on virtual threads that put their role in the logging context. They start with the application unless `ride.workers.autostart=false`, which tests use to drive each loop step by step, and they stop before the connection pool closes.
 - Port 8080 serves the public REST API (role `api`) and WebSockets (role `realtime`, V2). Port 8081 serves management: health, info (active roles), Prometheus metrics.
-- **V1 runs on PostgreSQL alone** (ADR-001): the live index, rate limiter and push bus use in-memory implementations of their ports (§9.2, §5.8). Those implementations are only correct inside one process, so startup fails if `ride.location.store=memory` is combined with a role set that doesn't include both `api` and `dispatch`.
+- **V1 runs on PostgreSQL alone** (ADR-001): the live index, rate limiter and push bus use in-memory implementations of their ports (§9.2, §5.8). Those implementations are only correct inside one process, so startup fails if `ride.location.store=memory` is combined with a role set that doesn't include both `api` and `dispatch`. Tests that start a single role to check its wiring turn the check off with `ride.location.single-process-check=false` (phase 6).
 
 ### 1.4 Conventions
 
@@ -199,6 +199,7 @@ public interface RideDispatchParticipant {              // declared by ride, imp
 public interface DispatchApi {
     DriverStatusView goOnline(UUID driverId, UUID vehicleId);
     DriverStatusView goOffline(UUID driverId);
+    DriverStatusView status(UUID driverId);                 // GET /v1/drivers/me and the location endpoint (phase 6)
     Optional<OfferView> currentOffer(UUID driverId);        // marks the offer seen (§8.5)
     void markOfferSeen(UUID offerId, UUID driverId);        // WebSocket acknowledgement (V2)
     RideView accept(UUID offerId, UUID driverId);           // T2
@@ -214,7 +215,7 @@ public interface DispatchQueries {
 // location
 public interface LiveIndex { … }                            // §9.1
 public interface LocationIngestion {
-    BatchResult accept(UUID driverId, List<LocationUpdate> updates);    // V1 REST, V2 WebSocket
+    BatchResult accept(String city, String category, UUID driverId, List<LocationUpdate> updates);   // V1 REST via dispatch, V2 WebSocket
 }
 
 // pricing
@@ -250,6 +251,7 @@ public interface GeographyApi {
     boolean offers(String cityId, String category);         // an active city category
     Optional<CategorySettings> settings(String cityId, String category);   // dispatch settings, such as radius_max_m (phase 5)
     Optional<Location> locate(GeoPoint point);              // service area and zone in one query (§10.1)
+    Optional<BoundingBox> bounds(String cityId);            // envelope of the city's bounds, for location validation (phase 6)
     boolean isZone(String cityId, String zoneId);           // an H3 resolution-7 cell or an active area:<code>
 }
 public interface RoutingProvider {
@@ -1431,6 +1433,15 @@ after commit: mirror AVAILABLE. The driver becomes a candidate with its first lo
 
 Going offline clears category, vehicle, offer and ride, closes the session with reason `DRIVER`, and writes `DriverWentOffline` and the audit entry.
 
+Phase 6 details:
+
+- `DriverApi.lockEligibility` answers with the driver's city and the vehicle's category, or a refusal reason that becomes the `409 DRIVER_NOT_ELIGIBLE` detail: no driver profile, not verified, suspended, vehicle missing or another driver's, vehicle inactive, category not offered in the city.
+- Going online also writes the driver's city into the availability row, so the row follows the profile.
+- `OFFERED` appears with offers in phase 7, which adds the decline step; until then going offline answers `409 INVALID_TRANSITION` for it, and handles `AVAILABLE` and `OFFLINE`.
+- `GET /v1/drivers/me` reads the availability row through `DispatchApi.status`; a driver who never went online is `OFFLINE` at version 0, and going offline then creates no row.
+- `driver_sessions` adds two invariants to §4.6: at most one open session per driver (a partial unique index), and a reason exactly when the session is closed.
+- The events and the session take their times from the database row (`online_since`, `status_changed_at`), so `online_seconds` never mixes clocks.
+
 ### 8.3 Search attempt
 
 Every `dispatch` node polls every 250 ms with 4 workers **(assumed)**. Each worker handles tasks one transaction at a time, up to 20 per tick:
@@ -1565,6 +1576,8 @@ Runs in the `dispatch` role every 5 s per city:
 
 `ON_TRIP` drivers are never swept: the trip continues and the app's queued commands arrive later (FR-RD8).
 
+Phase 6 details: one recurring job, `sweeper`, runs every 5 s over the cities that have online drivers, each city on its own, so one city's failure doesn't stop the others. The idle rule is live; the unreachable rule needs rides and arrives with T7 in phase 8. Silence and the safety valve are decided by the application clock, since the thresholds are minutes long (§1.4). Silence starts no earlier than `online_since`, so an update from a previous session (a missed offline mirror) can't make a driver idle the moment they come back. The valve is checked only when the rule would take someone offline, so a young epoch alone never trips it; with the in-memory index it can't trip at all, because every last-seen time is after the epoch, and its test uses a scripted index for the V2 case of an epoch reset that kept older data. The counter is `sweeper_safety_valve_total{rule}`, registered at zero; the WARN log says which trigger held. Drivers swept out of matching count in `location_sweeper_removed_total`.
+
 ### 8.10 Mirror writes and the reconciler
 
 - After commit, a transaction-synchronization callback applies each availability change to the live index with its new version: `LiveIndex.mirror(city, driver, status, version, category, ride)`. The mirror script ignores versions older than the one it holds (§9.4), so post-commit writes may arrive in any order.
@@ -1575,6 +1588,7 @@ Runs in the `dispatch` role every 5 s per city:
   3. re-apply the database state, with its version, wherever the index differs or has no entry;
   4. remove GEO-set members that aren't `AVAILABLE` in the database;
   5. set the epoch if it is missing. A city found empty is reconciled at once, which is how matching recovers within NFR-7's 10 s after a total loss of Valkey.
+- Phase 6 details: mirror writes register a transaction synchronization, so a rolled-back change is never mirrored; outside a transaction they apply at once. The reconciler is one recurring job, `live-index-reconciler`, every 30 s under its job lease rather than one lease per city, over the cities with online drivers or with an availability change within the tombstone lifetime. In each, it compares every driver the index holds and every online driver with PostgreSQL; a driver whose row is in another city is mirrored offline in this one. A city with no online drivers and no recent change is skipped: a stale entry there can't be matched, since nothing refreshes its last-seen time.
 
 ### 8.11 Ranking
 
@@ -1610,12 +1624,15 @@ public interface LiveIndex {
 
 `UpdateResult` is `APPLIED`, `STALE`, `OFFLINE` or `CATEGORY_MISMATCH`, with the mirror's status, the active ride and quality flags.
 
+As built in phase 6: city IDs are strings; `mirror` answers whether the write was newer than what the index held; `mirrored(city)` returns every driver the index holds, for the reconciler; candidates carry their last-seen time, which ranking uses to break ties (§8.11); `UpdateResult` carries the mirror's category only on a mismatch, as the script does; the operations snapshot waits for V2. The contract suite is `LiveIndexContract` in the tests, driven by a clock the suite moves.
+
 ### 9.2 V1: in-memory implementation
 
 - Per city, a `ConcurrentHashMap<UUID, Entry>`. Each update or mirror write runs in `compute`, so it is atomic per driver, with the same rules as the scripts: sequence check, status from the mirror, version guard, offline tombstones.
 - `nearby` scans the city's `AVAILABLE` entries of the category, filters by freshness and radius (haversine), sorts and returns k. A linear scan of ≤ 2,000 drivers costs well under a millisecond.
 - The epoch is the process start time.
 - One contract test suite runs against this implementation and the Valkey one (§17).
+- Phase 6 details: entries are immutable and replaced inside `compute`; an expired tombstone counts as no entry, and is dropped when next touched or swept. A sweep removes from matching the drivers whose last update fell in the minute before the cutoff, as the script does, and returns them; their next update makes them matchable again.
 
 ### 9.3 V2: Valkey keys
 
@@ -1754,6 +1771,8 @@ In V1 the in-memory index applies the sequence and rate rules; the quality rules
 7. Count each outcome in `location_updates_total{result}`.
 
 V1's `POST /v1/drivers/me/location` answers `200` with counts of applied, stale and ignored updates and the highest applied sequence number.
+
+Phase 6 details: the V1 endpoint is served by `dispatch`, which knows the driver's city and category from the availability row, and calls `LocationIngestion.accept(city, category, driver, updates)`; a driver who isn't online has every update ignored without touching the index. The bounding box is the envelope of the city's `bounds`, cached in the process, since no endpoint changes bounds. The limit is `location-per-driver`, 1 request per second. V1 counts `location_updates_total` as `applied`, `stale` (duplicates included: the script can't tell them apart), `offline` and `invalid` (bounds or numbers); a rejected request shows in the HTTP metrics as a 429.
 
 ### 9.7 Tracking and ETA (V2)
 

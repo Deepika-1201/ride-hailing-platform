@@ -49,6 +49,12 @@ public class VehicleRepository {
         return jdbc.sql(COLUMNS + "WHERE id = :id").param("id", id).query(VehicleRepository::vehicle).optional();
     }
 
+    /** Blocks changes to the vehicle, such as deactivation, until the transaction ends. */
+    public Optional<Vehicle> lockForShare(UUID id) {
+        return jdbc.sql(COLUMNS + "WHERE id = :id FOR SHARE").param("id", id).query(VehicleRepository::vehicle)
+                .optional();
+    }
+
     /** Oldest first. */
     public List<Vehicle> ofDriver(UUID driverId) {
         return jdbc.sql(COLUMNS + "WHERE driver_id = :driverId ORDER BY created_at, id")

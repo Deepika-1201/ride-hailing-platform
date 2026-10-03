@@ -22,7 +22,8 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   (`+917000000001` to `+917000002000`), 500 riders (`+918000000001` to `+918000000500`), operations `+919000000001`
   and admin `+919000000002`. Against a running stack, `scripts/sign-in-smoke.sh` signs in as the admin, refreshes and
   logs out, `scripts/reference-data-smoke.sh` calls every admin and profile endpoint as the admin, rider 1 and
-  driver 1, and `scripts/quote-smoke.sh` quotes a Bengaluru trip as rider 2.
+  driver 1, `scripts/quote-smoke.sh` quotes a Bengaluru trip as rider 2, and `scripts/driver-online-smoke.sh` takes
+  driver 3 online, sends a location and finds them as the pickup ETA of rider 3's quote.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.
