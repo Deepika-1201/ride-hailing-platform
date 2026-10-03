@@ -21,6 +21,7 @@ val springModulithVersion = "2.1.1"
 val archunitVersion = "1.5.1"
 val h3Version = "4.5.0"
 val jsonSchemaValidatorVersion = "3.0.8"
+val jqwikVersion = "1.10.1"
 
 dependencyManagement {
     imports {
@@ -49,6 +50,7 @@ dependencies {
     testImplementation("com.tngtech.archunit:archunit-junit5:$archunitVersion")
     testImplementation("com.networknt:json-schema-validator:$jsonSchemaValidatorVersion")
     testImplementation("tools.jackson.dataformat:jackson-dataformat-yaml")
+    testImplementation("net.jqwik:jqwik:$jqwikVersion")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

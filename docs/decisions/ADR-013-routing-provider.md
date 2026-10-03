@@ -43,3 +43,10 @@ Where do distances and travel times come from, in V1 and later?
 ## Revisit when
 
 - ETA errors measurably hurt matching or quotes, for example with traffic-aware speeds or a commercial provider for a real deployment.
+
+## Amendments
+
+- **2026-10-03, phase 5** ([LLD §10.4](../low-level-design.md#104-creating-a-quote)):
+  - `route` takes the departure time, so the mock's answers depend only on its inputs and repeat in tests; providers without time-of-day speeds ignore it. An empty answer means no route (`422 ROUTE_NOT_FOUND`).
+  - In V1 the mock uses one speed profile by local hour for every zone (30 km/h at night down to 18 km/h at the peaks) **(assumed)**; speeds per zone wait until simulator runs show they matter.
+  - `matrix` arrives with ETA ranking in V4; nothing before it needs more than one route at a time.

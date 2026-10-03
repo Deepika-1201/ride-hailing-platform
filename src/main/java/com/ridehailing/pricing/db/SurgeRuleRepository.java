@@ -52,6 +52,13 @@ public class SurgeRuleRepository {
                 .list();
     }
 
+    public List<SurgeRule> activeIn(String cityId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM pricing.surge_rules WHERE city_id = :cityId AND active")
+                .param("cityId", cityId)
+                .query(SurgeRuleRepository::rule)
+                .list();
+    }
+
     public Optional<SurgeRule> find(UUID id) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM pricing.surge_rules WHERE id = :id")
                 .param("id", id)

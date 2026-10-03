@@ -22,13 +22,15 @@ import org.springframework.stereotype.Service;
 public class SurgeRuleAdministration {
 
     private final SurgeRuleRepository rules;
+    private final SurgeRuleCache cache;
     private final GeographyApi geography;
     private final AuditLog auditLog;
     private final Transactions transactions;
 
-    SurgeRuleAdministration(SurgeRuleRepository rules, GeographyApi geography, AuditLog auditLog,
-            Transactions transactions) {
+    SurgeRuleAdministration(SurgeRuleRepository rules, SurgeRuleCache cache, GeographyApi geography,
+            AuditLog auditLog, Transactions transactions) {
         this.rules = rules;
+        this.cache = cache;
         this.geography = geography;
         this.auditLog = auditLog;
         this.transactions = transactions;
@@ -54,7 +56,7 @@ public class SurgeRuleAdministration {
             throw ApiException.invalid("end_local", "must differ from start_local");
         }
         List<Integer> days = rule.daysOfWeek().stream().sorted().toList();
-        return transactions.execute(() -> {
+        SurgeRule result = transactions.execute(() -> {
             SurgeRule created = rules.insert(new SurgeRule(Ids.newId(), rule.cityId(), rule.zoneId(), days,
                     rule.startLocal(), rule.endLocal(), rule.multiplier(), true, 0), admin.userId());
             audit(admin, "surge_rule.create", created.id(), Map.of("city_id", created.cityId(),
@@ -62,11 +64,13 @@ public class SurgeRuleAdministration {
                     "end_local", created.endLocal().toString(), "multiplier", created.multiplier()));
             return created;
         });
+        cache.invalidate(result.cityId());
+        return result;
     }
 
     /** {@code multiplier} and {@code active} are optional; {@code version} is the one the admin read. */
     public SurgeRule update(Caller admin, UUID id, BigDecimal multiplier, Boolean active, int version) {
-        return transactions.execute(() -> {
+        SurgeRule result = transactions.execute(() -> {
             SurgeRule current = rules.find(id).orElseThrow(ApiException::notFound);
             SurgeRule updated = rules.update(id, version, multiplier, active)
                     .orElseThrow(() -> ApiException.versionConflict(current.version()));
@@ -80,6 +84,8 @@ public class SurgeRuleAdministration {
             audit(admin, "surge_rule.update", id, changed);
             return updated;
         });
+        cache.invalidate(result.cityId());
+        return result;
     }
 
     private void audit(Caller admin, String action, UUID ruleId, Map<String, Object> after) {

@@ -248,12 +248,13 @@ public interface DriverApi {
 public interface GeographyApi {
     Optional<CityView> city(String cityId);                 // cached; currency and time zone
     boolean offers(String cityId, String category);         // an active city category
+    Optional<CategorySettings> settings(String cityId, String category);   // dispatch settings, such as radius_max_m (phase 5)
     Optional<Location> locate(GeoPoint point);              // service area and zone in one query (§10.1)
     boolean isZone(String cityId, String zoneId);           // an H3 resolution-7 cell or an active area:<code>
 }
 public interface RoutingProvider {
-    Route route(GeoPoint from, GeoPoint to);
-    DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);
+    Optional<Route> route(GeoPoint from, GeoPoint to, ZonedDateTime departure);   // empty: no route
+    DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);  // V4, for ETA ranking
 }
 public interface RatingApi { RatingSummary summary(UUID userId, Party party); }
 public interface IdentityApi { UUID ensureUser(String phone, Set<UserRole> roles); }  // creates, or adds the roles; joins the caller's transaction
@@ -1443,7 +1444,7 @@ SELECT * FROM dispatch.search_tasks
 -- RideAssignment.lockIfSearching(ride_id): SELECT … FROM ride.rides WHERE id = ? FOR SHARE (§6.4)
 --   not SEARCHING → DELETE FROM dispatch.search_tasks WHERE ride_id = ?; COMMIT
 SELECT driver_id FROM dispatch.offers WHERE ride_id = :ride;              -- excluded: offered before (FR-DS3)
--- candidates = LiveIndex.nearby(city, category, pickup, radius_m, 20, 30 s)
+-- candidates = LiveIndex.nearby(city, category, pickup, radius_m, 20)
 -- ranked     = ranker.rank(request, candidates − excluded)
 -- for each of the first 5 ranked candidates, until one row changes:
 UPDATE dispatch.driver_availability
@@ -1597,7 +1598,7 @@ record Candidate(UUID driverId, int distanceM, Instant lastSeen, OptionalDouble 
 ```java
 public interface LiveIndex {
     UpdateResult update(CityId city, UUID driverId, String category, LocationUpdate update);
-    List<Candidate> nearby(CityId city, String category, GeoPoint at, int radiusM, int k, Duration freshness);
+    List<Candidate> nearby(CityId city, String category, GeoPoint at, int radiusM, int k);  // fresh within ride.location.freshness
     Optional<LivePosition> position(CityId city, UUID driverId);
     void mirror(CityId city, UUID driverId, MirrorState state);     // status, version, category, ride
     List<UUID> sweep(CityId city, Instant silentBefore);            // returns drivers removed from matching
@@ -1824,6 +1825,7 @@ Property tests check that the components always add up to the total, that the ro
 - Active rules for the city and zone whose days of the week and local time window contain the current time in the city's time zone. Windows may wrap past midnight.
 - The highest matching multiplier applies, capped at 2.0; no match means 1.0. Rules are cached in process for 60 s (HLD §5.4).
 - From V4, computed multipliers replace rules for cities set to computed surge (§19.2).
+- Phase 5 details: a rule's days are the days its window *starts*, so a Friday rule for 22:00–02:00 covers Friday 22:00 to Saturday 02:00 and not the early hours of Friday. Starts are inclusive, ends exclusive, and an end equal to the start is rejected when the rule is created.
 
 ### 10.4 Creating a quote
 
@@ -1835,11 +1837,22 @@ Property tests check that the components always add up to the total, that the ro
 6. Pickup ETA estimate: the nearest available driver from `LiveIndex.nearby(…, radius_max_m, k = 1)`, then the routing provider's duration from there. No driver: `pickup_eta_s` is null and the app says "no cars nearby" while still allowing the booking.
 7. Insert the quote with `expires_at = now() + 5 min` (database clock) and return `201`.
 
+Phase 5 details:
+
+- **The pickup's city decides the category check:** not offered there is `422 CATEGORY_NOT_AVAILABLE`, and so is a category without a fare or fee rule in effect, since it can't be priced. Only the pickup must be inside a service area.
+- **Fare and fee versions are read for each quote,** one indexed query each: the highest `effective_from ≤ now()` by the database clock, the higher version on a tie. One clock decides when a version takes effect, so a version published "now" is usable at once even when the application's clock lags the database's (the test setup's did, by about 0.2 s). **Surge rules are cached** per city in process for 60 s, and cleared at once after a surge-rule change commits in the same process; a load that overlaps the clearing is used once and not kept.
+- **The mock router** (ADR-013, amended): distance is the haversine distance × 1.35, rounded to the metre; duration is that distance at the speed for the local hour of departure, rounded to the second: 30 km/h from 00:00, 24 from 06:00, 18 from 08:00, 22 from 11:00, 18 from 17:00, 26 from 21:00 **(assumed)**. The same profile applies to every zone in V1. The provider takes the departure time, so its answers repeat in tests.
+- **The pickup ETA** asks the live index for one available driver of the category within the city category's `radius_max_m`; the index applies its own freshness (`ride.location.freshness`), so callers don't pass it. Until phase 6 provides the live index, quotes have no pickup ETA.
+- **Consuming a quote** (§7.2) is part of `PricingApi` from phase 5, so expired, used and other riders' quotes are tested before booking exists.
+- **The quotes table checks the fare:** the parts add up to the total, rounding is 0–99 paise, the total is in whole rupees, and the commission is at most the fare before tax.
+- **Retention:** the hourly `pricing-retention` job (worker) deletes unused quotes 24 h after they expire and used ones after 30 days, by `created_at`, in batches of 10,000.
+- Geography reads (city, offer, zone) aren't cached yet: each is one indexed query per quote, until load tests ask for more (HLD §5.4).
+
 ### 10.5 Publishing rules
 
 - `POST /v1/admin/fare-rules` (and fee rules) inserts version n + 1 with `effective_from ≥ now()` (default now); a time in the past gets `422 RULE_EFFECTIVE_IN_PAST`. Existing versions are never updated, so a published price can't change under a quote (ADR-012); a trigger rejects `UPDATE` and `DELETE` on both tables, like the audit log's.
 - Phase 4 details: the next version number is taken under a transaction-scoped advisory lock on the city, category and rule kind, so concurrent publishes get consecutive versions instead of a unique-key failure. The category must be offered in the city (`422 CATEGORY_NOT_AVAILABLE`), and the currency must be the city's (`400 VALIDATION_FAILED`).
-- The node that published reloads its cache at once; the others reload within 60 s. A quote always records the rule ID it used.
+- Quotes read fare and fee versions from the database, so a publish applies to the next quote on every node (§10.4). A quote always records the rule IDs it used.
 - Surge rules and city-category settings are updated in place with a `version` check (`409 VERSION_CONFLICT`). Every change is audited.
 
 ## 11. Payments

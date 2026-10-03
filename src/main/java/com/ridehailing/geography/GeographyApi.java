@@ -12,6 +12,9 @@ public interface GeographyApi {
     /** Whether the city is active and offers the category. */
     boolean offers(String cityId, String category);
 
+    /** The city's dispatch settings for the category, offered or not. */
+    Optional<CategorySettings> settings(String cityId, String category);
+
     /** The service area containing the point, with its zone; empty outside every service area. */
     Optional<Location> locate(GeoPoint point);
 
@@ -19,6 +22,10 @@ public interface GeographyApi {
     boolean isZone(String cityId, String zoneId);
 
     record CityView(String id, String name, ZoneId timeZone, String currency, boolean active) {
+    }
+
+    record CategorySettings(boolean active, int offerTtlS, int searchTimeoutS, int radiusStartM, int radiusStepM,
+            int radiusMaxM, String ranker) {
     }
 
     /** {@code zoneId} is {@code area:<code>} inside a special area, otherwise the point's H3 resolution-7 cell. */

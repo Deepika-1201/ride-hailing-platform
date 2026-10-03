@@ -9,6 +9,8 @@ import com.ridehailing.platform.AccessTokens;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.UserRole;
 import com.ridehailing.support.IntegrationTest;
+import com.uber.h3core.H3Core;
+import java.io.IOException;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -18,7 +20,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.TestPropertySource;
 import tools.jackson.databind.JsonNode;
 
-/** LLD §4.9: the local profile's Bengaluru, answering every phase-4 admin and profile read. */
+/** LLD §4.9: the local profile's Bengaluru, answering every phase-4 admin and profile read, and pricing quotes. */
 @TestPropertySource(properties = "ride.seed.enabled=true")
 class SeededBengaluruTests extends IntegrationTest {
 
@@ -115,5 +117,24 @@ class SeededBengaluruTests extends IntegrationTest {
 
     private String bearer(UUID userId, UserRole role) {
         return "Bearer " + accessTokens.issue(userId, Set.of(role)).value();
+    }
+
+    @Test
+    void aSeededRiderQuotesTheOpenApiExampleTripAtTheSeededMiniPrices() throws IOException {
+        JsonNode quote = assertAnswered("POST", "/v1/quotes", call("POST", bearer(FIRST_RIDER, UserRole.RIDER),
+                "/v1/quotes", """
+                        {"pickup": {"lat": 12.97194, "lon": 77.64115}, "dropoff": {"lat": 12.93524, "lon": 77.62448},
+                         "category": "MINI"}
+                        """), 201);
+
+        assertThat(quote.get("city_id").asString()).isEqualTo("blr");
+        assertThat(quote.get("surge_multiplier").decimalValue()).satisfiesAnyOf(
+                multiplier -> assertThat(multiplier).isEqualByComparingTo("1.00"),
+                multiplier -> assertThat(multiplier).isEqualByComparingTo("1.30"));
+        assertThat(jdbc.sql("SELECT fare_rule_id, fee_rule_id, pickup_zone FROM pricing.quotes WHERE id = :id")
+                .param("id", UUID.fromString(quote.get("id").asString())).query().singleRow())
+                .containsEntry("fare_rule_id", UUID.fromString("0199a3f0-0006-7000-8000-000000000002"))
+                .containsEntry("fee_rule_id", UUID.fromString("0199a3f0-0006-7000-8000-000000000012"))
+                .containsEntry("pickup_zone", H3Core.newInstance().latLngToCellAddress(12.97194, 77.64115, 7));
     }
 }

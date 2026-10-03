@@ -244,10 +244,11 @@ Valkey holds only data that can be rebuilt or lost: positions refill from update
 |---|---|---|---|---|
 | Live positions | Driver updates | Valkey | Replaced every 4 s | Rebuilt within one interval |
 | Availability mirror | `dispatch.driver_availability` | Valkey hash and GEO membership | Written after each commit; reconciled every 30 s | A stale driver is a wasted candidate; the reservation fails safely |
-| Fare rules | `pricing.fare_rules` | In-process, keyed by version | Reloaded when a version is published | Each quote records the version it used |
-| Surge multipliers | `pricing.surge_multipliers` | In-process, Valkey from V4 | 60 s | The quote locks the multiplier |
+| Surge multipliers | `pricing.surge_rules` (V1), `pricing.surge_multipliers` (V4) | In-process, Valkey from V4 | 60 s; at once on the node that changed a rule | The quote locks the multiplier |
 | City, zone and category config | `geography` | In-process | Reloaded on change | A short window of old config |
 | Route results (V4) | Routing provider | Valkey, by H3 resolution-9 cell pair | 10 min **(assumed)** | Recomputed |
+
+Fare and fee rules aren't cached: each quote reads the version in effect with one indexed query, so the database clock alone decides when a published version takes effect (changed in phase 5; [LLD §10.4](low-level-design.md#104-creating-a-quote)).
 
 ### 5.5 Retention
 

@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -134,6 +135,33 @@ public class RuleRepository {
     // The PostgreSQL driver takes OffsetDateTime, not Instant.
     private static OffsetDateTime utc(Instant time) {
         return time == null ? null : time.atOffset(ZoneOffset.UTC);
+    }
+
+    /** The version with the latest start not after now, by the database clock; the higher version on a tie. */
+    public Optional<FareRule> fareInEffect(String cityId, String category) {
+        return jdbc.sql("SELECT " + FARE_COLUMNS + """
+                         FROM pricing.fare_rules
+                        WHERE city_id = :cityId AND category = :category AND effective_from <= now()
+                        ORDER BY effective_from DESC, version DESC
+                        LIMIT 1
+                        """)
+                .param("cityId", cityId)
+                .param("category", category)
+                .query(FareRule.class)
+                .optional();
+    }
+
+    public Optional<FeeRule> feeInEffect(String cityId, String category) {
+        return jdbc.sql("SELECT " + FEE_COLUMNS + """
+                         FROM pricing.fee_rules
+                        WHERE city_id = :cityId AND category = :category AND effective_from <= now()
+                        ORDER BY effective_from DESC, version DESC
+                        LIMIT 1
+                        """)
+                .param("cityId", cityId)
+                .param("category", category)
+                .query(FeeRule.class)
+                .optional();
     }
 
     public enum Kind {

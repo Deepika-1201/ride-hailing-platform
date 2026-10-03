@@ -42,6 +42,13 @@ class GeographyService implements GeographyApi {
     }
 
     @Override
+    public Optional<CategorySettings> settings(String cityId, String category) {
+        return categories.settings(cityId, category).map(settings -> new CategorySettings(settings.active(),
+                settings.offerTtlS(), settings.searchTimeoutS(), settings.radiusStartM(), settings.radiusStepM(),
+                settings.radiusMaxM(), settings.ranker()));
+    }
+
+    @Override
     public Optional<Location> locate(GeoPoint point) {
         return spatial.containing(point).map(found -> new Location(found.cityId(),
                 found.specialArea() != null ? AREA_PREFIX + found.specialArea() : zones.cellOf(point)));

@@ -21,8 +21,8 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   area, airport and station areas, four categories, fare, fee and surge rules), 2,000 verified drivers with vehicles
   (`+917000000001` to `+917000002000`), 500 riders (`+918000000001` to `+918000000500`), operations `+919000000001`
   and admin `+919000000002`. Against a running stack, `scripts/sign-in-smoke.sh` signs in as the admin, refreshes and
-  logs out, and `scripts/reference-data-smoke.sh` calls every admin and profile endpoint as the admin, rider 1 and
-  driver 1.
+  logs out, `scripts/reference-data-smoke.sh` calls every admin and profile endpoint as the admin, rider 1 and
+  driver 1, and `scripts/quote-smoke.sh` quotes a Bengaluru trip as rider 2.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.

@@ -16,7 +16,7 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-010](ADR-010-state-machines.md) | Explicit state machines with versioned conditional updates | Accepted (amended 2026-10-02) |
 | [ADR-011](ADR-011-dispatch-protocol.md) | Dispatch through search tasks in PostgreSQL, sequential offers reserved at offer time | Accepted |
 | [ADR-012](ADR-012-pricing-and-zones.md) | Upfront quotes, versioned fare rules and H3 zones | Accepted |
-| [ADR-013](ADR-013-routing-provider.md) | Routing-provider interface: a mock first, then self-hosted OSRM | Accepted |
+| [ADR-013](ADR-013-routing-provider.md) | Routing-provider interface: a mock first, then self-hosted OSRM | Accepted (amended 2026-10-03) |
 | [ADR-014](ADR-014-payments.md) | Thin payments: provider interface, realistic mock, charge after the trip | Accepted |
 | [ADR-015](ADR-015-identity.md) | In-house phone sign-in with short-lived JWTs | Accepted (amended 2026-10-02, twice) |
 | [ADR-016](ADR-016-trip-routes.md) | Trip routes in daily PostgreSQL partitions, archived to object storage at scale | Accepted |

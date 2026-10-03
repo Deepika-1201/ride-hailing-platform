@@ -59,6 +59,8 @@ jobs:
         run: ./scripts/sign-in-smoke.sh
       - name: Call every admin and profile endpoint as the seeded admin, rider and driver
         run: ./scripts/reference-data-smoke.sh
+      - name: Quote a Bengaluru trip as a seeded rider
+        run: ./scripts/quote-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs
