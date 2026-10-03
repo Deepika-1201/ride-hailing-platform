@@ -35,7 +35,7 @@ import tools.jackson.databind.json.JsonMapper;
     "ride.outbox.retry-delays=10ms,10ms,10ms"
 })
 @Import({IntegrationTest.RoleProbeController.class, IdempotencyProbeController.class, TestHandlers.class,
-    AccessProbes.ByMethod.class, AccessProbes.DriverByClass.class, TestUsers.class})
+    AccessProbes.ByMethod.class, AccessProbes.DriverByClass.class, TestUsers.class, TestCities.class})
 @ActiveProfiles("test")
 public abstract class IntegrationTest {
 
@@ -82,6 +82,20 @@ public abstract class IntegrationTest {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body));
         headers.forEach(request::header);
+        return send(request);
+    }
+
+    /** Any method on the API port; {@code authorization} and {@code body} (JSON) may be null. */
+    protected HttpResponse<String> call(String method, String authorization, String path, String body) {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path));
+        if (authorization != null) {
+            request.header("Authorization", authorization);
+        }
+        if (body == null) {
+            request.method(method, HttpRequest.BodyPublishers.noBody());
+        } else {
+            request.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(body));
+        }
         return send(request);
     }
 

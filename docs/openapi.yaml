@@ -538,6 +538,7 @@ paths:
               schema: {$ref: '#/components/schemas/Driver'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /v1/drivers/me/online:
     post:
       tags: [Drivers]
@@ -1188,6 +1189,7 @@ paths:
           content:
             application/json:
               schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/FareRule'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
     post:
@@ -1226,6 +1228,7 @@ paths:
           content:
             application/json:
               schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/FeeRule'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
     post:
@@ -1262,6 +1265,7 @@ paths:
           content:
             application/json:
               schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/SurgeRule'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
     post:
@@ -1396,6 +1400,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
   /v1/admin/vehicles/{vehicle_id}:
     patch:
       tags: [Admin]
@@ -1612,8 +1617,8 @@ components:
         `OFFER_NO_LONGER_AVAILABLE`, `QUOTE_EXPIRED`, `QUOTE_ALREADY_USED`, `ACTIVE_RIDE_EXISTS`, `DUES_OUTSTANDING`,
         `PIN_LOCKED`, `NO_SHOW_TOO_EARLY`, `DRIVER_NOT_ELIGIBLE`, `DRIVER_HAS_ACTIVE_RIDE`, `PLACES_LIMIT_REACHED`,
         `NO_DUES`, `CHARGE_NOT_REFUNDABLE`, `RATING_NOT_OPEN`, `ALREADY_RATED`, `RECEIPT_NOT_AVAILABLE`,
-        `VERSION_CONFLICT`, `FLAG_ALREADY_RESOLVED`, or `IDEMPOTENCY_KEY_IN_PROGRESS` (retry with the same key after
-        `Retry-After`).
+        `VERSION_CONFLICT` (with `current_version`), `ALREADY_EXISTS`, `FLAG_ALREADY_RESOLVED`, or
+        `IDEMPOTENCY_KEY_IN_PROGRESS` (retry with the same key after `Retry-After`).
       headers:
         X-Request-Id: {$ref: '#/components/headers/RequestId'}
         Retry-After: {$ref: '#/components/headers/RetryAfter'}

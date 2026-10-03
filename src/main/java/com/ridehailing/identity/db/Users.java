@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.support.SqlArrayValue;
 import org.springframework.stereotype.Repository;
 
 @Repository
@@ -37,6 +38,23 @@ public class Users {
                 .param("phone", phone)
                 .update();
         return jdbc.sql(COLUMNS + "WHERE phone = :phone").param("phone", phone).query(Users::user).single();
+    }
+
+    /** Creates the user with the roles, or adds them to the phone's user; returns the ID. */
+    public UUID ensure(String phone, Set<UserRole> roles) {
+        return jdbc.sql("""
+                        INSERT INTO identity.users (id, phone, roles) VALUES (:id, :phone, :roles)
+                        ON CONFLICT (phone) DO UPDATE
+                        SET roles = ARRAY(SELECT DISTINCT r FROM unnest(identity.users.roles || EXCLUDED.roles) AS r
+                                          ORDER BY r),
+                            version = identity.users.version + 1
+                        RETURNING id
+                        """)
+                .param("id", Ids.newId())
+                .param("phone", phone)
+                .param("roles", new SqlArrayValue("text", roles.stream().map(Enum::name).sorted().toArray()))
+                .query(UUID.class)
+                .single();
     }
 
     private static User user(ResultSet row, int rowNumber) throws SQLException {

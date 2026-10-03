@@ -57,6 +57,8 @@ jobs:
           docker compose logs app | grep -q '"@timestamp"'
       - name: Sign in as the seeded admin, refresh and log out
         run: ./scripts/sign-in-smoke.sh
+      - name: Call every admin and profile endpoint as the seeded admin, rider and driver
+        run: ./scripts/reference-data-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

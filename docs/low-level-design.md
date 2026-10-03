@@ -126,7 +126,7 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 | `notification` | `platform`, `shared` | One-time-code SMS for identity; consumes events as JSON |
 | `identity` | `notification`, `audit`, `platform`, `shared` | Sends one-time codes |
 | `rider` | `audit`, `platform`, `shared` | |
-| `driver` | `identity`, `audit`, `platform`, `shared` | Admins create a driver's user |
+| `driver` | `identity`, `geography`, `audit`, `platform`, `shared` | Admins create a driver's user; a driver's city and vehicles' categories must exist there (added in phase 4) |
 | `geography` | `audit`, `platform`, `shared` | Owns cities, areas, zones, categories and the `RoutingProvider` |
 | `rating` | `audit`, `platform`, `shared` | Opens rating windows from `TripCompleted` (JSON) |
 | `location` | `geography`, `notification`, `platform`, `shared` | City bounds; live index; the "driver arriving" notification (V2) |
@@ -241,20 +241,22 @@ public interface RiderApi {
 public interface DriverApi {
     Eligibility lockEligibility(UUID driverId, UUID vehicleId);   // driver row FOR SHARE (§6.1)
     DriverSnapshot snapshot(UUID driverId, UUID vehicleId);       // first name, rating, vehicle
+    Optional<DriverProfile> profile(UUID driverId);               // GET /v1/drivers/me, served by dispatch (§13.3)
     void suspend(UUID driverId, Actor ops, String reason);
     void reinstate(UUID driverId, Actor ops, String reason);
 }
 public interface GeographyApi {
-    CityConfig city(CityId city);                           // cached; categories and dispatch policies
-    Optional<CityId> cityAt(GeoPoint point);                // service area lookup
-    ZoneId zoneOf(CityId city, GeoPoint point);             // special area, else H3 cell (§10.1)
+    Optional<CityView> city(String cityId);                 // cached; currency and time zone
+    boolean offers(String cityId, String category);         // an active city category
+    Optional<Location> locate(GeoPoint point);              // service area and zone in one query (§10.1)
+    boolean isZone(String cityId, String zoneId);           // an H3 resolution-7 cell or an active area:<code>
 }
 public interface RoutingProvider {
     Route route(GeoPoint from, GeoPoint to);
     DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);
 }
 public interface RatingApi { RatingSummary summary(UUID userId, Party party); }
-public interface IdentityApi { UUID createUser(String phone, Set<UserRole> roles); }
+public interface IdentityApi { UUID ensureUser(String phone, Set<UserRole> roles); }  // creates, or adds the roles; joins the caller's transaction
 public interface NotificationApi {
     void sendOneTimeCode(String phone, String code);       // synchronous, never stored (§12.1)
     void notify(Notice notice);                             // joins the caller's transaction
@@ -684,6 +686,10 @@ CREATE INDEX quotes_by_zone ON pricing.quotes (city_id, pickup_zone, created_at)
 
 The fare breakdown is stored as typed columns, not a JSON document, because the formula is fixed by FR-PR2 and typed columns get `CHECK` constraints. Extensions (airport fee, promotions) arrive as ordered `FareComponent`s with their own rows when they are built (ADR-012).
 
+- **Categories are reference data,** inserted by a geography migration (`AUTO` 3 seats, `MINI` 4, `SEDAN` 4, `XL` 6); no endpoint creates them. Cities, areas and city categories come from the admin API, or from seeds locally.
+- **PostGIS** is created by geography's second migration, `WITH SCHEMA public`, so every module's connections find its types and functions on the default search path. The migration sets `statement_timeout = 0` and `search_path = geography, public` locally (§4.9).
+- **Geometries travel as GeoJSON:** `ST_GeomFromGeoJSON` in, `ST_AsGeoJSON` out. A malformed or invalid shape (`ST_IsValid` false) is `422 INVALID_GEOMETRY`.
+
 ### 4.5 ride
 
 ```sql
@@ -1054,6 +1060,7 @@ CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at time
 - Partitions (audit monthly, trip points daily) are kept ahead by the maintenance job (§5.7), so writes never depend on a migration running at the right time. The migration that creates a partitioned table also creates its first partitions (audit: the current month and the next two), because an `api`-only process may write before any `worker` has run the job.
 - Seed data for local runs and demos lives in `db/seed/` and loads only in the `local` profile: Bengaluru with its service area, airport and station areas, four categories, fare and fee rules, a few surge rules, 2,000 verified drivers with vehicles, 500 riders, and one operations and one admin account **(assumed counts for riders and staff)**.
 - Seeds are Flyway migrations with **their own history per module** (`<module>.flyway_seed_history`), run after every module's schema migrations when `ride.seed.enabled` is true (the `local` profile). Keeping them out of the schema history lets a seeded database run later without seeds while Flyway's validation stays clean.
+- Seeds in different modules agree on IDs without querying each other: seeded user *n* has a UUID derived from *n* (drivers `0199a3f0-0001-7000-8000-<n in hex>`, riders `0199a3f0-0002-…`), and phone numbers follow the same *n* (drivers `+917000000001` onwards, riders `+918000000001` onwards). Other seeded rows follow the pattern with their own second group: vehicles `0003`, cash methods `0004`, service and special areas `0005`, rules `0006`.
 
 ## 5. Platform mechanisms
 
@@ -1770,7 +1777,7 @@ One query answers both "is the pickup inside a service area?" and "which special
 SELECT sa.city_id,
        (SELECT sp.code FROM geography.special_areas sp
          WHERE sp.city_id = sa.city_id AND sp.active AND ST_Covers(sp.area, p.pt)
-         ORDER BY sp.priority DESC LIMIT 1) AS special_area
+         ORDER BY sp.priority DESC, sp.code LIMIT 1) AS special_area
   FROM (SELECT ST_SetSRID(ST_MakePoint(:lon, :lat), 4326) AS pt) p
   JOIN geography.service_areas sa ON sa.active AND ST_Covers(sa.area, p.pt)
  LIMIT 1;
@@ -1830,7 +1837,8 @@ Property tests check that the components always add up to the total, that the ro
 
 ### 10.5 Publishing rules
 
-- `POST /v1/admin/fare-rules` (and fee rules) inserts version n + 1 with `effective_from ≥ now()` (default now); a time in the past gets `422 RULE_EFFECTIVE_IN_PAST`. Existing versions are never updated, so a published price can't change under a quote (ADR-012).
+- `POST /v1/admin/fare-rules` (and fee rules) inserts version n + 1 with `effective_from ≥ now()` (default now); a time in the past gets `422 RULE_EFFECTIVE_IN_PAST`. Existing versions are never updated, so a published price can't change under a quote (ADR-012); a trigger rejects `UPDATE` and `DELETE` on both tables, like the audit log's.
+- Phase 4 details: the next version number is taken under a transaction-scoped advisory lock on the city, category and rule kind, so concurrent publishes get consecutive versions instead of a unique-key failure. The category must be offered in the city (`422 CATEGORY_NOT_AVAILABLE`), and the currency must be the city's (`400 VALIDATION_FAILED`).
 - The node that published reloads its cache at once; the others reload within 60 s. A quote always records the rule ID it used.
 - Surge rules and city-category settings are updated in place with a `version` check (`409 VERSION_CONFLICT`). Every change is audited.
 
@@ -2075,7 +2083,8 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 | `RATING_NOT_OPEN` | 409 | Not a participant, ride not completed, or the 7-day window closed |
 | `ALREADY_RATED` | 409 | This side already rated the ride |
 | `RECEIPT_NOT_AVAILABLE` | 409 | The ride isn't completed |
-| `VERSION_CONFLICT` | 409 | An admin update with a stale `version` |
+| `VERSION_CONFLICT` | 409 | An admin update with a stale or missing `version`; `current_version` |
+| `ALREADY_EXISTS` | 409 | A city ID, special-area code, vehicle plate, saved-place label or driver that already exists (added in phase 4) |
 | `FLAG_ALREADY_RESOLVED` | 409 | Resolving a resolved flag |
 | `IDEMPOTENCY_KEY_REUSED` | 422 | The same key with a different request |
 | `OUTSIDE_SERVICE_AREA` | 422 | Pickup outside every service area |
@@ -2090,6 +2099,25 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 | `RATE_LIMITED` | 429 | Over a rate limit; `Retry-After` |
 | `INTERNAL_ERROR` | 500 | Anything unexpected, logged with its request ID |
 | `SERVICE_UNAVAILABLE` | 503 | The database is unreachable or load is being shed; `Retry-After` |
+
+### 13.3 Profiles and reference data (phase 4)
+
+| Area | Rules |
+|---|---|
+| Rider profile | The rider row and its cash method are created on the rider's first `/v1/riders/me/**` call, since `identity` doesn't depend on `rider`. `rating` joins the response in phase 10 |
+| Saved places | At most 10, counted under the rider row's lock (`409 PLACES_LIMIT_REACHED`); labels are unique per rider (`409 ALREADY_EXISTS`); someone else's place is `404` |
+| Payment methods | Card and UPI hold a mock provider token. Removing one deactivates it, and if it was the default, cash becomes the default. Cash can't be removed (`422 PAYMENT_METHOD_INVALID`). `is_default` comes from the rider row |
+| Drivers | `POST /v1/admin/drivers` calls `IdentityApi.ensureUser(phone, {DRIVER})` in the same transaction, so an existing rider keeps their account and gains the role; a phone that is already a driver is `409 ALREADY_EXISTS`. The city must exist (`400 VALIDATION_FAILED`) |
+| Verification | Admins set `VERIFIED` or `REJECTED`, from any status (`PENDING` is only where onboarding starts); setting the current status again is a no-op `200`. Each change writes a `status_changes` row and an audit entry; becoming `VERIFIED` appends `DriverVerified` |
+| Vehicles | The category must be offered in the driver's city (`422 CATEGORY_NOT_AVAILABLE`); plates are unique (`409 ALREADY_EXISTS`); `PATCH` checks `version` |
+| `GET /v1/drivers/me` | Served by dispatch, which owns availability and may depend on `driver`: the profile from `DriverApi.profile`, the status from the availability row. Until phase 6 creates those rows, every driver is `OFFLINE` at version 0. A user with the `DRIVER` role but no driver row gets `404` |
+| Cities and areas | City IDs and special-area codes are unique (`409 ALREADY_EXISTS`); the time zone must be an IANA zone and the currency `INR` in V1 (`400 VALIDATION_FAILED`). Replacing the service area locks the city row, deactivates the old area and inserts the new one in one transaction. Updates check `version` (`409 VERSION_CONFLICT`). Where special areas of equal priority overlap, the lowest code wins, so zone resolution is deterministic |
+| City categories | `PUT` creates the settings when absent; when present, `version` must match |
+| Surge rules | `zone_id` must be an H3 resolution-7 cell or `area:<code>` of an active special area in the city; days must not repeat and `end_local` must differ from `start_local` (all `400 VALIDATION_FAILED`) |
+| Pagination | `next_cursor` is opaque: base64url of the last row's `created_at` (microseconds) and ID |
+| Auditing | Every admin change records an audit entry with the admin as actor and the changed fields |
+
+Every phase-4 response is checked against `openapi.yaml` by the contract tests (§17.1): the status must be documented for the operation, the documented headers present, and the body valid against its schema, formats included.
 
 ## 14. Realtime (V2)
 

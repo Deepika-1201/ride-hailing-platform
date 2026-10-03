@@ -19,4 +19,5 @@ USER app
 EXPOSE 8080 8081
 ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError" \
     LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
-ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+# H3 loads its native library (ADR-012).
+ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "org.springframework.boot.loader.launch.JarLauncher"]

@@ -19,6 +19,8 @@ repositories {
 
 val springModulithVersion = "2.1.1"
 val archunitVersion = "1.5.1"
+val h3Version = "4.5.0"
+val jsonSchemaValidatorVersion = "3.0.8"
 
 dependencyManagement {
     imports {
@@ -35,6 +37,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-security-oauth2-resource-server")
     implementation("org.flywaydb:flyway-database-postgresql")
     implementation("org.springframework.modulith:spring-modulith-api")
+    implementation("com.uber:h3:$h3Version")
     runtimeOnly("org.postgresql:postgresql")
     runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
@@ -44,6 +47,8 @@ dependencies {
     testImplementation("org.testcontainers:testcontainers-postgresql")
     testImplementation("org.springframework.modulith:spring-modulith-starter-test")
     testImplementation("com.tngtech.archunit:archunit-junit5:$archunitVersion")
+    testImplementation("com.networknt:json-schema-validator:$jsonSchemaValidatorVersion")
+    testImplementation("tools.jackson.dataformat:jackson-dataformat-yaml")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -59,13 +64,18 @@ tasks.named<Jar>("jar") {
 tasks.withType<Test> {
     useJUnitPlatform()
     systemProperty("user.timezone", "UTC")
-    jvmArgs("-XX:+EnableDynamicAgentLoading")
+    jvmArgs("-XX:+EnableDynamicAgentLoading", "--enable-native-access=ALL-UNNAMED")
     // Testcontainers' cleanup container mounts the socket from inside the Docker VM (Colima) or host (Linux CI).
     environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
     testLogging {
         events("failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
+}
+
+tasks.withType<org.springframework.boot.gradle.tasks.run.BootRun> {
+    // H3 loads its native library (ADR-012).
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
 tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootTestRun") {

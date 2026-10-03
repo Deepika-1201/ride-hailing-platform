@@ -11,7 +11,6 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
-import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -79,9 +78,7 @@ class JdbcIdempotency implements Idempotency {
                     "This command needs an " + HEADER + " header.");
         }
         if (!VALID_KEY.matcher(key).matches()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The request is invalid.", null,
-                    Map.of("errors", List.of(Map.of(
-                            "field", HEADER, "message", "must be 1 to 255 visible ASCII characters"))));
+            throw ApiException.invalid(HEADER, "must be 1 to 255 visible ASCII characters");
         }
     }
 
