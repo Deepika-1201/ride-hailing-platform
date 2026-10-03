@@ -3,9 +3,11 @@ package com.ridehailing.dispatch.app;
 import com.ridehailing.audit.AuditEntry;
 import com.ridehailing.audit.AuditLog;
 import com.ridehailing.dispatch.AvailabilityStatus;
-import com.ridehailing.dispatch.DispatchApi;
+import com.ridehailing.dispatch.DispatchApi.DriverStatusView;
+import com.ridehailing.dispatch.DispatchApi.OfferStatus;
 import com.ridehailing.dispatch.db.AvailabilityRepository;
 import com.ridehailing.dispatch.db.AvailabilityRepository.AvailabilityRow;
+import com.ridehailing.dispatch.db.OfferRepository;
 import com.ridehailing.dispatch.db.SessionRepository;
 import com.ridehailing.dispatch.events.DriverWentOffline;
 import com.ridehailing.dispatch.events.DriverWentOnline;
@@ -25,22 +27,27 @@ import org.springframework.stereotype.Service;
 
 /** Going online and offline (LLD §8.1, §8.2): the row, the session, the event, the audit entry and the mirror. */
 @Service
-class Availability implements DispatchApi {
+class Availability {
 
     static final String AGGREGATE = "availability";
 
     private final AvailabilityRepository availability;
     private final SessionRepository sessions;
+    private final OfferRepository offers;
+    private final OfferEndings endings;
     private final DriverApi drivers;
     private final Outbox outbox;
     private final AuditLog auditLog;
     private final Transactions transactions;
     private final LiveIndexMirror mirror;
 
-    Availability(AvailabilityRepository availability, SessionRepository sessions, DriverApi drivers, Outbox outbox,
-            AuditLog auditLog, Transactions transactions, LiveIndexMirror mirror) {
+    Availability(AvailabilityRepository availability, SessionRepository sessions, OfferRepository offers,
+            OfferEndings endings, DriverApi drivers, Outbox outbox, AuditLog auditLog, Transactions transactions,
+            LiveIndexMirror mirror) {
         this.availability = availability;
         this.sessions = sessions;
+        this.offers = offers;
+        this.endings = endings;
         this.drivers = drivers;
         this.outbox = outbox;
         this.auditLog = auditLog;
@@ -48,8 +55,7 @@ class Availability implements DispatchApi {
         this.mirror = mirror;
     }
 
-    @Override
-    public DriverStatusView goOnline(UUID driverId, UUID vehicleId) {
+    DriverStatusView goOnline(UUID driverId, UUID vehicleId) {
         return transactions.execute(() -> {
             Eligibility eligibility = drivers.lockEligibility(driverId, vehicleId);
             if (!eligibility.eligible()) {
@@ -78,35 +84,45 @@ class Availability implements DispatchApi {
         });
     }
 
-    @Override
-    public DriverStatusView goOffline(UUID driverId) {
+    /**
+     * A pending offer is declined first, so its lock comes before the availability row's (§6.1). An offer that
+     * arrived between the two reads would have to be locked after the row, so the driver tries again instead.
+     */
+    DriverStatusView goOffline(UUID driverId) {
         return transactions.execute(() -> {
             AvailabilityRow current = availability.find(driverId).orElse(null);
             if (current == null) {
                 return DriverStatusView.neverOnline(driverId);
             }
-            refuseOfflineDuring(current.status());
+            refuseOfflineDuringRide(current.status());
             if (current.status() == AvailabilityStatus.OFFLINE) {
                 return view(current);
             }
+            if (current.status() == AvailabilityStatus.OFFERED) {
+                offers.lock(current.offerId()).filter(offer -> offer.status() == OfferStatus.PENDING)
+                        .ifPresent(offer -> endings.decline(offer, "DRIVER_OFFLINE"));
+            }
             AvailabilityRow locked = availability.lock(driverId).orElseThrow();
-            refuseOfflineDuring(locked.status());
+            refuseOfflineDuringRide(locked.status());
             if (locked.status() == AvailabilityStatus.OFFLINE) {
                 return view(locked);
+            }
+            if (locked.status() == AvailabilityStatus.OFFERED && !locked.offerId().equals(current.offerId())) {
+                throw new ApiException(HttpStatus.CONFLICT, "INVALID_TRANSITION",
+                        "An offer arrived as you went offline; try again.");
             }
             return view(takeOffline(locked, "DRIVER", driver(driverId)));
         });
     }
 
-    @Override
-    public DriverStatusView status(UUID driverId) {
+    DriverStatusView status(UUID driverId) {
         return availability.find(driverId).map(Availability::view)
                 .orElseGet(() -> DriverStatusView.neverOnline(driverId));
     }
 
     /**
-     * Takes an {@code AVAILABLE} driver offline, in the caller's transaction, which holds the row's lock: closes the
-     * session with the reason, and writes the event and the audit entry.
+     * Takes an online driver offline, in the caller's transaction, which holds the row's lock: clears any offer,
+     * closes the session with the reason, and writes the event and the audit entry.
      */
     AvailabilityRow takeOffline(AvailabilityRow locked, String reason, Actor actor) {
         AvailabilityRow offline = availability.goOffline(locked.driverId());
@@ -121,15 +137,9 @@ class Availability implements DispatchApi {
         return offline;
     }
 
-    /** Phase 7 adds the decline step that lets a driver with an offer go offline (§8.2). */
-    private static void refuseOfflineDuring(AvailabilityStatus status) {
-        switch (status) {
-            case ASSIGNED, ON_TRIP -> throw new ApiException(HttpStatus.CONFLICT, "DRIVER_HAS_ACTIVE_RIDE",
-                    "You can't go offline during a ride.");
-            case OFFERED -> throw new ApiException(HttpStatus.CONFLICT, "INVALID_TRANSITION",
-                    "Answer your offer before going offline.");
-            case OFFLINE, AVAILABLE -> {
-            }
+    private static void refuseOfflineDuringRide(AvailabilityStatus status) {
+        if (status == AvailabilityStatus.ASSIGNED || status == AvailabilityStatus.ON_TRIP) {
+            throw new ApiException(HttpStatus.CONFLICT, "DRIVER_HAS_ACTIVE_RIDE", "You can't go offline during a ride.");
         }
     }
 

@@ -78,7 +78,7 @@ public class LiveIndexReconciler {
     }
 
     private static AvailabilityRow offlineIn(String cityId, AvailabilityRow row) {
-        return new AvailabilityRow(row.driverId(), cityId, AvailabilityStatus.OFFLINE, null, null, null, null, null,
+        return new AvailabilityRow(row.driverId(), cityId, AvailabilityStatus.OFFLINE, null, null, null, null, 0, null,
                 row.statusChangedAt(), row.version());
     }
 }

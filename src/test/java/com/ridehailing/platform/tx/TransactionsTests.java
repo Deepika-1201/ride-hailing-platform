@@ -110,6 +110,55 @@ class TransactionsTests extends IntegrationTest {
         assertThat(jdbc.sql("SHOW statement_timeout").query(String.class).single()).isEqualTo("2s");
     }
 
+    @Test
+    void afterCommitRunsOnceTheTransactionCommits() {
+        List<String> ran = new ArrayList<>();
+
+        transactions.run(() -> {
+            transactions.afterCommit(() -> ran.add("after commit"));
+            assertThat(ran).as("not before the commit").isEmpty();
+        });
+
+        assertThat(ran).containsExactly("after commit");
+    }
+
+    @Test
+    void afterCommitNeverRunsOnARollback() {
+        List<String> ran = new ArrayList<>();
+
+        assertThatThrownBy(() -> transactions.run(() -> {
+            transactions.afterCommit(() -> ran.add("after commit"));
+            throw new IllegalStateException("rolled back");
+        })).isInstanceOf(IllegalStateException.class);
+
+        assertThat(ran).isEmpty();
+    }
+
+    @Test
+    void afterCommitRunsOnceForARetriedTransaction() {
+        AtomicInteger attempts = new AtomicInteger();
+        List<String> ran = new ArrayList<>();
+
+        transactions.run(() -> {
+            int attempt = attempts.incrementAndGet();
+            transactions.afterCommit(() -> ran.add("attempt " + attempt));
+            if (attempt == 1) {
+                throw serializationFailure();
+            }
+        });
+
+        assertThat(ran).as("only the attempt that committed").containsExactly("attempt 2");
+    }
+
+    @Test
+    void afterCommitRunsAtOnceWithoutATransaction() {
+        List<String> ran = new ArrayList<>();
+
+        transactions.afterCommit(() -> ran.add("now"));
+
+        assertThat(ran).containsExactly("now");
+    }
+
     private void move(int account, int amount) {
         jdbc.sql("UPDATE test_support.accounts SET balance = balance + :amount WHERE id = :id")
                 .param("amount", amount)

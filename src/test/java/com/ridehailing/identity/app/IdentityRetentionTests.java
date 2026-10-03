@@ -27,7 +27,7 @@ class IdentityRetentionTests extends IntegrationTest {
 
     @Test
     void deletesOnlyCodesAndTokensPastTheirRetention() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         UUID oldCode = challenge(phone, "2 days");
         UUID recentCode = challenge(phone, "2 hours");
         TestUser user = users.create(UserRole.RIDER);

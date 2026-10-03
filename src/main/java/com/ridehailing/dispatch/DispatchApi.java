@@ -1,9 +1,13 @@
 package com.ridehailing.dispatch;
 
+import com.ridehailing.ride.RideView;
+import com.ridehailing.shared.GeoPoint;
+import com.ridehailing.shared.Money;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
-/** Driver availability for the API and the other modules (LLD §2.2); offers and acceptance arrive in phase 7. */
+/** Driver availability and offers for the API and the other modules (LLD §2.2). */
 public interface DispatchApi {
 
     /**
@@ -13,11 +17,23 @@ public interface DispatchApi {
      */
     DriverStatusView goOnline(UUID driverId, UUID vehicleId);
 
-    /** Takes the driver offline: {@code 409 DRIVER_HAS_ACTIVE_RIDE} during a ride; offline already is no change. */
+    /**
+     * Takes the driver offline, declining a pending offer first: {@code 409 DRIVER_HAS_ACTIVE_RIDE} during a ride;
+     * offline already is no change.
+     */
     DriverStatusView goOffline(UUID driverId);
 
     /** The driver's availability; a driver who never went online is {@code OFFLINE} at version 0. */
     DriverStatusView status(UUID driverId);
+
+    /** The driver's pending offer, which this marks as seen (§8.5). */
+    Optional<OfferView> currentOffer(UUID driverId);
+
+    /** T2 (§8.4): the driver's view of the ride; {@code 409 OFFER_NO_LONGER_AVAILABLE} if too late. */
+    RideView accept(UUID offerId, UUID driverId);
+
+    /** §8.7: declining again is no change; {@code 409 OFFER_NO_LONGER_AVAILABLE} if the offer ended otherwise. */
+    OfferView decline(UUID offerId, UUID driverId);
 
     /** The DriverStatus schema; null fields don't apply in the status. */
     record DriverStatusView(UUID driverId, AvailabilityStatus status, String cityId, UUID vehicleId, String category,
@@ -26,5 +42,19 @@ public interface DispatchApi {
         public static DriverStatusView neverOnline(UUID driverId) {
             return new DriverStatusView(driverId, AvailabilityStatus.OFFLINE, null, null, null, null, null, null, 0);
         }
+    }
+
+    /** The Offer schema; {@code rider} is null for a rider without a first name, {@code expiresInMs} unless pending. */
+    record OfferView(UUID id, UUID rideId, OfferStatus status, String category, GeoPoint pickup, GeoPoint dropoff,
+            int pickupDistanceM, Money fare, RideView.PersonSummary rider, Instant createdAt, Instant expiresAt,
+            Long expiresInMs) {
+    }
+
+    enum OfferStatus {
+        PENDING,
+        ACCEPTED,
+        DECLINED,
+        EXPIRED,
+        WITHDRAWN
     }
 }

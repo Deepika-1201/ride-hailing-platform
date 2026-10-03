@@ -5,13 +5,16 @@ import com.ridehailing.shared.UserRole;
 import com.ridehailing.support.TestCities.TestCity;
 import com.ridehailing.support.TestUsers.TestUser;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.boot.test.context.TestComponent;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /** Verified drivers with one active vehicle, created straight in the database, with real access tokens. */
 @TestComponent
 public class TestDrivers {
+
+    /** Plates are unique; counted like phones in {@link TestUsers#newPhone()}. */
+    private static final AtomicInteger PLATES = new AtomicInteger();
 
     private final JdbcClient jdbc;
     private final TestUsers users;
@@ -42,7 +45,7 @@ public class TestDrivers {
                 .param("id", id)
                 .param("driverId", driverId)
                 .param("category", category)
-                .param("plate", "T " + "%09d".formatted(ThreadLocalRandom.current().nextInt(1_000_000_000)))
+                .param("plate", "T " + "%09d".formatted(PLATES.incrementAndGet()))
                 .update();
         return id;
     }

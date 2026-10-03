@@ -66,6 +66,8 @@ tasks.named<Jar>("jar") {
 tasks.withType<Test> {
     useJUnitPlatform()
     systemProperty("user.timezone", "UTC")
+    // LLD §17.2: each race repeats this often; -PraceRepetitions=20 for quick runs.
+    systemProperty("ride.races.repetitions", providers.gradleProperty("raceRepetitions").getOrElse("200"))
     jvmArgs("-XX:+EnableDynamicAgentLoading", "--enable-native-access=ALL-UNNAMED")
     // Testcontainers' cleanup container mounts the socket from inside the Docker VM (Colima) or host (Linux CI).
     environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")

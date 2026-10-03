@@ -189,7 +189,7 @@ public interface RideOperations {                       // operations only
     void resolveFlag(UUID flagId, Actor ops, String resolution);
 }
 public interface RideDispatchParticipant {              // declared by ride, implemented by dispatch
-    void searchStarted(SearchStarted search);               // T1, T6, T7
+    Duration searchStarted(SearchStarted search);           // T1, T6, T7; answers the city's search timeout (phase 7)
     void searchStopped(UUID rideId, String reason);         // T3, T4, T13 while SEARCHING
     void driverReleased(UUID rideId, UUID driverId, DriverRelease release);  // T6–T8, T10–T13
     void tripStarted(UUID rideId, UUID driverId);           // T9
@@ -284,7 +284,9 @@ public interface Leases {                                   // §5.5
     void release(String name, String holder, long token);
 }
 public interface RecurringJob { String name(); Role role(); Duration interval(); void run(); }  // §5.7
-public interface Transactions { <T> T execute(Supplier<T> work); }                           // §1.4
+public interface Poller { String name(); Role role(); int threads(); Duration interval(); boolean poll(); }  // §5.7 (phase 7)
+public interface InvariantCheck { String id(); List<String> violations(String cityId); }     // §17.3 (phase 7)
+public interface Transactions { <T> T execute(Supplier<T> work); void afterCommit(Runnable action); }  // §1.4; afterCommit: phase 7, §16.1
 public interface RateLimiter { RateDecision tryAcquire(String limit, String key); }          // §5.8
 public interface AccessTokens { AccessToken issue(UUID userId, Set<UserRole> roles); }      // §12.2
 public record Caller(UUID userId, Set<UserRole> roles) { }   // a controller parameter (§12.4)
@@ -304,6 +306,8 @@ The ride module owns the ride state machine; dispatch owns offers, availability 
 | T9 trip starts | `tripStarted` | Availability `ASSIGNED → ON_TRIP` |
 
 T2 (acceptance) runs the other way round: it starts in dispatch, which calls `RideAssignment.assign` first so that the ride row is locked before the offer (§6.1).
+
+Phase 7 details: `searchStarted` answers the search timeout from the city's dispatch settings (`geography.city_categories`), which dispatch reads; `ride` doesn't depend on `geography`, and the ride schedules its own `SEARCH_TIMEOUT` with it.
 
 ## 3. Domain model
 
@@ -1201,6 +1205,8 @@ UPDATE platform.leases SET holder = NULL, expires_at = NULL WHERE name = :name A
 
 Jobs that must run once per cluster take a `job:<name>` lease; pollers that use `SKIP LOCKED` need none.
 
+- **Pollers** (phase 7) implement `Poller` (name, role, threads, interval, poll): the platform runs each on its threads in every process with its role, under `ride.workers.autostart`, as it runs its own relay and timer poller. `poll` handles one unit of work and answers whether it found one; a thread that found work polls again at once. The search-task poller is the first.
+
 - **Recurring jobs** ([ADR-023](decisions/ADR-023-recurring-jobs.md)) implement `RecurringJob` (name, role, interval, run). Every node running the job's role checks every quarter interval (between 1 s and 1 min) whether the lease `job:<name>` is free, and takes it with a TTL of one interval. The lease is neither renewed nor released: it expires one interval after the run started, which spaces runs one interval apart across the cluster and needs no clock other than the database's. A failed run waits for the next interval. A run longer than its interval may overlap the next one, so jobs are idempotent.
 - **Retention belongs to each table's module.** The platform's job covers the platform tables, plus re-driven failed deliveries after 14 days; each module adds a job for its own tables when it creates them (one-time codes and refresh tokens in phase 3, quotes in phase 5, decisions in phase 7). Deletes run in batches of 10,000 rows until a batch comes back short.
 - **Audit partitions:** the audit module's job creates any missing partition for the current month and the next two, and drops partitions that ended more than 3 years ago. Its DDL runs with `lock_timeout = '2s'`, so it never queues inserts behind a long transaction for longer than that; if it times out, it tries again an hour later.
@@ -1308,6 +1314,14 @@ POST /v1/rides {quote_id, payment_method_id?}                    rider R, Idempo
 
 Every check is inside the transaction, so a rejected booking leaves the quote unused.
 
+Phase 7 details:
+
+- Step 3 arrives with charges in phase 9; until then no rider has dues.
+- `RiderApi.paymentMethod` first ensures the rider row and its cash method, as the first `/v1/riders/me` call does, and answers the default method when the request names none.
+- `rider_snapshot` holds the rider's first name; ratings join it in phase 10. A rider without a first name has no `rider` summary in the views.
+- The ride ID is generated before the transaction and is the correlation ID of the ride's events.
+- The search timeout is the one `searchStarted` answers (§2.3).
+
 ### 7.3 Search timeout (T3)
 
 The `SEARCH_TIMEOUT` handler runs in the timer's transaction (§5.4):
@@ -1346,6 +1360,8 @@ Optional<Fee> feeOnRiderCancel(Ride ride, FeeRule rule, Instant now) {
 ```
 
 The fee, with the rule that produced it, is stored on the ride (`fee_purpose`, `fee_paise`) and carried in `RideCancelled`; the payment module charges it (§11.1).
+
+Phase 7 details: only T4 is built. A rider cancelling after assignment and every driver cancellation arrive in phase 8, and answer `409 INVALID_TRANSITION` with `current_status` and `current_version` until then.
 
 ### 7.5 Arrival (T5)
 
@@ -1437,7 +1453,7 @@ Phase 6 details:
 
 - `DriverApi.lockEligibility` answers with the driver's city and the vehicle's category, or a refusal reason that becomes the `409 DRIVER_NOT_ELIGIBLE` detail: no driver profile, not verified, suspended, vehicle missing or another driver's, vehicle inactive, category not offered in the city.
 - Going online also writes the driver's city into the availability row, so the row follows the profile.
-- `OFFERED` appears with offers in phase 7, which adds the decline step; until then going offline answers `409 INVALID_TRANSITION` for it, and handles `AVAILABLE` and `OFFLINE`.
+- `OFFERED` appears with offers in phase 7, which adds the decline step: going offline locks the pending offer, declines it (`OfferDeclined` with reason `DRIVER_OFFLINE`), makes the ride's task due, then locks the availability row; if the offer had already ended, it decides again from the row it now finds.
 - `GET /v1/drivers/me` reads the availability row through `DispatchApi.status`; a driver who never went online is `OFFLINE` at version 0, and going offline then creates no row.
 - `driver_sessions` adds two invariants to §4.6: at most one open session per driver (a partial unique index), and a reason exactly when the session is closed.
 - The events and the session take their times from the database row (`online_since`, `status_changed_at`), so `online_seconds` never mixes clocks.
@@ -1487,6 +1503,13 @@ COMMIT;
    "index_ms": 0.4}
   ```
 
+Phase 7 details:
+
+- The poller is `search-task-poller` (§5.7): 4 threads every 250 ms, one task per transaction. A thread that handled a task looks again at once, so there is no per-tick cap and `tasks-per-tick` is gone.
+- The offer's `rank` is the chosen driver's position in the ranked list, from 1. Its TTL is the category's `offer_ttl_s`.
+- `driver_stats` gets its row on a driver's first offer.
+- `duration_us` is the attempt's time from claim to commit, as seen by the application.
+
 ### 8.4 Acceptance (T2)
 
 ```text
@@ -1504,6 +1527,7 @@ tx:
       UPDATE ride.rides SET status = 'DRIVER_ASSIGNED', driver_id, vehicle_id, offer_id, pin = 4 random digits,
              promised_pickup_eta_s, driver_snapshot, assigned_at = now(), version = version + 1
        WHERE id = :ride AND status = 'SEARCHING' AND version = :v
+      one_active_ride_per_driver violated → 409 OFFER_NO_LONGER_AVAILABLE   -- D accepted a newer offer
       transition, outbox DriverAssigned, audit; Timers.cancel(SEARCH_TIMEOUT)
  2. UPDATE dispatch.offers SET status = 'ACCEPTED', responded_at = now(), version = version + 1
      WHERE id = :offer AND driver_id = :D AND status = 'PENDING' AND expires_at > clock_timestamp()
@@ -1520,6 +1544,14 @@ commit; after commit: mirror ASSIGNED; push ride_status on ride:{ride} and drv:{
 
 The driver's response contains pickup, drop-off, fare and the rider's first name and rating. It never contains the PIN (FR-RD5).
 
+Phase 7 details:
+
+- Without a live position, the promised pickup ETA is the offer's distance × 1.35 at 18 km/h **(assumed)**, the mock router's detour and slowest speed (ADR-013).
+- `DriverApi.snapshot` gives the driver's first name and the vehicle; ratings join it in phase 10.
+- The PIN is 4 digits from `SecureRandom`.
+- Someone else's offer, or an unknown one, is `404`.
+- A driver can still hold an old offer after accepting a newer one. Accepting the old one assigns its ride before step 2 checks the offer, so the driver's second active ride trips `one_active_ride_per_driver`. That is answered as `409 OFFER_NO_LONGER_AVAILABLE`, not `500` (found by the race in §17.2).
+
 ### 8.5 Offer delivery
 
 - **V1:** the driver app polls `GET /v1/drivers/me/offer` (every 2 s in the demo). **V2:** the offer is pushed on `drv:{id}`, and the app also fetches it on every connect (ADR-006).
@@ -1530,6 +1562,7 @@ The driver's response contains pickup, drop-off, fare and the rider's first name
   ```
 
 - Every offer message carries `expires_in_ms`, computed from `expires_at` and the database clock, so a wrong device clock can't change the countdown.
+- Phase 7 details: the offer's ride details (pickup, drop-off, fare, category, rider) come from `RideQueries.find`; no pending offer is `204`.
 
 ### 8.6 Offer expiry
 
@@ -1541,6 +1574,8 @@ The driver's response contains pickup, drop-off, fare and the rider's first name
 4. At 3, the driver goes `OFFLINE` (session reason `UNRESPONSIVE`) and is notified why. Otherwise `AVAILABLE`.
 5. Make the ride's task due now; outbox `OfferExpired`; `driver_stats.expired + 1`.
 6. After commit: mirror, and push `offer_withdrawn` with reason `EXPIRED` (V2).
+
+Phase 7 details: telling an unresponsive driver why they went offline arrives with notifications in phase 10.
 
 ### 8.7 Decline
 
@@ -2293,6 +2328,12 @@ Decisions in [ADR-017](decisions/ADR-017-observability.md); metric list in [HLD 
 | `sweeper_safety_valve_total{rule}`, `live_index_mirror_failures_total` | §8.9, §8.10 |
 
 - Counters with outcome labels are registered at zero for every outcome at startup, so an alert on `increase(…) > 0` sees the first occurrence.
+- Phase 7 details:
+  - Booking and dispatch record their metrics with `Transactions.afterCommit`, so a rollback, or an attempt that is retried after a deadlock, never counts.
+  - `dispatch_first_offer_seconds` is recorded for the first offer of a ride with no earlier offer. Both times are database times (`requested_at`, the offer's `created_at`), so the application's clock doesn't enter.
+  - Prometheus needs every meter of a name to carry the same labels. Counters labelled by city therefore appear with their city's first ride rather than at zero; only the outcome counters and `dispatch_reservation_conflicts_total` are registered at startup.
+  - The two timers publish histogram buckets, so p95 is computed in Prometheus.
+  - The gauges in the table (`live_drivers`, `active_rides`, `outbox_oldest_unpublished_seconds`, `timers_overdue_seconds`, `search_tasks_due`) are not built yet. They come with the operations views in phase 11.
 - Labels are limited to city, category, status, outcome, channel and kind (ADR-017).
 
 ### 16.2 Traces and logs
@@ -2326,6 +2367,10 @@ The HLD's SLO burn-rate and platform alerts, plus `rides_stuck > 0` for 5 min, a
 
 - `RaceRunner` starts N commands on N threads behind a barrier, through the public API of an application started on a random port, so idempotency, transactions and locking run as in production.
 - Each scenario repeats 200 times on fresh data **(assumed)**, then runs the invariant checks.
+- Phase 7 details: the repetitions come from the `ride.races.repetitions` system property (default 200), and each repetition runs in a city of its own. Commands that have no public API, the search attempt and timer firings, run on the same barrier through the pollers.
+- Phase 7 details, how the races are made to explore:
+  - Started together, the command with less work before its first lock nearly always wins; an HTTP call loses to a direct one about 200 times in 200. So two-command races start one side, chosen at random, 0–60 ms late, and with 100 or more repetitions each race checks that every outcome occurred.
+  - Some interleavings fit in a window too narrow for timing to hit: an offer landing between going offline's read and its lock; a timer that a poller holds while the acceptance commits, so the acceptance can't remove it; a cancel arriving while an attempt holds the ride `FOR SHARE`. Those are forced with a gate: a session of the test's own holds a row lock, the commands queue behind it in a known order (checked in `pg_stat_activity`), and the gate lets go.
 
 | Scenario | Expectation |
 |---|---|
@@ -2341,6 +2386,8 @@ The HLD's SLO burn-rate and platform alerts, plus `rides_stuck > 0` for 5 min, a
 ### 17.3 Invariant checks
 
 Each module implements `InvariantCheck` over its own tables; operations runs them all and compares across modules through APIs. From V2 they are served at `GET /v1/ops/invariants`, which the simulator calls after every run.
+
+Phase 7 details: `InvariantCheck.violations(cityId)` checks one city, or all with `null`; tests check their own cities, since other tests leave deliberately inconsistent rows in theirs. I1 is built in ride, I2 and I3 in dispatch. Each check is shown to find a broken state: where a unique index stops the state from existing, the test first shows the index refusing it, then drops the index in a transaction that is rolled back, breaks the data and runs the check.
 
 | # | Invariant | Module |
 |---|---|---|
@@ -2499,7 +2546,7 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |
 | `ride.location.offline-after` | `10m` | Available driver silence before going offline |
 | `ride.location.max-accuracy-m`, `max-speed-kmh` | `100`, `150` | Quality rules (V2) |
-| `ride.dispatch.poll-interval`, `workers`, `tasks-per-tick` | `250ms`, `4`, `20` | Search-task poller |
+| `ride.dispatch.poll-interval`, `workers` | `250ms`, `4` | Search-task poller |
 | `ride.dispatch.candidates`, `max-reservation-tries` | `20`, `5` | Search attempt |
 | `ride.dispatch.retry-after`, `contention-retry-after` | `5s`, `1s` | When nothing was reserved |
 | `ride.dispatch.max-consecutive-expired` | `3` | Seen offers left to expire before going offline |
@@ -2507,6 +2554,8 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.dispatch.reconcile-interval` | `30s` | §8.10 |
 | `ride.timers.poll-interval`, `workers`, `max-failures` | `250ms`, `4`, `10` | §5.4 |
 | `ride.outbox.idle-poll`, `batch-size`, `retry-delays` | `100ms`, `500`, `500ms,1s,2s` | §5.2, §5.3 |
+
+As built: the sweeper's interval and safety-valve thresholds and the reconcile interval are constants in the code (phase 6); the other `ride.dispatch.*` properties are bound by `DispatchProperties` (phase 7).
 | `ride.leases.ttl`, `renew-every` | `10s`, `3s` | §5.5 |
 | `ride.idempotency.ttl`, `lock-timeout` | `24h`, `1s` | §5.1 |
 | `ride.retention.interval`, `batch-size`, `outbox`, `inbox`, `failed-deliveries` | `1h`, `10000`, `7d`, `14d`, `14d` | §5.7 |

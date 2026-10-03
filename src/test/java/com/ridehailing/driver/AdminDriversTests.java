@@ -55,7 +55,7 @@ class AdminDriversTests extends IntegrationTest {
 
     @Test
     void onboardingCreatesAPendingDriverWhoseUserHasTheDriverRole() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
 
         JsonNode driver = assertAnswered("POST", DRIVERS, call("POST", admin.authorization(), DRIVERS,
                 newDriver(phone, city.id())), 201);
@@ -81,12 +81,12 @@ class AdminDriversTests extends IntegrationTest {
 
     @Test
     void aPhoneThatIsADriverAlreadyIsAConflictAndTheCityMustExist() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         assertAnswered("POST", DRIVERS, call("POST", admin.authorization(), DRIVERS, newDriver(phone, city.id())), 201);
 
         assertProblem("POST", DRIVERS, call("POST", admin.authorization(), DRIVERS, newDriver(phone, city.id())), 409,
                 "ALREADY_EXISTS");
-        String stranger = TestUsers.randomPhone();
+        String stranger = TestUsers.newPhone();
         JsonNode problem = assertProblem("POST", DRIVERS, call("POST", admin.authorization(), DRIVERS,
                 newDriver(stranger, "nowhere")), 400, "VALIDATION_FAILED");
         assertThat(problem.get("errors").get(0).get("field").asString()).isEqualTo("city_id");
@@ -211,7 +211,7 @@ class AdminDriversTests extends IntegrationTest {
     }
 
     private UUID onboard(TestCity in) {
-        JsonNode driver = json(call("POST", admin.authorization(), DRIVERS, newDriver(TestUsers.randomPhone(),
+        JsonNode driver = json(call("POST", admin.authorization(), DRIVERS, newDriver(TestUsers.newPhone(),
                 in.id())));
         return UUID.fromString(driver.get("id").asString());
     }

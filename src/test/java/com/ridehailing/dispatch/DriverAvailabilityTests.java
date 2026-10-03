@@ -229,7 +229,7 @@ class DriverAvailabilityTests extends IntegrationTest {
     }
 
     @Test
-    void aDriverOnARideOrWithAnOfferCantGoOffline() {
+    void aDriverOnARideCantGoOffline() {
         assertAnswered("POST", ONLINE, online(driver, driver.vehicleId(), key()), 200);
 
         for (String status : List.of("ASSIGNED", "ON_TRIP")) {
@@ -240,11 +240,6 @@ class DriverAvailabilityTests extends IntegrationTest {
                     .param("status", status).param("rideId", Ids.newId()).param("driverId", driver.id()).update();
             assertProblem("POST", OFFLINE, offline(driver, key()), 409, "DRIVER_HAS_ACTIVE_RIDE");
         }
-        jdbc.sql("""
-                        UPDATE dispatch.driver_availability SET status = 'OFFERED', ride_id = NULL, offer_id = :offerId
-                        WHERE driver_id = :driverId
-                        """).param("offerId", Ids.newId()).param("driverId", driver.id()).update();
-        assertProblem("POST", OFFLINE, offline(driver, key()), 409, "INVALID_TRANSITION");
         assertThat(outboxEvents(jdbc, "DriverWentOffline", driver.id())).isEmpty();
     }
 

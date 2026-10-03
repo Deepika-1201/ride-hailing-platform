@@ -33,6 +33,13 @@ class DriverService implements DriverApi {
     }
 
     @Override
+    public Optional<DriverSnapshot> snapshot(UUID driverId, UUID vehicleId) {
+        return drivers.find(driverId).flatMap(driver -> vehicles.find(vehicleId)
+                .filter(vehicle -> vehicle.driverId().equals(driverId))
+                .map(vehicle -> new DriverSnapshot(driverId, driver.firstName(), vehicle)));
+    }
+
+    @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public Eligibility lockEligibility(UUID driverId, UUID vehicleId) {
         Optional<DriverRow> found = drivers.lockForShare(driverId);

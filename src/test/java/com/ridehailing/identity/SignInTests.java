@@ -41,7 +41,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void aCodeRequestIsAcceptedAndOnlyTheCodesHmacIsKept(CapturedOutput output) {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
 
         HttpResponse<String> response = requestCode(phone);
 
@@ -63,7 +63,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void aFirstSignInCreatesARiderWhoseTokenOpensRiderEndpoints() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         requestCode(phone);
 
         HttpResponse<String> response = exchange(phone, CODE);
@@ -86,7 +86,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void wrongCodesCountAndTheFifthEndsTheChallenge() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         requestCode(phone);
 
         for (int attempt = 1; attempt <= 4; attempt++) {
@@ -100,7 +100,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void concurrentWrongGuessesAreCountedOneByOne() throws Exception {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         requestCode(phone);
         CountDownLatch start = new CountDownLatch(1);
         List<Future<Integer>> guesses = new ArrayList<>();
@@ -124,7 +124,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void anExpiredCodeIsRefused() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         requestCode(phone);
         jdbc.sql("UPDATE identity.otp_challenges SET expires_at = now() - interval '1 second' WHERE phone = :phone")
                 .param("phone", phone)
@@ -135,7 +135,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void aCodeWorksOnceAndNeverWithoutARequest() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         assertProblem(exchange(phone, CODE), 401, "CODE_INVALID");
         requestCode(phone);
 
@@ -157,7 +157,7 @@ class SignInTests extends IntegrationTest {
 
     @Test
     void aPhoneGetsFiveCodesAnHour() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         for (int request = 0; request < 5; request++) {
             assertThat(requestCode(phone).statusCode()).isEqualTo(202);
         }

@@ -3,6 +3,7 @@ package com.ridehailing.dispatch.web;
 import com.ridehailing.dispatch.AvailabilityStatus;
 import com.ridehailing.dispatch.DispatchApi;
 import com.ridehailing.dispatch.DispatchApi.DriverStatusView;
+import com.ridehailing.dispatch.DispatchApi.OfferView;
 import com.ridehailing.driver.DriverApi;
 import com.ridehailing.driver.DriverApi.DriverProfile;
 import com.ridehailing.driver.DriverApi.Vehicle;
@@ -78,6 +79,13 @@ class DriverMeController {
     ResponseEntity<?> goOffline(Caller caller, @RequestHeader(value = Idempotency.HEADER, required = false) String key) {
         return idempotency.execute(new IdempotentCall(caller.userId().toString(), key, "POST " + PATH + "/offline",
                 Map.of()), () -> ResponseEntity.ok(dispatch.goOffline(caller.userId())));
+    }
+
+    /** V1 apps poll this; reading it marks the offer seen (§8.5). */
+    @GetMapping("/offer")
+    ResponseEntity<OfferView> offer(Caller caller) {
+        return dispatch.currentOffer(caller.userId()).map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.noContent().build());
     }
 
     /** A driver who isn't online has every update ignored, without touching the live index (§9.6). */

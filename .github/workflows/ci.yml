@@ -63,6 +63,8 @@ jobs:
         run: ./scripts/quote-smoke.sh
       - name: Take a seeded driver online, send a location, find them in a quote and go offline
         run: ./scripts/driver-online-smoke.sh
+      - name: Book, cancel and book again as a seeded rider; poll for the offer and accept it as a seeded driver
+        run: ./scripts/booking-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

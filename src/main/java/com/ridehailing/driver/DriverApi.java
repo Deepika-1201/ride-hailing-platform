@@ -16,6 +16,13 @@ public interface DriverApi {
      */
     Eligibility lockEligibility(UUID driverId, UUID vehicleId);
 
+    /** What a ride keeps of its driver at assignment (LLD §8.4); empty if the vehicle isn't the driver's. */
+    Optional<DriverSnapshot> snapshot(UUID driverId, UUID vehicleId);
+
+    /** Ratings join it in phase 10. */
+    record DriverSnapshot(UUID driverId, String firstName, Vehicle vehicle) {
+    }
+
     /** The driver's city and the vehicle's category, or why the driver may not go online with it. */
     record Eligibility(String refusal, String cityId, String category) {
 

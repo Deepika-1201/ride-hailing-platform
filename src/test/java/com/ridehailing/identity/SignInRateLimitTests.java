@@ -16,10 +16,10 @@ class SignInRateLimitTests extends IntegrationTest {
     @Test
     void anAddressRequestingCodesForManyPhonesIsLimited() {
         for (int phone = 0; phone < 3; phone++) {
-            assertThat(requestCode(TestUsers.randomPhone()).statusCode()).isEqualTo(202);
+            assertThat(requestCode(TestUsers.newPhone()).statusCode()).isEqualTo(202);
         }
 
-        HttpResponse<String> limited = requestCode(TestUsers.randomPhone());
+        HttpResponse<String> limited = requestCode(TestUsers.newPhone());
 
         assertThat(limited.statusCode()).isEqualTo(429);
         assertThat(json(limited).get("code").asString()).isEqualTo("RATE_LIMITED");

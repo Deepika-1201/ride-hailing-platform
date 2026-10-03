@@ -153,7 +153,7 @@ class SessionsTests extends IntegrationTest {
     }
 
     private JsonNode signIn() {
-        String phone = TestUsers.randomPhone();
+        String phone = TestUsers.newPhone();
         postJson("/v1/auth/otp", Map.of(), "{\"phone\": \"" + phone + "\"}");
         HttpResponse<String> response = postJson("/v1/auth/token", Map.of(),
                 "{\"phone\": \"" + phone + "\", \"code\": \"" + SignInTests.CODE + "\"}");

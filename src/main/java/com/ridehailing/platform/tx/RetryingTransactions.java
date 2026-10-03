@@ -7,6 +7,7 @@ import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -41,6 +42,20 @@ class RetryingTransactions implements Transactions {
                 log.warn("Transaction failed with SQL state {}; retrying ({} of {})", state, retry + 1, MAX_RETRIES);
             }
         }
+    }
+
+    @Override
+    public void afterCommit(Runnable action) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            action.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                action.run();
+            }
+        });
     }
 
     private static String retryableState(Throwable failure) {

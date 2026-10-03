@@ -18,4 +18,10 @@ public interface Transactions {
             return null;
         });
     }
+
+    /**
+     * Runs {@code action} once the current transaction commits, so a rollback, or an attempt that is retried, never
+     * runs it; at once when no transaction is active. For effects outside the database, such as metrics.
+     */
+    void afterCommit(Runnable action);
 }
