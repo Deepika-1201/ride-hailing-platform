@@ -65,6 +65,8 @@ jobs:
         run: ./scripts/driver-online-smoke.sh
       - name: Book, cancel and book again as a seeded rider; accept, arrive, start with the PIN and complete as a seeded driver
         run: ./scripts/booking-smoke.sh
+      - name: Have a declined fare become dues, pay them, and refund part as operations; read the driver's earnings
+        run: ./scripts/payment-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

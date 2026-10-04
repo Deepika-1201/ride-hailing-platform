@@ -26,7 +26,13 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   driver 3 online, sends a location and finds them as the pickup ETA of rider 3's quote, and
   `scripts/booking-smoke.sh` has a random seeded rider book, cancel and book again while a random seeded driver
   polls for the offer and accepts it, then arrives, is refused a wrong PIN, starts the trip with the rider's PIN and
-  completes it. The picks are random so that a rerun after a failed run, which can leave a ride open, starts afresh.
+  completes it. `scripts/payment-smoke.sh` has a random seeded rider pay by a mock card that declines: the fare
+  becomes dues, which refuse the next booking until the rider pays them with a card that succeeds; operations then
+  refund part of the charge, and the driver's earnings show the trip. The picks are random so that a rerun after a
+  failed run, which can leave a ride open, starts afresh.
+- Payments go to an in-process mock provider (LLD §11.9). Card tokens choose its answer: `tok_ok`, `tok_decline`,
+  `tok_timeout_failed`, `tok_timeout_succeeded` and `tok_webhook_only`; other tokens draw from its decline and timeout
+  rates. It posts signed webhooks to the application, late, duplicated or ahead of its answer.
 - The concurrency races repeat 200 times each (LLD §17.2); `./gradlew test -PraceRepetitions=20` runs them quicker.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`

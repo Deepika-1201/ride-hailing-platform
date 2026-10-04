@@ -12,3 +12,14 @@ ride:
   rate-limits:
     # Every test request comes from 127.0.0.1; SignInRateLimitTests checks the real per-IP limit in its own context.
     otp-per-ip: {capacity: 100000, period: 1h}
+  # The mock answers at once and only as the test tokens say; tests post the webhooks themselves (LLD §11.10).
+  payments:
+    read-timeout: 20ms
+    mock:
+      latency-median: 0ms
+      latency-p99: 0ms
+      decline-rate: 0
+      timeout-rate: 0
+      webhook-secret: "a-test-webhook-secret-of-32-bytes-or-more"
+      webhooks:
+        enabled: false

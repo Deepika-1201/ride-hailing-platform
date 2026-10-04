@@ -116,13 +116,14 @@ stateDiagram-v2
     UNKNOWN --> SUCCEEDED: status check or webhook
     UNKNOWN --> FAILED: status check or webhook
     FAILED --> PENDING: rider pays dues (new attempt)
+    FAILED --> SUCCEEDED: late success of an attempt the provider hadn't reported
     SUCCEEDED --> [*]
 ```
 
 - **Cash rides** create the charge directly as `SUCCEEDED` with method `CASH`, recorded for earnings.
 - **One charge per ride and purpose** (`FARE`, `CANCELLATION_FEE`, `NO_SHOW_FEE`). Each provider call is an attempt whose idempotency key is the attempt ID. Retrying an `UNKNOWN` attempt is never a new attempt: it is a status check.
 - **Rider dues** are the charges in `FAILED`. Booking is refused while any exist (FR-R4). Paying dues starts a new attempt on the same charge.
-- **Late success:** if the provider confirms an attempt after a newer attempt also succeeded, the extra money is refunded automatically.
+- **Late success:** if the provider confirms an attempt after a newer attempt also succeeded, the extra money is refunded automatically. If the charge hadn't succeeded yet, the late attempt settles it instead ([LLD §11.10](low-level-design.md#1110-phase-9-details)).
 - **Refunds** (FR-PY5) have their own records: `PENDING → SUCCEEDED | FAILED | UNKNOWN`. The non-failed refunds of a charge never add up to more than the charge.
 
 ## 7. Offline driver commands (FR-RD8)

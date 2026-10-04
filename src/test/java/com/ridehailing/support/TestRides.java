@@ -111,8 +111,12 @@ public class TestRides {
      * with the PIN only the rider sees.
      */
     public AssignedRide assigned(TestCity city, GeoPoint pickup, GeoPoint driverAt) {
+        return assigned(city, pickup, driverAt, rider("Rider"));
+    }
+
+    /** As {@link #assigned(TestCity, GeoPoint, GeoPoint)}, booked by this rider with their default method. */
+    public AssignedRide assigned(TestCity city, GeoPoint pickup, GeoPoint driverAt, TestUser rider) {
         TestDriver driver = onlineAt(city, "MINI", driverAt);
-        TestUser rider = rider("Rider");
         RideView booked = book(rider.id(), city, pickup, "MINI");
         onlyDueIn(city.id());
         search();
@@ -198,6 +202,11 @@ public class TestRides {
 
     public static <T> T asDispatch(Supplier<T> work) {
         return in("dispatch", work);
+    }
+
+    /** As the relay and the payment pollers run. */
+    public static <T> T asWorker(Supplier<T> work) {
+        return in("worker", work);
     }
 
     private static <T> T in(String role, Supplier<T> work) {

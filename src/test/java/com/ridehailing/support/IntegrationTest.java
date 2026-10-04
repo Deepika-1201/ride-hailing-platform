@@ -2,6 +2,7 @@ package com.ridehailing.support;
 
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.PublicEndpoint;
+import com.ridehailing.platform.outbox.EventDelivery;
 import com.ridehailing.platform.timers.TimerFiring;
 import java.io.IOException;
 import java.net.URI;
@@ -37,7 +38,7 @@ import tools.jackson.databind.json.JsonMapper;
 })
 @Import({IntegrationTest.RoleProbeController.class, IdempotencyProbeController.class, TestHandlers.class,
     AccessProbes.ByMethod.class, AccessProbes.DriverByClass.class, TestUsers.class, TestCities.class, TestPrices.class,
-    TestDrivers.class, TestRides.class, TimerFiring.class})
+    TestDrivers.class, TestRides.class, TimerFiring.class, EventDelivery.class})
 @ActiveProfiles("test")
 public abstract class IntegrationTest {
 

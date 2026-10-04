@@ -1,5 +1,6 @@
 package com.ridehailing.ride.app;
 
+import com.ridehailing.payment.PaymentApi;
 import com.ridehailing.platform.ApiException;
 import com.ridehailing.platform.DomainEvent;
 import com.ridehailing.platform.Outbox;
@@ -19,6 +20,7 @@ import com.ridehailing.rider.RiderApi;
 import com.ridehailing.rider.RiderApi.PaymentMethodRef;
 import com.ridehailing.shared.Actor;
 import com.ridehailing.shared.Ids;
+import com.ridehailing.shared.Money;
 import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
@@ -33,6 +35,7 @@ public class Booking {
     static final int FIRST_SEARCH = 0;
 
     private final PricingApi pricing;
+    private final PaymentApi payments;
     private final RiderApi riders;
     private final RideRepository rides;
     private final RideLog log;
@@ -43,9 +46,11 @@ public class Booking {
     private final Transactions transactions;
     private final RideMetrics metrics;
 
-    Booking(PricingApi pricing, RiderApi riders, RideRepository rides, RideLog log, RideViews views, Outbox outbox,
-            Timers timers, RideDispatchParticipant participant, Transactions transactions, RideMetrics metrics) {
+    Booking(PricingApi pricing, PaymentApi payments, RiderApi riders, RideRepository rides, RideLog log,
+            RideViews views, Outbox outbox, Timers timers, RideDispatchParticipant participant,
+            Transactions transactions, RideMetrics metrics) {
         this.pricing = pricing;
+        this.payments = payments;
         this.riders = riders;
         this.rides = rides;
         this.log = log;
@@ -62,6 +67,11 @@ public class Booking {
         UUID rideId = Ids.newId();
         return transactions.execute(() -> {
             ConsumedQuote quote = pricing.consume(quoteId, riderId, rideId);
+            Money dues = payments.outstandingDues(riderId);
+            if (dues.amountPaise() > 0) {
+                throw new ApiException(HttpStatus.CONFLICT, "DUES_OUTSTANDING",
+                        "Pay your dues before booking another ride.", null, Map.of("dues", dues));
+            }
             PaymentMethodRef method = riders.paymentMethod(riderId, paymentMethodId)
                     .orElseThrow(() -> new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "PAYMENT_METHOD_INVALID",
                             "This payment method isn't yours or is no longer active."));

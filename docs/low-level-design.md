@@ -131,7 +131,7 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 | `rating` | `audit`, `platform`, `shared` | Opens rating windows from `TripCompleted` (JSON) |
 | `location` | `geography`, `notification`, `platform`, `shared` | City bounds; live index; the "driver arriving" notification (V2) |
 | `pricing` | `geography`, `location`, `audit`, `platform`, `shared` | Zones, routes, pickup ETA estimate |
-| `payment` | `rider`, `audit`, `platform`, `shared` | Payment methods; consumes ride events as JSON |
+| `payment` | `rider`, `geography`, `audit`, `platform`, `shared` | Payment methods; the city's time zone for earnings days (added in phase 9); consumes ride events as JSON |
 | `ride` | `pricing`, `payment`, `rider`, `rating`, `location`, `audit`, `platform`, `shared` | Consume quote, check dues, payment method, rider snapshot, arrival distance |
 | `dispatch` | `ride`, `driver`, `rating`, `location`, `geography`, `audit`, `platform`, `shared` | Assignment, eligibility, driver snapshot, candidates, policies |
 | `operations` | `ride`, `dispatch`, `driver`, `payment`, `notification`, `location`, `audit`, `platform`, `shared` | Read models and orchestrated operations commands |
@@ -237,6 +237,7 @@ public interface PaymentApi {
 // rider, driver, geography, rating, identity, notification, audit
 public interface RiderApi {
     Optional<PaymentMethodView> paymentMethod(UUID riderId, Optional<UUID> methodId);  // default when empty
+    Optional<PaymentMethodView> onlineMethod(UUID riderId, UUID preferredId);  // the method to charge (§11.10, phase 9)
     RiderSnapshot snapshot(UUID riderId);                   // first name and rating
 }
 public interface DriverApi {
@@ -893,14 +894,17 @@ CREATE TABLE payment.charges (
   ride_id              uuid NOT NULL,
   rider_id             uuid NOT NULL,
   driver_id            uuid,
+  city_id              text NOT NULL,                  -- earnings days in the city's time zone (phase 9)
   purpose              text NOT NULL CHECK (purpose IN ('FARE','CANCELLATION_FEE','NO_SHOW_FEE')),
   amount_paise         bigint NOT NULL CHECK (amount_paise > 0),
+  commission_paise     bigint NOT NULL,                -- from the ride's event; a fee's earnings need it (phase 9)
   currency             char(3) NOT NULL,
   method_type          text NOT NULL CHECK (method_type IN ('CASH','CARD','UPI')),
-  payment_method_id    uuid,
+  payment_method_id    uuid,                           -- null while no usable method exists (phase 9)
   status               text NOT NULL CHECK (status IN ('PENDING','SUCCEEDED','FAILED','UNKNOWN')),
+  failure_code         text,                           -- while FAILED (phase 9)
   succeeded_attempt_id uuid,
-  refunded_paise       bigint NOT NULL DEFAULT 0,      -- reserved by non-failed refunds
+  refunded_paise       bigint NOT NULL DEFAULT 0,      -- reserved by non-failed operations refunds
   created_at           timestamptz NOT NULL,
   updated_at           timestamptz NOT NULL,
   version              int NOT NULL DEFAULT 0,
@@ -917,6 +921,7 @@ CREATE TABLE payment.charge_attempts (
   status              text NOT NULL CHECK (status IN ('PENDING','IN_FLIGHT','SUCCEEDED','FAILED','UNKNOWN')),
   provider            text NOT NULL,
   payment_method_id   uuid NOT NULL,
+  method_ref          text NOT NULL,                  -- the method's provider token, captured with the attempt (phase 9)
   provider_payment_id text,
   failure_code        text,
   created_at          timestamptz NOT NULL,
@@ -937,19 +942,27 @@ CREATE INDEX attempts_to_check ON payment.charge_attempts (next_check_at) WHERE 
 CREATE TABLE payment.refunds (
   id                 uuid PRIMARY KEY,                -- also the provider's idempotency key
   charge_id          uuid NOT NULL REFERENCES payment.charges (id),
+  attempt_id         uuid NOT NULL REFERENCES payment.charge_attempts (id),  -- the payment refunded (phase 9)
   amount_paise       bigint NOT NULL CHECK (amount_paise > 0),
   reason             text NOT NULL,
   automatic          boolean NOT NULL DEFAULT false,  -- late-success refunds
   status             text NOT NULL CHECK (status IN ('PENDING','IN_FLIGHT','SUCCEEDED','FAILED','UNKNOWN')),
+  failure_code       text,                            -- while FAILED (phase 9)
   provider_refund_id text,
   requested_by       text NOT NULL,
   created_at         timestamptz NOT NULL,
+  sent_at            timestamptz,                     -- the 2-minute and 24-hour rules, as for attempts (phase 9)
   completed_at       timestamptz,
   lease_until        timestamptz,
   next_check_at      timestamptz,
   checks             smallint NOT NULL DEFAULT 0,
   version            int NOT NULL DEFAULT 0
 );
+CREATE INDEX refunds_by_charge ON payment.refunds (charge_id);                                     -- phase 9
+CREATE UNIQUE INDEX one_automatic_refund_per_attempt ON payment.refunds (attempt_id) WHERE automatic; -- phase 9
+CREATE INDEX refunds_to_send ON payment.refunds (created_at) WHERE status = 'PENDING';             -- phase 9
+CREATE INDEX refunds_in_flight ON payment.refunds (lease_until) WHERE status = 'IN_FLIGHT';        -- phase 9
+CREATE INDEX refunds_to_check ON payment.refunds (next_check_at) WHERE status = 'UNKNOWN';         -- phase 9
 
 CREATE TABLE payment.provider_webhooks (
   provider          text NOT NULL,
@@ -958,7 +971,7 @@ CREATE TABLE payment.provider_webhooks (
   received_at       timestamptz NOT NULL,
   raw_body          text NOT NULL,                    -- byte-exact, as signed
   processed_at      timestamptz,
-  outcome           text,
+  outcome           text,                             -- APPLIED, IGNORED or UNMATCHED (phase 9)
   PRIMARY KEY (provider, provider_event_id)
 );
 
@@ -1332,7 +1345,7 @@ Every check is inside the transaction, so a rejected booking leaves the quote un
 
 Phase 7 details:
 
-- Step 3 arrives with charges in phase 9; until then no rider has dues.
+- Step 3 arrived with charges in phase 9: the sum of the rider's `FAILED` charges, read without locks.
 - `RiderApi.paymentMethod` first ensures the rider row and its cash method, as the first `/v1/riders/me` call does, and answers the default method when the request names none.
 - `rider_snapshot` holds the rider's first name; ratings join it in phase 10. A rider without a first name has no `rider` summary in the views.
 - The ride ID is generated before the transaction and is the correlation ID of the ride's events.
@@ -2047,6 +2060,142 @@ Refunding a fee reverses the driver's share of it with an `ADJUSTMENT` earnings 
 
 Deterministic test tokens override the rates: `tok_ok`, `tok_decline`, `tok_timeout_failed`, `tok_timeout_succeeded`, `tok_webhook_only`.
 
+### 11.10 Phase 9 details
+
+**Charges (§11.1)**
+
+- The table gains columns:
+  - `city_id`, for the time zone of earnings days;
+  - `commission_paise`, from the ride's event, which a fee's earnings need when it succeeds;
+  - `failure_code`.
+- `payment_method_id` is null while no usable method exists. The charge then keeps the ride's method type until dues are paid.
+- **Method to charge:** `RiderApi.onlineMethod(rider, preferred)` answers, in order:
+  1. the preferred method, while it is the rider's, active and not cash: the method captured at booking for an online ride;
+  2. else the rider's default, unless it is cash;
+  3. else their newest card or UPI method;
+  4. else nothing, and the charge is `FAILED` (`NO_PAYMENT_METHOD`).
+
+  A cash ride's own method is cash, which step 1 skips, so its fees go to step 2 or 3: "the rider's default online method" of §11.1. A rider with only cash ends up with dues.
+- An attempt stores the method's provider token (`method_ref`). The executor therefore never reads rider rows, and a method removed after the attempt was created is still the one charged.
+- **Earnings:** every fare's earnings row, cash or online, is written by `payment.earnings` alone. `payment.charges` doesn't write it in §11.1 step 2, so each row has one writer.
+- Cash fares append `ChargeSucceeded` without `attempt_id`. A charge that fails without an attempt appends `ChargeFailed` without one.
+- A `RideCancelled` without a fee changes nothing.
+
+**Executor and status checks (§11.2, §11.3)**
+
+- Two pollers run in the `worker` role, each on `ride.payments.workers` threads:
+  - `payment-sender` sends `PENDING` attempts, then `PENDING` refunds;
+  - `payment-checker` claims expired `IN_FLIGHT` rows, then due `UNKNOWN` rows, for attempts and refunds.
+
+  Splitting them means a queue of sends never delays checks.
+- **Claims lock only the claimed row** (`FOR UPDATE SKIP LOCKED`), so a claim never waits and can't deadlock with the record steps.
+- **Record steps lock in order:** the charge, then the attempt or refund (§11). They apply an answer while the row is `IN_FLIGHT` or `UNKNOWN`. Status, not who answers, decides: the executor's response, a status check and a webhook are applied the same way.
+- **The checker's claim:**
+  - an expired `IN_FLIGHT` row becomes `UNKNOWN`;
+  - `checks` goes up by one;
+  - `next_check_at` moves 30 s ahead, which leases the check: if the process dies during the status call, the row comes due again.
+
+  The charge follows the attempt to `UNKNOWN` in the record step, which holds the charge's lock.
+- **After an inconclusive check:** check *n* schedules the next one `check-schedule[min(n, last)]` later: 30 s, 2 min, 10 min, then hourly. Once `sent_at` is more than `check-for` (24 h) ago, `next_check_at` becomes null. The row stays `UNKNOWN`, `payment_charges_total{outcome="UNRESOLVED"}` counts it for the alert, and `GET /v1/ops/payments?status=UNKNOWN&older_than=PT24H` lists its charge.
+- **Not found at the provider:**
+  - more than 2 min after `sent_at` **(assumed)**, the row becomes `FAILED` with `NOT_RECEIVED`;
+  - before that, the check is inconclusive.
+- **Provider answers:**
+  - `SUCCEEDED`;
+  - `FAILED` with a code;
+  - `PENDING`: the provider accepted the payment and decides later, as UPI collect requests do (`tok_webhook_only`). It is treated like a timeout: `UNKNOWN`, then checks.
+  - Any exception from the call (timeout, connection error, 5xx, or a bug) also means `UNKNOWN`, and the attempt is never sent again.
+- **Circuit breaker:**
+  - 5 consecutive call failures **(assumed)** open it for 30 s **(assumed)**; declines and `PENDING` answers aren't failures;
+  - while it is open, neither poller claims anything, so attempts stay `PENDING`;
+  - after it reopens, one more failure opens it again at once, and one success resets the count.
+- **A charge's status follows its open attempt,** with two exceptions:
+  - `SUCCEEDED` is final: a decline on another attempt leaves the charge as it is;
+  - only a charge that isn't `SUCCEEDED` becomes `FAILED`.
+
+**Webhooks (§11.4)**
+
+- The body is read as bytes, at most 64 KiB **(assumed)**, and the HMAC covers `<t>.` followed by those bytes.
+- `t` may be up to 5 min in the past or the future.
+- Answers:
+  - an unknown provider is `404`;
+  - a valid signature over a body that isn't a `PaymentWebhook` is `400 MALFORMED_REQUEST`;
+  - a key that matches no attempt or refund of the event's kind is stored with outcome `UNMATCHED` and answers `200`, so the provider stops retrying.
+- Outcomes: `APPLIED`, `IGNORED` (the row was already final), `UNMATCHED`.
+- `ride.payments.mock.webhook-secret` is generated in memory in the `local` and `test` profiles when unset, like the one-time-code secret (§12.1). It is required in other profiles, and processes that sign and verify must share it.
+
+**Late success (§11.5)**
+
+A success reported for an attempt that is `FAILED` with `NOT_RECEIVED`, our own inference, is applied:
+
+- If the charge hasn't succeeded, it succeeds through that attempt. The rider's dues are settled rather than refunded and charged again. A dues attempt still `PENDING` closes as `FAILED` (`SUPERSEDED`); one already sent resolves on its own and is refunded if it succeeds too.
+- If the charge already succeeded through another attempt, the late attempt gets an automatic refund of the full amount.
+  - An automatic refund refunds that attempt (`refunds.attempt_id`), so it doesn't reserve `refunded_paise`, which counts operations refunds of the charge, and it writes no earnings adjustment.
+  - `one_automatic_refund_per_attempt` makes it unique.
+
+A decline reported for any final attempt, and any answer for a refund that is already final, is `IGNORED`. A late success for a refund recorded as `NOT_RECEIVED` is logged as an error for operations, because its reserve may already have been reused.
+
+**Refunds (§11.6)**
+
+- Operations refunds go against the charge's succeeded attempt.
+- `requested_by` is the actor (`OPS:<id>`, `ADMIN:<id>`, `SYSTEM:late-success`).
+- The executor sends and checks refunds as it does attempts, with the same schedule and leases. A refund `NOT_RECEIVED` gives its reserve back, as `FAILED` does.
+- A fee refund's `ADJUSTMENT`:
+  - is written when the refund succeeds, if the charge has a driver;
+  - gross = −refund;
+  - commission = −(the fee's commission × refund ÷ fee), rounded half up;
+  - net = gross − commission.
+- The operations endpoints `GET /v1/ops/payments` and `POST /v1/ops/charges/{id}/refunds` are built here, in `operations` over `PaymentApi`. Phase 8 did the same for the operations cancel. Phase 11 adds payments to the timeline.
+
+**Dues (§11.7)**
+
+- Booking checks dues after consuming the quote and before the payment method, as §7.2 orders them: `409 DUES_OUTSTANDING` with `dues`.
+- Dues are `FAILED` charges only, so a dues payment in progress doesn't block booking.
+- **Paying dues:**
+  - `payment_method_id` must be the rider's active card or UPI method, otherwise `422 PAYMENT_METHOD_INVALID`;
+  - without one, the default is used, and a cash default is `422` too;
+  - each charge's method fields move to the chosen method.
+- `202` lists the charges just moved to `PENDING`, and `total` is their sum. `GET /v1/riders/me/dues` shows what is still `FAILED`.
+- A total over no charges is in `ride.payments.currency` (`INR` **(assumed)**: V1 has one currency). Sums over rows of two currencies fail loudly until V6 adds a second city.
+
+**Earnings (§11.8)**
+
+- `earned_at`:
+  - a fare's is `completed_at`;
+  - a fee's is when its charge succeeded;
+  - an adjustment's is when its refund succeeded.
+
+  Money counts on the day it moved. Fee and adjustment rows exist only for charges with a driver.
+- `GET /v1/drivers/me/earnings` answers every day from `from` to `to`, zeros included, with `rides` counting fare rows. `to` may be at most 30 days after `from`, so a request covers at most 31 days; `openapi.yaml` said 31 days after, now fixed. Its `totals` became an `EarningsTotals` schema of their own, since a total has no date.
+
+**The mock (§11.9)**
+
+- The deterministic tokens fix the outcome:
+
+  | Token | Outcome |
+  |---|---|
+  | `tok_ok` | Succeeds |
+  | `tok_decline` | `DECLINED` |
+  | `tok_timeout_failed` | The call times out; the provider recorded a decline |
+  | `tok_timeout_succeeded` | The call times out; the provider charged it |
+  | `tok_webhook_only` | The call answers `PENDING`; the outcome (success) comes only in a webhook. Status checks answer `PENDING` until the mock has sent that webhook |
+
+- Other tokens draw from the configured rates. Latency applies to every call.
+- Refunds of charges the mock took succeed; any other payment key is `PAYMENT_NOT_FOUND`.
+- Webhooks are posted to `ride.payments.mock.webhooks.url`, or to this process's own API port when unset. Tests turn them off (`ride.payments.mock.webhooks.enabled=false`) and post signed webhooks themselves, except one test that turns them on.
+- The mock is idempotent per key, as a real provider is: a repeated key answers the first outcome without charging again. Tests count calls per key to show that nothing is sent twice.
+
+**Metrics and the invariant**
+
+- `payment_charges_total{outcome}` counts attempt outcomes as they are recorded: `SUCCEEDED`, `FAILED`, `UNKNOWN` (a send without an answer), and `UNRESOLVED` (checks stopped after 24 h, for an attempt or a refund: both wait for operations). All four are registered at zero.
+- I7 checks, per city:
+  - no two charges for one ride and purpose;
+  - `refunded_paise` equals the sum of non-failed operations refunds;
+  - no attempt's non-failed refunds exceed the charge;
+  - no double charge: a charge's succeeded attempts, less its non-failed automatic refunds, are at most one.
+
+**Not in this phase:** the receipt (`GET /v1/rides/{id}/receipt`, FR-R3) belongs to `ride` and needs the quote's fare breakdown. It joins the ride history and active-ride reads, which no phase row names yet; phase 12's contract coverage needs all three. `PaymentApi.charges(rideId)` comes with them.
+
 ## 12. Identity and security
 
 Decisions in [ADR-015](decisions/ADR-015-identity.md).
@@ -2425,6 +2574,14 @@ Phase 8 details:
 - The window too narrow for timing in phase 8: the first search's timeout, held by a poller through the acceptance, firing after the driver cancelled and the ride searches again. A gate forces it; the timeout belongs to the earlier search generation and does nothing.
 - Every client command (arrive, start, no-show, complete, the rider's, the driver's and operations' cancel) is tried in every state, reached each way that decides an answer (for example after the driver's cancel, or after T7), against a table of the expected answers: the transition, a recognized repeat, `404`, or the `409` with its code. Refusals and repeats are checked to change nothing.
 
+Phase 9 details:
+
+- Race 6 completes a ride, charges it, then races the completion again (same key and a new key) against the `TripCompleted` delivered through the inbox and replayed past it. A second race delivers one `TripCompleted` twice at once, through and past the inbox, before any charge exists. Both end with one charge, one attempt, one call to the provider and one `ChargeSucceeded`.
+- A webhook races the status check of an unknown attempt; both orders occur, and the outcome applies once. Two refunds of 60% each race on one charge (one `202`, one `422`), and two dues payments race (one `202`, one `409 NO_DUES`, one new attempt per charge).
+- Races that need many charges create them directly as the consumer would, for a ride that exists only in the test, because rides take longer to make than the race takes to run.
+- The tests drive the executor with a circuit of their own, so timeouts in one test never open another test's circuit. A scripted provider wraps the mock to act during a call (a webhook before the response), crash before or after the provider acts, stop answering, or decline refunds.
+- Webhooks before, after and instead of the response are posted by the tests themselves, signed with the test secret; one test runs in a context with the mock's own webhooks turned on.
+
 ### 17.3 Invariant checks
 
 Each module implements `InvariantCheck` over its own tables; operations runs them all and compares across modules through APIs. From V2 they are served at `GET /v1/ops/invariants`, which the simulator calls after every run.
@@ -2447,6 +2604,8 @@ Phase 8 details:
 - I4 pairs each `ASSIGNED` or `ON_TRIP` driver with their ride's state: `ASSIGNED` for `DRIVER_ASSIGNED` and `DRIVER_ARRIVED`, `ON_TRIP` for `IN_TRIP`.
 - I5 also checks that each ride's versions run 0, 1, 2… and that each transition starts from the previous one's state.
 - I6 covers rides that ended within the last day, from both sides: rides with dispatch work (a pending offer, a task, or an offer timer from the last day), and ended rides whose `SEARCH_TIMEOUT` is still scheduled.
+
+Phase 9 details: I7's four checks, including "no double charge", are listed in §11.10.
 
 ### 17.4 Time in tests
 
@@ -2613,8 +2772,13 @@ As built: the sweeper's interval and safety-valve thresholds and the reconcile i
 | `ride.quotes.ttl` | `5m` | FR-PR1 |
 | `ride.rides.pin-max-attempts`, `arrived-far-m` | `5`, `300` | §7.5, §7.6 |
 | `ride.payments.provider` | `mock` | Payment provider |
-| `ride.payments.check-schedule` | `10s,30s,2m,10m,1h` | Status checks, hourly to 24 h |
-| `ride.payments.mock.*` | §11.9 | Mock behaviour |
+| `ride.payments.check-schedule`, `check-for` | `10s,30s,2m,10m,1h`, `24h` | Status checks, hourly to 24 h |
+| `ride.payments.workers`, `poll-interval`, `lease` | `2`, `250ms`, `30s` | Each payment poller; the `IN_FLIGHT` lease (phase 9) |
+| `ride.payments.read-timeout` | `3s` | When a provider call gives up; the mock simulates it, and an HTTP provider adds the 1 s connect timeout (phase 9) |
+| `ride.payments.breaker-failures`, `breaker-open-for` | `5`, `30s` | Circuit breaker (phase 9) |
+| `ride.payments.not-received-after`, `webhook-tolerance` | `2m`, `5m` | §11.3, §11.4 (phase 9) |
+| `ride.payments.currency` | `INR` | Totals over no rows (phase 9) |
+| `ride.payments.mock.*` | §11.9 | Mock behaviour: `latency-median` `300ms`, `latency-p99` `2s`, `decline-rate` `0.05`, `timeout-rate` `0.02`, `webhook-secret`, `webhooks.enabled` `true`, `webhooks.url`, `webhooks.max-delay` `30s`, `webhooks.duplicate-rate` `0.10`, `webhooks.early-rate` `0.20` |
 | `ride.security.jwt.issuer`, `access-ttl`, `refresh-ttl`, `refresh-reuse-grace` | `ride-hailing`, `15m`, `30d`, `10s` | §12.2 |
 | `ride.security.jwt.keys` | empty: generated in `local` and `test` only | §12.3; EC P-256 private JWKs |
 | `ride.security.otp.ttl`, `max-attempts`, `fixed-code`, `hmac-secret` | `5m`, `5`, unset, unset | §12.1; `fixed-code` only in local and test profiles; `hmac-secret` generated there when unset |
@@ -2640,7 +2804,9 @@ As built: the sweeper's interval and safety-valve thresholds and the reconcile i
 | Refresh-token reuse grace | 10 s |
 | Seed data | 500 riders, one operations and one admin account (2,000 drivers from the HLD) |
 | Retention | Unused quotes deleted 24 h after expiry; inbox rows 14 days |
-| Payment executor | 30 s lease per call; unknown attempts not found at the provider after 2 min become failed |
+| Payment executor | 30 s lease per call; unknown attempts not found at the provider after 2 min become failed; circuit breaker opens for 30 s after 5 consecutive call failures (phase 9) |
+| Payment webhooks | Bodies at most 64 KiB; signature time within 5 min either way (phase 9) |
+| Single currency | Totals over no rows are in INR; V1 sums never mix currencies (phase 9) |
 | Mock provider | Latency median 300 ms; 5% declines; 2% timeouts; webhooks 0–30 s late, 10% duplicated, 20% before the response |
 | Refunds and earnings | Fee refunds reduce the driver's earnings proportionally; fare refunds don't |
 | WebSocket sending | 2 s send-time limit; 16 KB buffer limit per session |

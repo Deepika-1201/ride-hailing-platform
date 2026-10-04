@@ -652,7 +652,7 @@ paths:
       summary: Earnings per day, in the city's time zone
       parameters:
         - {name: from, in: query, required: true, schema: {type: string, format: date}}
-        - {name: to, in: query, required: true, description: 'Inclusive; at most 31 days after `from`.', schema: {type: string, format: date}}
+        - {name: to, in: query, required: true, description: 'Inclusive; at most 30 days after `from`, so a request covers at most 31 days.', schema: {type: string, format: date}}
       responses:
         '200':
           description: Earnings.
@@ -1449,6 +1449,7 @@ paths:
         '200': {description: Received.}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
 
 components:
   securitySchemes:
@@ -2104,24 +2105,30 @@ components:
         created_at: {$ref: '#/components/schemas/Timestamp'}
         expires_at: {$ref: '#/components/schemas/Timestamp'}
         expires_in_ms: {type: integer, minimum: 0, description: Computed by the server, so a wrong device clock can't change the countdown.}
-    EarningsDay:
+    EarningsTotals:
       type: object
-      required: [date, rides, gross, commission, net, cash_collected]
+      required: [rides, gross, commission, net, cash_collected]
       properties:
-        date: {type: string, format: date}
-        rides: {type: integer, minimum: 0}
+        rides: {type: integer, minimum: 0, description: Completed trips.}
         gross: {$ref: '#/components/schemas/Money'}
         commission: {$ref: '#/components/schemas/Money'}
         net: {$ref: '#/components/schemas/Money'}
         cash_collected: {$ref: '#/components/schemas/Money'}
+    EarningsDay:
+      allOf:
+        - $ref: '#/components/schemas/EarningsTotals'
+        - type: object
+          required: [date]
+          properties:
+            date: {type: string, format: date}
     Earnings:
       type: object
       required: [from, to, days, totals]
       properties:
         from: {type: string, format: date}
         to: {type: string, format: date}
-        days: {type: array, items: {$ref: '#/components/schemas/EarningsDay'}}
-        totals: {$ref: '#/components/schemas/EarningsDay'}
+        days: {type: array, description: 'Every day from `from` to `to`, zeros included.', items: {$ref: '#/components/schemas/EarningsDay'}}
+        totals: {$ref: '#/components/schemas/EarningsTotals'}
     RealtimeTicket:
       type: object
       required: [ticket, expires_at, url]

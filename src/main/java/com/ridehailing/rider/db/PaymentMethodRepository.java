@@ -14,7 +14,8 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class PaymentMethodRepository {
 
-    private static final String COLUMNS = "SELECT id, type, display, active, created_at FROM rider.payment_methods ";
+    private static final String COLUMNS =
+            "SELECT id, type, provider_ref, display, active, created_at FROM rider.payment_methods ";
 
     private final JdbcClient jdbc;
 
@@ -66,15 +67,28 @@ public class PaymentMethodRepository {
                 .single();
     }
 
+    /** The rider's most recently added active card or UPI method. */
+    public Optional<MethodRow> newestOnline(UUID riderId) {
+        return jdbc.sql(COLUMNS + """
+                        WHERE rider_id = :riderId AND active AND type <> 'CASH'
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                        """)
+                .param("riderId", riderId)
+                .query(PaymentMethodRepository::method)
+                .optional();
+    }
+
     public void deactivate(UUID id) {
         jdbc.sql("UPDATE rider.payment_methods SET active = false WHERE id = :id").param("id", id).update();
     }
 
     private static MethodRow method(ResultSet row, int rowNumber) throws SQLException {
-        return new MethodRow(row.getObject("id", UUID.class), row.getString("type"), row.getString("display"),
-                row.getObject("created_at", OffsetDateTime.class).toInstant());
+        return new MethodRow(row.getObject("id", UUID.class), row.getString("type"), row.getString("provider_ref"),
+                row.getString("display"), row.getObject("created_at", OffsetDateTime.class).toInstant());
     }
 
-    public record MethodRow(UUID id, String type, String display, Instant createdAt) {
+    /** {@code providerRef} is null for cash. */
+    public record MethodRow(UUID id, String type, String providerRef, String display, Instant createdAt) {
     }
 }
