@@ -18,6 +18,7 @@ import com.ridehailing.pricing.db.RuleRepository.FeeRule;
 import com.ridehailing.shared.Ids;
 import com.ridehailing.shared.Money;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -94,6 +95,15 @@ class Quotes implements PricingApi {
         return new ConsumedQuote(quote.id(), quote.cityId(), quote.category(), quote.pickup(), quote.dropoff(),
                 quote.pickupZone(), quote.distanceM(), quote.durationS(), money(quote.fare().total(), quote),
                 money(quote.fare().commission(), quote), quote.feeRuleId());
+    }
+
+    @Override
+    public FeeTerms feeRule(UUID feeRuleId) {
+        FeeRule rule = ruleVersions.feeRule(feeRuleId).orElseThrow(() -> new IllegalStateException(
+                "Fee rule " + feeRuleId + " doesn't exist, though versions are never deleted"));
+        return new FeeTerms(rule.id(), rule.cancellationFeePaise(), rule.noShowFeePaise(),
+                Duration.ofSeconds(rule.freeCancelWindowS()), Duration.ofSeconds(rule.lateGraceS()),
+                Duration.ofSeconds(rule.pickupWaitS()), rule.commissionBp(), rule.currency());
     }
 
     private static QuoteView view(QuoteRow quote) {

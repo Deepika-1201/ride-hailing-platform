@@ -120,11 +120,6 @@ class OfferTests extends IntegrationTest {
         JsonNode again = assertAnswered("POST", ACCEPT, command(driver, "/v1/offers/" + offerId + "/accept"), 200);
         assertThat(again.get("version").asInt()).isEqualTo(accepted.get("version").asInt());
         assertAnswered("GET", RIDE, call("GET", driver.authorization(), "/v1/rides/" + ride.id(), null), 200);
-        JsonNode refused = assertProblem("POST", CANCEL, command(rider, "/v1/rides/" + ride.id() + "/cancel"), 409,
-                "INVALID_TRANSITION");
-        assertThat(refused.get("current_status").asString()).isEqualTo("DRIVER_ASSIGNED");
-        assertProblem("POST", CANCEL, command(driver, "/v1/rides/" + ride.id() + "/cancel"), 409,
-                "INVALID_TRANSITION");
     }
 
     @Test

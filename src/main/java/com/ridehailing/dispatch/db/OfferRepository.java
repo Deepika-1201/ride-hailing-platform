@@ -3,10 +3,13 @@ package com.ridehailing.dispatch.db;
 import com.ridehailing.dispatch.DispatchApi.OfferStatus;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -72,6 +75,35 @@ public class OfferRepository {
     public Set<UUID> driversOffered(UUID rideId) {
         return new HashSet<>(jdbc.sql("SELECT driver_id FROM dispatch.offers WHERE ride_id = :rideId")
                 .param("rideId", rideId).query(UUID.class).list());
+    }
+
+    /** Rides with a pending offer to a driver of the city (I6). */
+    public List<UUID> ridesWithPendingOffers(String cityId) {
+        return jdbc.sql("""
+                        SELECT o.ride_id FROM dispatch.offers o
+                        JOIN dispatch.driver_availability a ON a.driver_id = o.driver_id
+                        WHERE o.status = 'PENDING' AND (CAST(:cityId AS text) IS NULL OR a.city_id = :cityId)
+                        """)
+                .param("cityId", cityId)
+                .query(UUID.class)
+                .list();
+    }
+
+    /** Offers to drivers of the city created within {@code age}, as offer ID to ride ID (I6). */
+    public Map<UUID, UUID> recentOffers(String cityId, Duration age) {
+        Map<UUID, UUID> offers = new HashMap<>();
+        jdbc.sql("""
+                        SELECT o.id, o.ride_id FROM dispatch.offers o
+                        JOIN dispatch.driver_availability a ON a.driver_id = o.driver_id
+                        WHERE o.created_at > now() - make_interval(secs => :ageS)
+                          AND (CAST(:cityId AS text) IS NULL OR a.city_id = :cityId)
+                        """)
+                .param("ageS", age.toSeconds())
+                .param("cityId", cityId)
+                .query(row -> {
+                    offers.put(row.getObject("id", UUID.class), row.getObject("ride_id", UUID.class));
+                });
+        return offers;
     }
 
     public void markSeen(UUID id, UUID driverId) {

@@ -13,6 +13,7 @@ import com.ridehailing.location.LiveIndex.Status;
 import com.ridehailing.location.LocationProperties;
 import com.ridehailing.platform.LogContext;
 import com.ridehailing.platform.Transactions;
+import com.ridehailing.ride.RideAssignment;
 import com.ridehailing.shared.Ids;
 import com.ridehailing.support.EventContract;
 import com.ridehailing.support.IntegrationTest;
@@ -47,6 +48,9 @@ class SweeperTests extends IntegrationTest {
     private Availability service;
 
     @Autowired
+    private RideAssignment rides;
+
+    @Autowired
     private LiveIndex realIndex;
 
     @Autowired
@@ -78,7 +82,7 @@ class SweeperTests extends IntegrationTest {
     @BeforeEach
     void setUp() {
         index = new ScriptedLiveIndex(realIndex);
-        sweeper = new Sweeper(availability, service, index, location, transactions, Clock.systemUTC(), meters);
+        sweeper = new Sweeper(availability, service, rides, index, location, transactions, Clock.systemUTC(), meters);
         city = cities.create("MINI");
         later = Instant.now().plus(Duration.ofMinutes(11));
     }

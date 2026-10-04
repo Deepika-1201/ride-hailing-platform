@@ -3,6 +3,7 @@ package com.ridehailing.pricing;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Money;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -17,6 +18,9 @@ public interface PricingApi {
      * rider's, {@code 409 QUOTE_EXPIRED} or {@code 409 QUOTE_ALREADY_USED}.
      */
     ConsumedQuote consume(UUID quoteId, UUID riderId, UUID rideId);
+
+    /** A fee rule version, such as the one a ride fixed at booking (LLD §7.4); versions are never changed. */
+    FeeTerms feeRule(UUID feeRuleId);
 
     record QuoteRequest(GeoPoint pickup, GeoPoint dropoff, String category) {
     }
@@ -34,5 +38,10 @@ public interface PricingApi {
     /** What a ride keeps from its quote. */
     record ConsumedQuote(UUID quoteId, String cityId, String category, GeoPoint pickup, GeoPoint dropoff,
             String pickupZone, int distanceM, int durationS, Money fare, Money commission, UUID feeRuleId) {
+    }
+
+    /** The cancellation and no-show terms of a fee rule version. */
+    record FeeTerms(UUID id, long cancellationFeePaise, long noShowFeePaise, Duration freeCancelWindow,
+            Duration lateGrace, Duration pickupWait, int commissionBp, String currency) {
     }
 }

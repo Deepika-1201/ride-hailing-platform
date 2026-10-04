@@ -1,10 +1,17 @@
 package com.ridehailing.platform;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 /** An error reported to API clients as a problem detail with a stable {@code code} (LLD §13.2). */
 public class ApiException extends RuntimeException {
@@ -62,5 +69,24 @@ public class ApiException extends RuntimeException {
 
     public Map<String, Object> properties() {
         return properties;
+    }
+
+    /**
+     * The problem response the error handler would send, for a command that answers a refusal instead of throwing it,
+     * so that its transaction commits and the idempotency row stores the answer (LLD §7.6). Not for errors that
+     * carry {@code Retry-After}.
+     */
+    public ResponseEntity<ProblemDetail> toResponse() {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, getMessage());
+        properties.forEach(problem::setProperty);
+        problem.setProperty("code", code);
+        String requestId = MDC.get(LogContext.REQUEST_ID);
+        if (requestId != null) {
+            problem.setProperty("request_id", requestId);
+        }
+        if (RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes request) {
+            problem.setInstance(URI.create(request.getRequest().getRequestURI()));
+        }
+        return ResponseEntity.status(status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(problem);
     }
 }

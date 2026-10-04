@@ -31,6 +31,7 @@ public class DriverStatsRepository {
         OFFERS,
         ACCEPTED,
         DECLINED,
-        EXPIRED
+        EXPIRED,
+        CANCELLED_AFTER_ACCEPT
     }
 }

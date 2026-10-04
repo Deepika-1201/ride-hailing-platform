@@ -1,9 +1,10 @@
 #!/bin/sh
-# Booking and dispatch on a running seeded stack (local profile). A random seeded driver goes online near Indiranagar;
-# a random seeded rider books, cancels while searching, and books again; the driver polls for the offer and accepts it;
-# the rider then sees their driver and the PIN. Riders and drivers are random because an accepted ride keeps both busy
-# until phase 8 can end it, so reruns against the same stack need fresh ones. Exits non-zero on the first unexpected
-# answer, or if the phase-7 metrics aren't exported. Used by CI's container job and for local smoke tests.
+# A ride on a running seeded stack (local profile). A random seeded driver goes online near Indiranagar; a random
+# seeded rider books, cancels while searching, and books again; the driver polls for the offer and accepts it; the
+# rider sees their driver and the PIN. The driver then arrives, is refused a wrong PIN, starts the trip with the
+# rider's PIN, completes it at the quoted fare and goes offline. Riders and drivers are random, so a rerun after a
+# failed run, which can leave a ride open, starts with fresh ones. Exits non-zero on the first unexpected answer, or if
+# the phase-7 and phase-8 metrics aren't exported. Used by CI's container job and for local smoke tests.
 set -eu
 BASE=${BASE:-http://localhost:8080}
 MANAGEMENT=${MANAGEMENT:-http://localhost:8081}
@@ -111,11 +112,35 @@ case $PIN in
   [0-9][0-9][0-9][0-9]) echo "  driver $(field driver.first_name), PIN shown to the rider" ;;
   *) echo "the rider's PIN is $PIN: $(cat "$BODY_FILE")" >&2; exit 1 ;;
 esac
+FARE=$(field fare.amount_paise)
+WRONG_PIN=$(python3 -c 'import sys; print("%04d" % ((int(sys.argv[1]) + 1) % 10000))' "$PIN")
+
+TOKEN=$DRIVER_TOKEN
+expect "arrive at the pickup" "$(post "/v1/rides/$RIDE/arrive" '{}' "$(key)")" 200
+expect_field status DRIVER_ARRIVED
+BODY="{\"pin\": \"$WRONG_PIN\"}"
+expect "start with a wrong PIN" "$(post "/v1/rides/$RIDE/start" "$BODY" "$(key)")" 422
+expect_field code WRONG_PIN
+expect_field attempts_left 4
+BODY="{\"pin\": \"$PIN\"}"
+expect "start with the rider's PIN" "$(post "/v1/rides/$RIDE/start" "$BODY" "$(key)")" 200
+expect_field status IN_TRIP
+expect "complete the trip" "$(post "/v1/rides/$RIDE/complete" '{}' "$(key)")" 200
+expect_field status COMPLETED
+expect_field fare.amount_paise "$FARE"
+expect "go offline" "$(post /v1/drivers/me/offline '{}' "$(key)")" 200
+expect_field status OFFLINE
+
+TOKEN=$RIDER_TOKEN
+expect "the rider reads the completed ride" "$(get "/v1/rides/$RIDE")" 200
+expect_field status COMPLETED
+field pin >/dev/null 2>&1 && { echo "the PIN outlived the trip's start: $(cat "$BODY_FILE")" >&2; exit 1; }
 
 curl -sS "$MANAGEMENT/actuator/prometheus" > "$BODY_FILE"
 for metric in ride_requests_total dispatch_first_offer_seconds_count ride_assignment_seconds_count \
     'offers_total{outcome="ACCEPTED"}' 'dispatch_search_attempts_total{outcome="OFFERED"}' \
-    dispatch_reservation_conflicts_total; do
+    dispatch_reservation_conflicts_total 'rides_stuck{status="SEARCHING"}' 'rides_stuck{status="IN_TRIP"}' \
+    'sweeper_safety_valve_total{rule="unreachable"}'; do
   grep -qF "$metric" "$BODY_FILE" || { echo "metric $metric isn't exported" >&2; exit 1; }
 done
 echo "metrics: exported"

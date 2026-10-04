@@ -2,6 +2,7 @@ package com.ridehailing.ride.app;
 
 import com.ridehailing.ride.RideView;
 import com.ridehailing.ride.RideView.Cancellation;
+import com.ridehailing.ride.RideView.Fee;
 import com.ridehailing.ride.RideView.PaymentMethodRef;
 import com.ridehailing.ride.RideView.PersonSummary;
 import com.ridehailing.ride.RideView.VehicleSummary;
@@ -32,7 +33,9 @@ class RideViews {
                         driver.firstName()),
                 driver == null ? null : driver.vehicle(),
                 rider.firstName() == null ? null : new PersonSummary(ride.riderId(), rider.firstName()),
-                ride.cancelledBy() == null ? null : new Cancellation(ride.cancelledBy(), ride.cancelReason()),
+                ride.cancelledBy() == null ? null : new Cancellation(ride.cancelledBy(), ride.cancelReason(),
+                        ride.feePurpose() == null ? null : new Fee(ride.feePurpose(),
+                                new Money(ride.feePaise(), ride.currency()))),
                 ride.requestedAt(), ride.assignedAt(), ride.arrivedAt(), ride.startedAt(), ride.completedAt(),
                 ride.endedAt(), ride.riderId(), ride.driverId(), ride.offerId());
     }

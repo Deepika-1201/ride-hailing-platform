@@ -4,6 +4,7 @@ import com.ridehailing.shared.GeoPoint;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -61,6 +62,17 @@ public class SearchTaskRepository {
     /** Deletes the task the caller holds. */
     public void delete(UUID rideId) {
         jdbc.sql("DELETE FROM dispatch.search_tasks WHERE ride_id = :rideId").param("rideId", rideId).update();
+    }
+
+    /** Rides of the city with a task (I6). */
+    public List<UUID> ridesWithTasks(String cityId) {
+        return jdbc.sql("""
+                        SELECT ride_id FROM dispatch.search_tasks
+                        WHERE CAST(:cityId AS text) IS NULL OR city_id = :cityId
+                        """)
+                .param("cityId", cityId)
+                .query(UUID.class)
+                .list();
     }
 
     /** Deletes the task unless a poller holds it now; that poller then finds the ride moved on (§6.2). */

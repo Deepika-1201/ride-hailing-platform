@@ -6,6 +6,7 @@ import com.ridehailing.dispatch.db.AvailabilityRepository.AvailabilityRow;
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LocationProperties;
 import com.ridehailing.platform.Transactions;
+import com.ridehailing.ride.RideAssignment;
 import com.ridehailing.shared.Actor;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -20,38 +21,42 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Silent drivers leave matching after 30 s and go offline after 10 min (LLD §8.9), unless the safety valve says the
- * silence is the platform's fault. The unreachable rule (T7) arrives with rides in phase 8.
+ * Silent drivers leave matching after 30 s; an assigned driver silent for 2 min loses the ride (T7), and an available
+ * one goes offline after 10 min (LLD §8.9), unless the safety valve says the silence is the platform's fault.
  */
 @Service
 public class Sweeper {
 
     static final String SYSTEM_ACTOR = "sweeper";
     static final String IDLE_RULE = "idle";
+    static final String UNREACHABLE_RULE = "unreachable";
     private static final int VALVE_MIN_DRIVERS = 5;
     private static final int VALVE_PERCENT = 10;
     private static final Logger log = LoggerFactory.getLogger(Sweeper.class);
 
     private final AvailabilityRepository availability;
     private final Availability service;
+    private final RideAssignment rides;
     private final LiveIndex index;
     private final LocationProperties location;
     private final Transactions transactions;
     private final Clock clock;
     private final Counter removed;
-    private final Counter idleValve;
+    private final Map<String, Counter> valves;
 
-    Sweeper(AvailabilityRepository availability, Availability service, LiveIndex index, LocationProperties location,
-            Transactions transactions, Clock clock, MeterRegistry meters) {
+    Sweeper(AvailabilityRepository availability, Availability service, RideAssignment rides, LiveIndex index,
+            LocationProperties location, Transactions transactions, Clock clock, MeterRegistry meters) {
         this.availability = availability;
         this.service = service;
+        this.rides = rides;
         this.index = index;
         this.location = location;
         this.transactions = transactions;
         this.clock = clock;
         this.removed = meters.counter("location.sweeper.removed");
-        // Registered at zero, so an alert on its increase sees the first trip.
-        this.idleValve = meters.counter("sweeper.safety.valve", "rule", IDLE_RULE);
+        // Registered at zero, so an alert on their increase sees the first trip.
+        this.valves = Map.of(IDLE_RULE, meters.counter("sweeper.safety.valve", "rule", IDLE_RULE),
+                UNREACHABLE_RULE, meters.counter("sweeper.safety.valve", "rule", UNREACHABLE_RULE));
     }
 
     /** Every city with online drivers, each on its own, so one city's failure doesn't stop the others. */
@@ -66,47 +71,93 @@ public class Sweeper {
         }
     }
 
-    /** Returns the drivers taken offline. */
+    /** Returns the drivers taken offline, unreachable ones first. */
     List<UUID> sweep(String cityId, Instant now) {
         removed.increment(index.sweep(cityId, now.minus(location.freshness())).size());
-        return takeIdleOffline(cityId, now);
+        List<UUID> offline = new ArrayList<>(unassignUnreachable(cityId, now));
+        offline.addAll(takeIdleOffline(cityId, now));
+        return offline;
+    }
+
+    /** T7 (LLD §7.9): each assigned driver silent for 2 min loses their ride, in a transaction of its own. */
+    private List<UUID> unassignUnreachable(String cityId, Instant now) {
+        List<AvailabilityRow> assigned = availability.online(cityId).stream()
+                .filter(row -> row.status() == AvailabilityStatus.ASSIGNED)
+                .toList();
+        Instant silentBefore = now.minus(location.unreachableAfter());
+        List<AvailabilityRow> silent = silent(cityId, assigned, silentBefore);
+        if (silent.isEmpty() || valveHolds(UNREACHABLE_RULE, cityId, silent.size(), assigned.size(),
+                index.epoch(cityId), silentBefore)) {
+            return List.of();
+        }
+        List<UUID> unassigned = new ArrayList<>();
+        for (AvailabilityRow driver : silent) {
+            try {
+                if (stillSilent(cityId, driver, silentBefore) && transactions.execute(
+                        () -> rides.unassignUnreachable(driver.rideId(), driver.driverId()))) {
+                    unassigned.add(driver.driverId());
+                }
+            } catch (RuntimeException e) {
+                log.error("Unassigning unreachable driver {} failed; the next run tries again", driver.driverId(), e);
+            }
+        }
+        return unassigned;
     }
 
     private List<UUID> takeIdleOffline(String cityId, Instant now) {
         List<AvailabilityRow> available = availability.online(cityId).stream()
                 .filter(row -> row.status() == AvailabilityStatus.AVAILABLE)
                 .toList();
-        if (available.isEmpty()) {
-            return List.of();
-        }
         Instant idleBefore = now.minus(location.offlineAfter());
+        List<AvailabilityRow> idle = silent(cityId, available, idleBefore);
         Instant epoch = index.epoch(cityId);
-        Map<UUID, Instant> seen = index.lastSeen(cityId, available.stream().map(AvailabilityRow::driverId).toList());
-        List<UUID> idle = available.stream()
-                .filter(row -> lastSeen(seen.get(row.driverId()), row.onlineSince(), epoch).isBefore(idleBefore))
-                .map(AvailabilityRow::driverId)
-                .toList();
-        if (idle.isEmpty()) {
+        if (idle.isEmpty() || valveHolds(IDLE_RULE, cityId, idle.size(), available.size(), epoch, idleBefore)) {
             return List.of();
-        }
-        if (epochTooYoung(epoch, idleBefore)) {
-            return valve(cityId, "the index epoch " + epoch + " is younger than the rule's threshold", idle.size());
-        }
-        if (massSilence(idle.size(), available.size())) {
-            return valve(cityId, idle.size() + " of " + available.size() + " available drivers are silent",
-                    idle.size());
         }
         List<UUID> offline = new ArrayList<>();
-        for (UUID driverId : idle) {
+        for (AvailabilityRow driver : idle) {
             try {
-                if (takeOfflineIfIdle(cityId, driverId, idleBefore, epoch)) {
-                    offline.add(driverId);
+                if (takeOfflineIfIdle(cityId, driver.driverId(), idleBefore, epoch)) {
+                    offline.add(driver.driverId());
                 }
             } catch (RuntimeException e) {
-                log.error("Taking silent driver {} offline failed; the next run tries again", driverId, e);
+                log.error("Taking silent driver {} offline failed; the next run tries again", driver.driverId(), e);
             }
         }
         return offline;
+    }
+
+    /** The drivers, among {@code rows}, not heard from since {@code before}. */
+    private List<AvailabilityRow> silent(String cityId, List<AvailabilityRow> rows, Instant before) {
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+        Instant epoch = index.epoch(cityId);
+        Map<UUID, Instant> seen = index.lastSeen(cityId, rows.stream().map(AvailabilityRow::driverId).toList());
+        return rows.stream()
+                .filter(row -> lastSeen(seen.get(row.driverId()), row.onlineSince(), epoch).isBefore(before))
+                .toList();
+    }
+
+    /** Asked again just before acting: the driver may have spoken since the city was read. */
+    private boolean stillSilent(String cityId, AvailabilityRow driver, Instant before) {
+        Instant seen = index.lastSeen(cityId, List.of(driver.driverId())).get(driver.driverId());
+        return lastSeen(seen, driver.onlineSince(), index.epoch(cityId)).isBefore(before);
+    }
+
+    private boolean valveHolds(String rule, String cityId, int silent, int inState, Instant epoch, Instant before) {
+        String why;
+        if (epochTooYoung(epoch, before)) {
+            why = "the index epoch " + epoch + " is younger than the rule's threshold";
+        } else if (massSilence(silent, inState)) {
+            why = silent + " of " + inState + " drivers are silent";
+        } else {
+            return false;
+        }
+        valves.get(rule).increment();
+        log.warn("Safety valve ({} rule): not acting on {} silent drivers in city {}, because {}", rule, silent,
+                cityId, why);
+        return true;
     }
 
     /** Re-checks under the row's lock: the driver may have moved on, or spoken, since the city was read. */
@@ -123,12 +174,6 @@ public class Sweeper {
             service.takeOffline(locked, "SILENT", Actor.system(SYSTEM_ACTOR));
             return true;
         });
-    }
-
-    private List<UUID> valve(String cityId, String why, int idle) {
-        idleValve.increment();
-        log.warn("Safety valve: not taking {} silent drivers offline in city {}, because {}", idle, cityId, why);
-        return List.of();
     }
 
     /**

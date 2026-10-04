@@ -151,6 +151,11 @@ public class RuleRepository {
                 .optional();
     }
 
+    public Optional<FeeRule> feeRule(UUID id) {
+        return jdbc.sql("SELECT " + FEE_COLUMNS + " FROM pricing.fee_rules WHERE id = :id").param("id", id)
+                .query(FeeRule.class).optional();
+    }
+
     public Optional<FeeRule> feeInEffect(String cityId, String category) {
         return jdbc.sql("SELECT " + FEE_COLUMNS + """
                          FROM pricing.fee_rules

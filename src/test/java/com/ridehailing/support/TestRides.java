@@ -106,6 +106,29 @@ public class TestRides {
         return attempts;
     }
 
+    /**
+     * A ride booked by a new rider near an online driver, offered to them and accepted: {@code DRIVER_ASSIGNED},
+     * with the PIN only the rider sees.
+     */
+    public AssignedRide assigned(TestCity city, GeoPoint pickup, GeoPoint driverAt) {
+        TestDriver driver = onlineAt(city, "MINI", driverAt);
+        TestUser rider = rider("Rider");
+        RideView booked = book(rider.id(), city, pickup, "MINI");
+        onlyDueIn(city.id());
+        search();
+        UUID offer = pendingOffer(booked.id());
+        if (offer == null) {
+            throw new IllegalStateException("No offer for ride " + booked.id());
+        }
+        asApi(() -> dispatch.accept(offer, driver.id()));
+        String pin = jdbc.sql("SELECT pin FROM ride.rides WHERE id = :id").param("id", booked.id())
+                .query(String.class).single();
+        return new AssignedRide(booked.id(), rider, driver, offer, pin);
+    }
+
+    public record AssignedRide(UUID id, TestUser rider, TestDriver driver, UUID offerId, String pin) {
+    }
+
     public Poller searchTaskPoller() {
         return pollers.stream().filter(poller -> poller.name().equals(SEARCH_TASK_POLLER)).findFirst().orElseThrow();
     }

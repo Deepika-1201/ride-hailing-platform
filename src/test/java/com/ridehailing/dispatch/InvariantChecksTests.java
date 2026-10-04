@@ -76,6 +76,114 @@ class InvariantChecksTests extends IntegrationTest {
     }
 
     @Test
+    void i4FindsAnAssignedDriverWithoutTheirRide() {
+        accept(first, firstOffer);
+
+        reported("I4: driver " + first.id() + " is ASSIGNED on ride " + firstRide.id() + ", which they don't drive",
+                "UPDATE ride.rides SET status = 'CANCELLED_BY_RIDER', cancelled_by = 'RIDER', ended_at = now() "
+                        + "WHERE id = '" + firstRide.id() + "'");
+    }
+
+    @Test
+    void i4FindsARideWhoseDriverIsntOnIt() {
+        accept(first, firstOffer);
+
+        reported("I4: driver " + first.id() + " drives ride " + firstRide.id() + " (DRIVER_ASSIGNED) but is neither "
+                + "ASSIGNED nor ON_TRIP", "UPDATE dispatch.driver_availability SET status = 'AVAILABLE', ride_id = NULL "
+                + "WHERE driver_id = '" + first.id() + "'");
+    }
+
+    @Test
+    void i4FindsADriverInTheWrongStateForTheirRide() {
+        accept(first, firstOffer);
+
+        reported("I4: driver " + first.id() + " drives ride " + firstRide.id() + " (IN_TRIP) but is ASSIGNED on ride "
+                + firstRide.id(), "UPDATE ride.rides SET status = 'IN_TRIP' WHERE id = '" + firstRide.id() + "'");
+    }
+
+    @Test
+    void i4FindsADriverOnAnotherRide() {
+        accept(first, firstOffer);
+        UUID other = UUID.randomUUID();
+
+        reported("I4: driver " + first.id() + " drives ride " + firstRide.id() + " (DRIVER_ASSIGNED) but is ASSIGNED "
+                + "on ride " + other, "UPDATE dispatch.driver_availability SET ride_id = '" + other
+                + "' WHERE driver_id = '" + first.id() + "'");
+    }
+
+    @Test
+    void i5FindsATransitionOutsideTheTable() {
+        reported("I5: ride " + firstRide.id() + " version 0: nothing to SEARCHING by BOOK (DRIVER) is not in the "
+                + "transition table", "UPDATE ride.transitions SET actor_type = 'DRIVER' WHERE ride_id = '"
+                + firstRide.id() + "' AND version = 0");
+    }
+
+    @Test
+    void i5FindsALogThatSkipsAState() {
+        accept(first, firstOffer);
+
+        reported("I5: ride " + firstRide.id() + " version 1 starts from DRIVER_ASSIGNED after SEARCHING",
+                "UPDATE ride.transitions SET from_status = 'DRIVER_ASSIGNED', to_status = 'DRIVER_ARRIVED', "
+                        + "command = 'ARRIVE' WHERE ride_id = '" + firstRide.id() + "' AND version = 1");
+    }
+
+    @Test
+    void i5FindsAGapInTheVersions() {
+        accept(first, firstOffer);
+
+        reported("I5: ride " + firstRide.id() + " has version 2 where 1 was expected",
+                "UPDATE ride.transitions SET version = 2 WHERE ride_id = '" + firstRide.id() + "' AND version = 1");
+    }
+
+    @Test
+    void i5FindsARideThatDisagreesWithItsLog() {
+        reported("I5: ride " + firstRide.id() + " is DRIVER_NOT_FOUND at version 0 but its log ends at SEARCHING "
+                + "version 0", "UPDATE ride.rides SET status = 'DRIVER_NOT_FOUND', ended_at = now() WHERE id = '"
+                + firstRide.id() + "'");
+    }
+
+    @Test
+    void i6FindsAnEndedRideWithAPendingOffer() {
+        reported("I6: ride " + firstRide.id() + " is CANCELLED_BY_RIDER but has a pending offer",
+                "UPDATE ride.rides SET status = 'CANCELLED_BY_RIDER', cancelled_by = 'RIDER', ended_at = now() "
+                        + "WHERE id = '" + firstRide.id() + "'");
+    }
+
+    @Test
+    void i6FindsAnEndedRideWithASearchTask() {
+        reported("I6: ride " + firstRide.id() + " is DRIVER_NOT_FOUND but has a search task",
+                "UPDATE dispatch.offers SET status = 'EXPIRED' WHERE id = '" + firstOffer + "'",
+                "UPDATE dispatch.driver_availability SET status = 'AVAILABLE', offer_id = NULL WHERE driver_id = '"
+                        + first.id() + "'",
+                "DELETE FROM platform.timers WHERE aggregate_id = '" + firstOffer + "'",
+                "UPDATE ride.rides SET status = 'DRIVER_NOT_FOUND', ended_at = now() WHERE id = '" + firstRide.id()
+                        + "'");
+    }
+
+    @Test
+    void i6FindsAnEndedRideWithAnOfferTimer() {
+        reported("I6: ride " + firstRide.id() + " is DRIVER_NOT_FOUND but has an offer timer",
+                "UPDATE dispatch.offers SET status = 'EXPIRED' WHERE id = '" + firstOffer + "'",
+                "UPDATE dispatch.driver_availability SET status = 'AVAILABLE', offer_id = NULL WHERE driver_id = '"
+                        + first.id() + "'",
+                "DELETE FROM dispatch.search_tasks WHERE ride_id = '" + firstRide.id() + "'",
+                "UPDATE ride.rides SET status = 'DRIVER_NOT_FOUND', ended_at = now() WHERE id = '" + firstRide.id()
+                        + "'");
+    }
+
+    @Test
+    void i6FindsAnEndedRideWithItsSearchTimer() {
+        reported("I6: ride " + firstRide.id() + " ended but its search timer is scheduled",
+                "UPDATE dispatch.offers SET status = 'EXPIRED' WHERE id = '" + firstOffer + "'",
+                "UPDATE dispatch.driver_availability SET status = 'AVAILABLE', offer_id = NULL WHERE driver_id = '"
+                        + first.id() + "'",
+                "DELETE FROM platform.timers WHERE aggregate_id = '" + firstOffer + "'",
+                "DELETE FROM dispatch.search_tasks WHERE ride_id = '" + firstRide.id() + "'",
+                "UPDATE ride.rides SET status = 'DRIVER_NOT_FOUND', ended_at = now() WHERE id = '" + firstRide.id()
+                        + "'");
+    }
+
+    @Test
     void i1FindsARiderInTwoActiveRides() {
         UUID rider = riderOf(firstRide.id());
 

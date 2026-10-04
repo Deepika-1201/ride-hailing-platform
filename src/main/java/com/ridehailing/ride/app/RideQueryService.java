@@ -1,28 +1,55 @@
 package com.ridehailing.ride.app;
 
 import com.ridehailing.platform.InvariantCheck;
+import com.ridehailing.platform.Timers;
 import com.ridehailing.ride.RideQueries;
+import com.ridehailing.ride.RideStatus;
 import com.ridehailing.ride.RideView;
 import com.ridehailing.ride.db.RideRepository;
+import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 
 @Service
 class RideQueryService implements RideQueries, InvariantCheck {
 
+    static final Duration RECENTLY_ENDED = Duration.ofDays(1);
+
     private final RideRepository rides;
     private final RideViews views;
+    private final Timers timers;
 
-    RideQueryService(RideRepository rides, RideViews views) {
+    RideQueryService(RideRepository rides, RideViews views, Timers timers) {
         this.rides = rides;
         this.views = views;
+        this.timers = timers;
     }
 
     @Override
     public Optional<RideView> find(UUID rideId) {
         return rides.find(rideId).map(views::of);
+    }
+
+    @Override
+    public List<DrivenRide> drivenRides(String cityId) {
+        return rides.drivenRides(cityId);
+    }
+
+    @Override
+    public Map<UUID, RideStatus> statuses(Collection<UUID> rideIds) {
+        return rideIds.isEmpty() ? Map.of() : rides.statuses(rideIds);
+    }
+
+    @Override
+    public List<UUID> endedWithSearchTimer(String cityId) {
+        List<UUID> ended = rides.endedWithin(cityId, RECENTLY_ENDED);
+        Set<UUID> withTimer = timers.scheduled(RideTimers.SEARCH_TIMEOUT, ended);
+        return ended.stream().filter(withTimer::contains).toList();
     }
 
     /** I1: no driver and no rider in two active rides. */

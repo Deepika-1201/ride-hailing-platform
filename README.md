@@ -25,8 +25,8 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   driver 1, `scripts/quote-smoke.sh` quotes a Bengaluru trip as rider 2, `scripts/driver-online-smoke.sh` takes
   driver 3 online, sends a location and finds them as the pickup ETA of rider 3's quote, and
   `scripts/booking-smoke.sh` has a random seeded rider book, cancel and book again while a random seeded driver
-  polls for the offer and accepts it. Accepted rides keep their rider and driver busy until phase 8 can end them,
-  hence the random picks.
+  polls for the offer and accepts it, then arrives, is refused a wrong PIN, starts the trip with the rider's PIN and
+  completes it. The picks are random so that a rerun after a failed run, which can leave a ride open, starts afresh.
 - The concurrency races repeat 200 times each (LLD §17.2); `./gradlew test -PraceRepetitions=20` runs them quicker.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`

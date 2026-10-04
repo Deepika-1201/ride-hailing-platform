@@ -8,6 +8,7 @@ import com.ridehailing.platform.TimerKind;
 import com.ridehailing.ride.RideDispatchParticipant;
 import com.ridehailing.ride.RideDispatchParticipant.SearchStop;
 import com.ridehailing.ride.RideStatus;
+import com.ridehailing.ride.app.RideTransitions.Command;
 import com.ridehailing.ride.db.RideRepository;
 import com.ridehailing.ride.db.RideRepository.RideRow;
 import com.ridehailing.ride.events.RideNotMatched;
@@ -49,7 +50,7 @@ class SearchTimeoutHandler implements TimerHandler {
         RideRow ended = rides.endSearch(ride.id(), ride.version(), RideStatus.DRIVER_NOT_FOUND, null, null)
                 .orElseThrow();
         participant.searchStopped(ride.id(), SearchStop.SEARCH_TIMEOUT);
-        log.record(ride, ended, "SEARCH_TIMEOUT", Actor.system("search-timeout"), null);
+        log.record(ride, ended, Command.SEARCH_TIMEOUT, Actor.system("search-timeout"), null);
         outbox.append(DomainEvent.of(RideNotMatched.TYPE, RideNotMatched.VERSION, "ride", ride.id(), ended.version(),
                 new RideNotMatched(ride.id(), ride.riderId(), ride.cityId(), ride.category(),
                         Duration.between(ride.requestedAt(), ended.endedAt()).toSeconds(), ended.endedAt())));

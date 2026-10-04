@@ -17,6 +17,12 @@ public interface RideAssignment {
      */
     Assignment assign(AssignDriver command);
 
+    /**
+     * T7, for the sweeper (LLD §7.9): returns the ride to the search and takes the driver offline, if the ride is
+     * still {@code DRIVER_ASSIGNED} to them; answers whether it did.
+     */
+    boolean unassignUnreachable(UUID rideId, UUID driverId);
+
     /** {@code requestedAt} is the database's time of booking. */
     record SearchingRide(UUID rideId, String cityId, String category, GeoPoint pickup, Instant requestedAt) {
     }

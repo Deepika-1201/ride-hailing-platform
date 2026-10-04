@@ -3,6 +3,7 @@ package com.ridehailing.ride.app;
 import com.ridehailing.audit.AuditEntry;
 import com.ridehailing.audit.AuditLog;
 import com.ridehailing.platform.LogContext;
+import com.ridehailing.ride.app.RideTransitions.Command;
 import com.ridehailing.ride.db.RideRepository.RideRow;
 import com.ridehailing.ride.db.TransitionRepository;
 import com.ridehailing.shared.Actor;
@@ -25,11 +26,12 @@ class RideLog {
     }
 
     /** {@code before} is null for the booking; {@code reason} may be null. */
-    void record(RideRow before, RideRow after, String command, Actor actor, String reason) {
+    void record(RideRow before, RideRow after, Command command, Actor actor, String reason) {
         transitions.insert(Ids.newId(), after.id(), after.version(), before == null ? null : before.status(),
-                after.status(), command, actor.type().name(), actor.id(), reason, MDC.get(LogContext.REQUEST_ID));
-        auditLog.record(new AuditEntry(actor, "ride." + command.toLowerCase(Locale.ROOT), "ride", after.id().toString(),
-                reason, before == null ? null : Map.of("status", before.status().name()),
+                after.status(), command.name(), actor.type().name(), actor.id(), reason,
+                MDC.get(LogContext.REQUEST_ID));
+        auditLog.record(new AuditEntry(actor, "ride." + command.name().toLowerCase(Locale.ROOT), "ride",
+                after.id().toString(), reason, before == null ? null : Map.of("status", before.status().name()),
                 Map.of("status", after.status().name())));
     }
 }

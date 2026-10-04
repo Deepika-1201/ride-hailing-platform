@@ -4,6 +4,8 @@ import com.ridehailing.ride.RideView;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Money;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -34,6 +36,18 @@ public interface DispatchApi {
 
     /** §8.7: declining again is no change; {@code 409 OFFER_NO_LONGER_AVAILABLE} if the offer ended otherwise. */
     OfferView decline(UUID offerId, UUID driverId);
+
+    /** Drivers {@code ASSIGNED} or {@code ON_TRIP}, in the city or in all when {@code cityId} is null (I4). */
+    List<BusyDriver> busyDrivers(String cityId);
+
+    /**
+     * What dispatch still holds for rides of the city: a pending offer, a search task, or an offer timer from the last
+     * day; ride ID to what (I6).
+     */
+    Map<UUID, String> dispatchWork(String cityId);
+
+    record BusyDriver(UUID driverId, AvailabilityStatus status, UUID rideId) {
+    }
 
     /** The DriverStatus schema; null fields don't apply in the status. */
     record DriverStatusView(UUID driverId, AvailabilityStatus status, String cityId, UUID vehicleId, String category,

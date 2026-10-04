@@ -371,6 +371,7 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/Ride'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
   /v1/rides/{ride_id}/cancel:
     post:
@@ -392,6 +393,7 @@ paths:
         '200': {$ref: '#/components/responses/Ride'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /v1/rides/{ride_id}/arrive:
@@ -406,6 +408,7 @@ paths:
         '200': {$ref: '#/components/responses/Ride'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /v1/rides/{ride_id}/start:
@@ -426,6 +429,7 @@ paths:
         '200': {$ref: '#/components/responses/Ride'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/Unprocessable'}
@@ -446,6 +450,7 @@ paths:
         '200': {$ref: '#/components/responses/Ride'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /v1/rides/{ride_id}/no-show:
@@ -461,6 +466,7 @@ paths:
         '200': {$ref: '#/components/responses/Ride'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /v1/rides/{ride_id}/rating:
@@ -1629,7 +1635,7 @@ components:
       description: |
         Don't retry unchanged. Codes: `IDEMPOTENCY_KEY_REUSED`, `OUTSIDE_SERVICE_AREA`, `CATEGORY_NOT_AVAILABLE`,
         `ROUTE_NOT_FOUND`, `PAYMENT_METHOD_INVALID`, `WRONG_PIN` (with `attempts_left`), `REFUND_EXCEEDS_CHARGE`,
-        `INVALID_GEOMETRY`, `RULE_EFFECTIVE_IN_PAST`.
+        `FEE_EXCEEDS_RULE`, `INVALID_GEOMETRY`, `RULE_EFFECTIVE_IN_PAST`.
       headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
       content:
         application/problem+json:

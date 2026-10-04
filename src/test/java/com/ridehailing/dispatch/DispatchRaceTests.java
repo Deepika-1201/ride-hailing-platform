@@ -276,7 +276,10 @@ class DispatchRaceTests extends IntegrationTest {
         RaceRunner.assertExplored(seen, "cancelled first", "offered first");
     }
 
-    /** The rider cancels during acceptance: no assignment on a cancelled ride, no offer left pending. */
+    /**
+     * Race 4 (ride lifecycle §8): the rider cancels while the driver accepts. Cancelling first withdraws the offer;
+     * accepting first makes the cancel a T8, free within the first 2 minutes. Either way the driver is free again.
+     */
     @Test
     void cancellingDuringAcceptanceHasOneOutcome() throws Exception {
         Map<String, Integer> seen = new TreeMap<>();
@@ -289,18 +292,19 @@ class DispatchRaceTests extends IntegrationTest {
 
             List<String> outcomes = RaceRunner.staggered(() -> accept(driver, offer), () -> cancel(rider, ride.id()));
 
-            String rideStatus = rides.rideStatus(ride.id());
-            boolean cancelled = outcomes.equals(List.of("409 OFFER_NO_LONGER_AVAILABLE", "200"))
-                    && rideStatus.equals("CANCELLED_BY_RIDER") && availability(driver).equals("AVAILABLE");
-            boolean assigned = outcomes.equals(List.of("200", "409 INVALID_TRANSITION"))
-                    && rideStatus.equals("DRIVER_ASSIGNED") && availability(driver).equals("ASSIGNED");
-            assertThat(cancelled || assigned).as("repetition %d: %s, ride %s", repetition, outcomes, rideStatus)
-                    .isTrue();
-            assertThat(rides.pendingOffer(ride.id())).as("repetition %d", repetition).isNull();
+            boolean acceptedFirst = outcomes.equals(List.of("200", "200"));
+            boolean cancelledFirst = outcomes.equals(List.of("409 OFFER_NO_LONGER_AVAILABLE", "200"));
+            assertThat(acceptedFirst || cancelledFirst).as("repetition %d: %s", repetition, outcomes).isTrue();
+            assertThat(rides.rideStatus(ride.id())).as("repetition %d", repetition).isEqualTo("CANCELLED_BY_RIDER");
+            assertThat(rides.offerStatus(offer)).as("repetition %d", repetition)
+                    .isEqualTo(acceptedFirst ? "ACCEPTED" : "WITHDRAWN");
+            assertThat(availability(driver)).as("repetition %d", repetition).isEqualTo("AVAILABLE");
+            assertThat(jdbc.sql("SELECT fee_paise IS NULL FROM ride.rides WHERE id = :id").param("id", ride.id())
+                    .query(Boolean.class).single()).as("repetition %d: free within the window", repetition).isTrue();
             assertThat(rides.violations(city.id())).as("repetition %d", repetition).isEmpty();
-            seen.merge(rideStatus, 1, Integer::sum);
+            seen.merge(acceptedFirst ? "accepted first" : "cancelled first", 1, Integer::sum);
         }
-        RaceRunner.assertExplored(seen, "CANCELLED_BY_RIDER", "DRIVER_ASSIGNED");
+        RaceRunner.assertExplored(seen, "accepted first", "cancelled first");
     }
 
     /** Go offline while an offer arrives: no offer is left on an offline driver. */

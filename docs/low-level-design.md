@@ -309,6 +309,13 @@ T2 (acceptance) runs the other way round: it starts in dispatch, which calls `Ri
 
 Phase 7 details: `searchStarted` answers the search timeout from the city's dispatch settings (`geography.city_categories`), which dispatch reads; `ride` doesn't depend on `geography`, and the ride schedules its own `SEARCH_TIMEOUT` with it.
 
+Phase 8 details:
+
+- `driverReleased(ride, driver, reason)` takes only the reason (`RIDER_CANCELLED`, `DRIVER_CANCELLED`, `NO_SHOW`, `COMPLETED`, `OPS_CANCELLED`, `UNREACHABLE`); dispatch decides the target. `UNREACHABLE` goes `OFFLINE` with that session reason; a driver with `offline_after_ride` set goes `OFFLINE` with reason `SUSPENDED`; everyone else goes `AVAILABLE`. `DRIVER_CANCELLED` adds 1 to `driver_stats.cancelled_after_accept`.
+- Both calls lock the availability row after the ride row (§6.1) and expect it `ASSIGNED` or `ON_TRIP` for this ride. Anything else is logged as a broken invariant and left alone, since I4 reports it.
+- `RideAssignment.unassignUnreachable` answers whether it unassigned: `false` when the ride is no longer `DRIVER_ASSIGNED` to that driver, including a driver who has arrived (T7 starts only from `DRIVER_ASSIGNED`).
+- For I4 and I6 (§17.3), operations reads both sides through APIs: `DispatchApi.busyDrivers(city)` and `dispatchWork(city)`, `RideQueries.drivenRides(city)`, `statuses(rides)` and `endedWithSearchTimer(city)`. A new platform method `Timers.scheduled(kind, aggregates)` answers which aggregates have a timer of a kind, so neither module reads `platform.timers`.
+
 ## 3. Domain model
 
 ### 3.1 Aggregates
@@ -1291,6 +1298,15 @@ Meaning, preconditions, fees and events of each transition are in the [ride life
 
 A driver command on a ride that was reassigned away from that driver gets `409 RIDE_REASSIGNED` (ride lifecycle §4).
 
+Phase 8 details:
+
+- **The transition table is code:** `RideTransitions` lists every allowed `(from, command, actor type) → to`. The commands use it for step 5, and I5 (§17.3) checks the transition log against the same list.
+- **Command names in the log:** `BOOK`, `ACCEPT`, `SEARCH_TIMEOUT`, `CANCEL`, `ARRIVE`, `START`, `NO_SHOW`, `COMPLETE`, `UNREACHABLE`; an operations cancel is `CANCEL` by `OPS` (or `ADMIN`).
+- **Versions count transitions:** each transition adds exactly 1, so the log's versions run 0, 1, 2… without gaps. A wrong PIN changes `pin_attempts` but not the version, since it isn't a transition and isn't part of the ride clients see.
+- **A former driver** is one with an `ACCEPT` in the ride's log who isn't its driver now. Their cancel is recognized as done when their own `CANCEL` is their latest entry in the log; every other command of theirs gets `409 RIDE_REASSIGNED`. Everyone else who isn't the rider or the driver gets `404`.
+- **The released view:** a driver who cancelled (T6, T11) is answered with the ride without the rider, the PIN, or whoever drives it now.
+- **Time comes from the database:** fee windows and the no-show wait compare `now()` with the ride's stored times, in the command's transaction, which also stamps the transition.
+
 ### 7.2 Booking (T1)
 
 ```text
@@ -1363,6 +1379,14 @@ The fee, with the rule that produced it, is stored on the ride (`fee_purpose`, `
 
 Phase 7 details: only T4 is built. A rider cancelling after assignment and every driver cancellation arrive in phase 8, and answer `409 INVALID_TRANSITION` with `current_status` and `current_version` until then.
 
+Phase 8 details:
+
+- The fee rule comes from `PricingApi.feeRule(id)`, the version fixed at booking. A fee's commission is the rule's `commission_bp` of the fee, rounded half up to the paisa, as fares are. A rule amount of 0 means no fee.
+- Boundaries: free while `now ≤ assigned_at + free_cancel_window`; the driver is late when `now > assigned_at + promised ETA + late_grace` and they hadn't arrived by then. The decision is a pure function, tested at the exact boundaries; the API tests move `assigned_at` either side (§17.4).
+- The ride's view shows `cancellation.fee` (purpose and amount); `RideCancelled` adds the commission and the fee rule's ID.
+- The operations fee (T13) may not exceed the rule's amount for its purpose: `422 FEE_EXCEEDS_RULE` (§13.2).
+- T6 schedules the new `SEARCH_TIMEOUT` with `Timers.scheduleAfter(kind, ride, delay, payload)`, which counts from the database's `now()`, so no application time is mixed in.
+
 ### 7.5 Arrival (T5)
 
 - Before the transaction: read the ride without a lock, then the driver's live position from the index.
@@ -1378,6 +1402,8 @@ Phase 7 details: only T4 is built. A rider cancelling after assignment and every
 
 A ride whose PIN is locked can be cancelled by the driver (T11) or by operations; operations see the flag.
 
+Phase 8 details: the wrong PIN is answered by returning the `422` from the command rather than throwing it, so the transaction commits the attempt and the idempotency row stores the answer. `ApiException.toResponse()` builds the same problem body the error handler would, `instance` included: Spring MVC adds `instance` to a returned problem only as it writes the response, after the idempotency row has stored the body, so without it a replay would differ from the first answer. The PIN is compared with `MessageDigest.isEqual`. A wrong PIN after the fifth is `409 PIN_LOCKED`, and the PIN never appears in logs, events or the driver's view.
+
 ### 7.7 No-show (T10)
 
 `DRIVER_ARRIVED` and `now ≥ arrived_at + pickup_wait` (5 min from the fee rule); otherwise `409 NO_SHOW_TOO_EARLY` with `available_at`. Effects: `CANCELLED_BY_DRIVER` with reason `NO_SHOW`, the no-show fee on the ride, `driverReleased(AVAILABLE, NO_SHOW)`, outbox `RideCancelled`.
@@ -1390,16 +1416,23 @@ A ride whose PIN is locked can be cancelled by the driver (T11) or by operations
 
 Called by the sweeper (§8.9), one transaction per ride: `RideAssignment.unassignUnreachable(ride, driver)` locks the ride and checks it is still `DRIVER_ASSIGNED` to that driver. Then, as T6: the ride returns to `SEARCHING` with priority, and the driver is excluded from it. The release goes to `OFFLINE` (reason `UNREACHABLE`), and the event is `DriverUnassigned` with reason `DRIVER_UNREACHABLE`.
 
+Phase 8 details: the transition is `UNREACHABLE` by `SYSTEM` (`sweeper`). The sweeper checks the driver's silence again just before the transaction; an update that lands in between can't stop it, and the driver then gets `409 RIDE_REASSIGNED` and goes online again.
+
 ### 7.10 Offline driver commands (V2)
 
 - `start` and `complete` accept `device_time`, stored in `start_device_time` and `complete_device_time` and on the transition row (FR-RD8). The client's command ID is the idempotency key.
 - A late command for a ride that was reassigned away from the driver gets `409 RIDE_REASSIGNED`. In the same committed transaction, the ride gets the flag `OFFLINE_CONFLICT`, with both drivers and the device time, because a physical trip may be under way ([ride lifecycle §7](ride-lifecycle.md#7-offline-driver-commands-fr-rd8)).
 - Idempotency keys live 24 h. A command replayed later still can't apply twice, because the state machine recognizes it (§7.1).
+- Phase 8 details: V1 accepts `device_time` on `start` and `complete`, as the OpenAPI document allows, and ignores it until V2. A late command gets `409 RIDE_REASSIGNED` without the `OFFLINE_CONFLICT` flag, which needs the device time.
 
 ### 7.11 Flags and stuck rides
 
 - Flags (`ride.flags`) are the operations review queue: `ARRIVED_FAR`, `DRIVER_CANCELLED_AT_PICKUP`, `PIN_LOCKED`, `OFFLINE_CONFLICT`, `STUCK`. At most one open flag per ride and kind.
 - The stuck-ride detector (worker, every minute) asks `RideQueries.overdue(thresholds)` for rides past the thresholds in [ride lifecycle §9](ride-lifecycle.md#9-recovery). It opens a `STUCK` flag for each and sets the gauge `rides_stuck{status}`, which has an alert.
+- Phase 8 details:
+  - Phase 8 raises `ARRIVED_FAR`, `DRIVER_CANCELLED_AT_PICKUP`, `PIN_LOCKED` and `STUCK`; `OFFLINE_CONFLICT` waits for V2's device times. Listing and resolving flags arrive with the operations views in phase 11.
+  - A flag of a kind that is already open on the ride isn't opened again (`ON CONFLICT DO NOTHING` on the partial unique index).
+  - A ride's time in its state is counted from its latest transition. The detector is the recurring job `stuck-rides` (`worker`, 1 min) inside the ride module, so it reads its own repository and `RideQueries` gains no `overdue`. Each run flags the overdue rides that have no open `STUCK` flag, oldest first, 1,000 to a query until none is left; the gauge counts every overdue ride, flagged or not. `rides_stuck{status}` is registered for the four active statuses at startup.
 
 ## 8. Dispatch
 
@@ -1612,6 +1645,8 @@ Runs in the `dispatch` role every 5 s per city:
 `ON_TRIP` drivers are never swept: the trip continues and the app's queued commands arrive later (FR-RD8).
 
 Phase 6 details: one recurring job, `sweeper`, runs every 5 s over the cities that have online drivers, each city on its own, so one city's failure doesn't stop the others. The idle rule is live; the unreachable rule needs rides and arrives with T7 in phase 8. Silence and the safety valve are decided by the application clock, since the thresholds are minutes long (§1.4). Silence starts no earlier than `online_since`, so an update from a previous session (a missed offline mirror) can't make a driver idle the moment they come back. The valve is checked only when the rule would take someone offline, so a young epoch alone never trips it; with the in-memory index it can't trip at all, because every last-seen time is after the epoch, and its test uses a scripted index for the V2 case of an epoch reset that kept older data. The counter is `sweeper_safety_valve_total{rule}`, registered at zero; the WARN log says which trigger held. Drivers swept out of matching count in `location_sweeper_removed_total`.
+
+Phase 8 details: the unreachable rule runs before the idle rule, over `ASSIGNED` drivers, with the same silence definition, its own threshold (`ride.location.unreachable-after`, 2 min) and its own valve counter (`rule="unreachable"`). The valve's mass-silence limit counts `ASSIGNED` drivers. Each driver is handled in a transaction of its own that starts at the ride (§7.9).
 
 ### 8.10 Mirror writes and the reconciler
 
@@ -2160,6 +2195,7 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 | `PAYMENT_METHOD_INVALID` | 422 | Not the rider's, inactive, or cash where cash isn't allowed |
 | `WRONG_PIN` | 422 | The PIN didn't match; `attempts_left` |
 | `REFUND_EXCEEDS_CHARGE` | 422 | The refund would exceed the refundable amount |
+| `FEE_EXCEEDS_RULE` | 422 | An operations cancellation fee above the ride's fee rule (added in phase 8) |
 | `INVALID_GEOMETRY` | 422 | An invalid polygon |
 | `RULE_EFFECTIVE_IN_PAST` | 422 | A rule version that would take effect in the past |
 | `CODE_ATTEMPTS_EXCEEDED` | 429 | Five wrong codes on one challenge |
@@ -2383,6 +2419,12 @@ The HLD's SLO burn-rate and platform alerts, plus `rides_stuck > 0` for 5 min, a
 | Suspension during acceptance | Either the accept wins and the ride continues, or the offer is withdrawn |
 | Go online twice; go offline while an offer arrives | One session; no offer left on an offline driver |
 
+Phase 8 details:
+
+- Race 4 (rider cancels during acceptance) now ends `CANCELLED_BY_RIDER` either way: accepting first makes the cancel a free T8. Race 5 starts the trip against the driver's cancel, their no-show or the rider's cancel, in turn; race 8 completes against an operations cancel; race 10 has the sweeper unassign a silent driver (T7) as the driver arrives or cancels, or the rider cancels. The invariant checks I1–I6 run after every repetition.
+- The window too narrow for timing in phase 8: the first search's timeout, held by a poller through the acceptance, firing after the driver cancelled and the ride searches again. A gate forces it; the timeout belongs to the earlier search generation and does nothing.
+- Every client command (arrive, start, no-show, complete, the rider's, the driver's and operations' cancel) is tried in every state, reached each way that decides an answer (for example after the driver's cancel, or after T7), against a table of the expected answers: the transition, a recognized repeat, `404`, or the `409` with its code. Refusals and repeats are checked to change nothing.
+
 ### 17.3 Invariant checks
 
 Each module implements `InvariantCheck` over its own tables; operations runs them all and compares across modules through APIs. From V2 they are served at `GET /v1/ops/invariants`, which the simulator calls after every run.
@@ -2398,6 +2440,13 @@ Phase 7 details: `InvariantCheck.violations(cityId)` checks one city, or all wit
 | I5 | Every transition row follows the transition table | ride |
 | I6 | A terminal ride has no pending offer, no search task and no timer | operations |
 | I7 | One charge per ride and purpose; refunds never exceed their charge | payment |
+
+Phase 8 details:
+
+- I4 and I6 read ride and dispatch in one `REPEATABLE READ` read-only transaction, so both sides come from the same snapshot.
+- I4 pairs each `ASSIGNED` or `ON_TRIP` driver with their ride's state: `ASSIGNED` for `DRIVER_ASSIGNED` and `DRIVER_ARRIVED`, `ON_TRIP` for `IN_TRIP`.
+- I5 also checks that each ride's versions run 0, 1, 2… and that each transition starts from the previous one's state.
+- I6 covers rides that ended within the last day, from both sides: rides with dispatch work (a pending offer, a task, or an offer timer from the last day), and ended rides whose `SEARCH_TIMEOUT` is still scheduled.
 
 ### 17.4 Time in tests
 

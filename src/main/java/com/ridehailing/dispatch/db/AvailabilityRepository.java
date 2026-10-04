@@ -20,7 +20,7 @@ public class AvailabilityRepository {
 
     private static final String RETURNED = """
             driver_id, city_id, status, category, vehicle_id, offer_id, ride_id, consecutive_expired, online_since,
-            status_changed_at, version
+            status_changed_at, version, offline_after_ride
             """;
     private static final String COLUMNS = "SELECT " + RETURNED + " FROM dispatch.driver_availability ";
 
@@ -141,6 +141,44 @@ public class AvailabilityRepository {
                 .optional();
     }
 
+    /** {@code ASSIGNED → ON_TRIP} for this ride (T9); empty if the driver isn't assigned to it. */
+    public Optional<AvailabilityRow> startTrip(UUID driverId, UUID rideId) {
+        return jdbc.sql("""
+                        UPDATE dispatch.driver_availability
+                        SET status = 'ON_TRIP', status_changed_at = now(), version = version + 1
+                        WHERE driver_id = :driverId AND status = 'ASSIGNED' AND ride_id = :rideId
+                        RETURNING
+                        """ + RETURNED)
+                .param("driverId", driverId)
+                .param("rideId", rideId)
+                .query(AvailabilityRepository::row)
+                .optional();
+    }
+
+    /** {@code ASSIGNED} or {@code ON_TRIP} for this ride → {@code AVAILABLE}; empty if the driver isn't on it. */
+    public Optional<AvailabilityRow> releaseFromRide(UUID driverId, UUID rideId) {
+        return jdbc.sql("""
+                        UPDATE dispatch.driver_availability
+                        SET status = 'AVAILABLE', ride_id = NULL, status_changed_at = now(), version = version + 1
+                        WHERE driver_id = :driverId AND status IN ('ASSIGNED', 'ON_TRIP') AND ride_id = :rideId
+                        RETURNING
+                        """ + RETURNED)
+                .param("driverId", driverId)
+                .param("rideId", rideId)
+                .query(AvailabilityRepository::row)
+                .optional();
+    }
+
+    /** Drivers on a ride (I4): {@code ASSIGNED} or {@code ON_TRIP}, in the city or in all when it's null. */
+    public List<AvailabilityRow> busy(String cityId) {
+        return jdbc.sql(COLUMNS + """
+                        WHERE status IN ('ASSIGNED', 'ON_TRIP') AND (CAST(:cityId AS text) IS NULL OR city_id = :cityId)
+                        """)
+                .param("cityId", cityId)
+                .query(AvailabilityRepository::row)
+                .list();
+    }
+
     /**
      * Drivers whose offer isn't their pending offer (I3). A CHECK ties {@code OFFERED} to having an offer, so this
      * also finds an {@code OFFERED} driver without a pending offer and a pending offer on a driver who isn't.
@@ -195,12 +233,16 @@ public class AvailabilityRepository {
                 row.getObject("vehicle_id", UUID.class), row.getObject("offer_id", UUID.class),
                 row.getObject("ride_id", UUID.class), row.getInt("consecutive_expired"),
                 onlineSince == null ? null : onlineSince.toInstant(),
-                row.getObject("status_changed_at", OffsetDateTime.class).toInstant(), row.getLong("version"));
+                row.getObject("status_changed_at", OffsetDateTime.class).toInstant(), row.getLong("version"),
+                row.getBoolean("offline_after_ride"));
     }
 
-    /** {@code consecutiveExpired} counts seen offers that expired in a row (§8.6). */
+    /**
+     * {@code consecutiveExpired} counts seen offers that expired in a row (§8.6); {@code offlineAfterRide} is set by a
+     * suspension during a ride (§8.8).
+     */
     public record AvailabilityRow(UUID driverId, String cityId, AvailabilityStatus status, String category,
             UUID vehicleId, UUID offerId, UUID rideId, int consecutiveExpired, Instant onlineSince,
-            Instant statusChangedAt, long version) {
+            Instant statusChangedAt, long version, boolean offlineAfterRide) {
     }
 }

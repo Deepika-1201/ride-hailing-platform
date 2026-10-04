@@ -5,7 +5,9 @@ import com.ridehailing.platform.DomainEvent;
 import com.ridehailing.platform.Outbox;
 import com.ridehailing.platform.Timers;
 import com.ridehailing.ride.RideAssignment;
+import com.ridehailing.ride.RideDispatchParticipant.DriverRelease;
 import com.ridehailing.ride.RideStatus;
+import com.ridehailing.ride.app.RideTransitions.Command;
 import com.ridehailing.ride.db.RideRepository;
 import com.ridehailing.ride.db.RideRepository.RideRow;
 import com.ridehailing.ride.events.DriverAssigned;
@@ -23,6 +25,8 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 class Assignments implements RideAssignment {
 
+    static final String UNREACHABLE_ACTOR = "sweeper";
+
     private static final SecureRandom PINS = new SecureRandom();
 
     private final RideRepository rides;
@@ -31,14 +35,17 @@ class Assignments implements RideAssignment {
     private final Outbox outbox;
     private final Timers timers;
     private final RideMetrics metrics;
+    private final Unassignments unassignments;
 
-    Assignments(RideRepository rides, RideLog log, RideViews views, Outbox outbox, Timers timers, RideMetrics metrics) {
+    Assignments(RideRepository rides, RideLog log, RideViews views, Outbox outbox, Timers timers, RideMetrics metrics,
+            Unassignments unassignments) {
         this.rides = rides;
         this.log = log;
         this.views = views;
         this.outbox = outbox;
         this.timers = timers;
         this.metrics = metrics;
+        this.unassignments = unassignments;
     }
 
     @Override
@@ -70,7 +77,7 @@ class Assignments implements RideAssignment {
             throw new ApiException(HttpStatus.CONFLICT, "OFFER_NO_LONGER_AVAILABLE",
                     "You already have an active ride; this offer has ended.");
         }
-        log.record(ride, assigned, "ACCEPT", new Actor(Actor.Type.DRIVER, command.driverId().toString()), null);
+        log.record(ride, assigned, Command.ACCEPT, new Actor(Actor.Type.DRIVER, command.driverId().toString()), null);
         outbox.append(DomainEvent.of(DriverAssigned.TYPE, DriverAssigned.VERSION, "ride", ride.id(), assigned.version(),
                 new DriverAssigned(ride.id(), ride.riderId(), command.driverId(), assigned.vehicleId(),
                         command.offerId(), command.promisedPickupEtaS(), assigned.reassignCount(),
@@ -78,5 +85,17 @@ class Assignments implements RideAssignment {
         timers.cancel(RideTimers.SEARCH_TIMEOUT, ride.id());
         metrics.assigned(ride.cityId(), Duration.between(ride.requestedAt(), assigned.assignedAt()));
         return new Assignment(views.of(assigned), false);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean unassignUnreachable(UUID rideId, UUID driverId) {
+        RideRow ride = rides.lock(rideId).orElse(null);
+        if (ride == null || ride.status() != RideStatus.DRIVER_ASSIGNED || !driverId.equals(ride.driverId())) {
+            return false;
+        }
+        unassignments.unassign(ride, Command.UNREACHABLE, Actor.system(UNREACHABLE_ACTOR), null,
+                DriverRelease.UNREACHABLE, "DRIVER_UNREACHABLE");
+        return true;
     }
 }

@@ -20,7 +20,7 @@ class LiveIndexMirrorTests {
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final AvailabilityRow row = new AvailabilityRow(Ids.newId(), "blr", AvailabilityStatus.AVAILABLE, "MINI",
-            Ids.newId(), null, null, 0, Instant.now(), Instant.now(), 1);
+            Ids.newId(), null, null, 0, Instant.now(), Instant.now(), 1, false);
 
     @Test
     void aWriteTheIndexTakesIsReported() {

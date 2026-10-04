@@ -10,6 +10,7 @@ import com.ridehailing.pricing.PricingApi.ConsumedQuote;
 import com.ridehailing.ride.RideDispatchParticipant;
 import com.ridehailing.ride.RideDispatchParticipant.SearchStarted;
 import com.ridehailing.ride.RideView;
+import com.ridehailing.ride.app.RideTransitions.Command;
 import com.ridehailing.ride.db.RideRepository;
 import com.ridehailing.ride.db.RideRepository.NewRide;
 import com.ridehailing.ride.db.RideRepository.RideRow;
@@ -78,7 +79,7 @@ public class Booking {
                 // A concurrent booking by the same rider committed first.
                 throw activeRideExists();
             }
-            log.record(null, ride, "BOOK", new Actor(Actor.Type.RIDER, riderId.toString()), null);
+            log.record(null, ride, Command.BOOK, new Actor(Actor.Type.RIDER, riderId.toString()), null);
             outbox.append(DomainEvent.of(RideRequested.TYPE, RideRequested.VERSION, "ride", rideId, ride.version(),
                     new RideRequested(rideId, riderId, ride.cityId(), ride.category(), ride.pickup(), ride.dropoff(),
                             ride.pickupZone(), quote.fare(), method.type(), quoteId, ride.requestedAt())));

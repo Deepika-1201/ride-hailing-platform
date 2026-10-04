@@ -155,6 +155,33 @@ class TimersTests extends IntegrationTest {
     }
 
     @Test
+    void scheduledAnswersTheAggregatesWithATimerOfThatKind() {
+        UUID both = UUID.randomUUID();
+        UUID other = UUID.randomUUID();
+        UUID none = UUID.randomUUID();
+        template.executeWithoutResult(status -> {
+            timers.schedule(TEST_TIMER, both, FUTURE, Map.of());
+            timers.schedule(TEST_TIMER, both, FUTURE, Map.of());
+            timers.schedule(UNHANDLED_TIMER, other, FUTURE, Map.of());
+        });
+
+        assertThat(timers.scheduled(TEST_TIMER, List.of(both, other, none))).containsExactly(both);
+        assertThat(timers.scheduled(TEST_TIMER, List.of())).isEmpty();
+    }
+
+    @Test
+    void scheduleAfterCountsFromTheDatabasesTime() {
+        UUID ride = UUID.randomUUID();
+        template.executeWithoutResult(status -> timers.scheduleAfter(TEST_TIMER, ride, Duration.ofMillis(90_500),
+                Map.of("generation", 2)));
+
+        assertThat(jdbc.sql("""
+                        SELECT extract(epoch FROM due_at - created_at) || ' ' || (payload ->> 'generation')
+                        FROM platform.timers WHERE aggregate_id = :id
+                        """).param("id", ride).query(String.class).single()).isEqualTo("90.500000 2");
+    }
+
+    @Test
     void cancelNeverWaitsForATimerBeingFired() throws Exception {
         UUID ride = schedule(TEST_TIMER, PAST);
         CountDownLatch firing = new CountDownLatch(1);

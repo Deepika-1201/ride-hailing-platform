@@ -51,6 +51,18 @@ public record RideView(
                 startedAt, completedAt, endedAt, riderId, driverId, offerId);
     }
 
+    /** For a driver who cancelled (T6, T11): no rider, no PIN, and not whoever drives the ride now (LLD §7.1). */
+    public RideView forReleasedDriver() {
+        return new RideView(id, status, version, cityId, category, pickup, dropoff, fare, paymentMethod, null,
+                null, null, null, null, cancellation, requestedAt, null, null, null, null, endedAt, riderId, null,
+                null);
+    }
+
+    /** Operations see everything but the PIN, as the driver does. */
+    public RideView forOperations() {
+        return forDriver();
+    }
+
     public record PaymentMethodRef(UUID id, String type) {
     }
 
@@ -61,7 +73,11 @@ public record RideView(
     public record VehicleSummary(UUID id, String category, String make, String model, String colour, String plate) {
     }
 
-    /** {@code reason} may be null. */
-    public record Cancellation(String cancelledBy, String reason) {
+    /** {@code reason} and {@code fee} may be null. */
+    public record Cancellation(String cancelledBy, String reason, Fee fee) {
+    }
+
+    /** {@code CANCELLATION_FEE} or {@code NO_SHOW_FEE}. */
+    public record Fee(String purpose, Money amount) {
     }
 }
