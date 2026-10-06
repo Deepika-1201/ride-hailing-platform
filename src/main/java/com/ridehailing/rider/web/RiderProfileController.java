@@ -4,6 +4,9 @@ import com.ridehailing.platform.AllowedRoles;
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.ApiException;
 import com.ridehailing.platform.Caller;
+import com.ridehailing.rating.RatingApi;
+import com.ridehailing.rating.RatingApi.Party;
+import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.rider.app.RiderProfiles;
 import com.ridehailing.rider.app.RiderProfiles.PaymentMethod;
 import com.ridehailing.rider.db.RiderRepository.RiderRow;
@@ -16,6 +19,7 @@ import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.time.Instant;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -34,22 +38,29 @@ import org.springframework.web.bind.annotation.RequestMapping;
 class RiderProfileController {
 
     private final RiderProfiles riders;
+    private final RatingApi ratings;
 
-    RiderProfileController(RiderProfiles riders) {
+    RiderProfileController(RiderProfiles riders, RatingApi ratings) {
         this.riders = riders;
+        this.ratings = ratings;
     }
 
     @GetMapping
-    RiderRow profile(Caller caller) {
-        return riders.profile(caller.userId());
+    RiderView profile(Caller caller) {
+        return view(riders.profile(caller.userId()));
     }
 
     @PatchMapping
-    RiderRow update(Caller caller, @Valid @RequestBody RiderUpdate request) {
+    RiderView update(Caller caller, @Valid @RequestBody RiderUpdate request) {
         if (request.firstName() == null && request.lastName() == null && request.email() == null) {
             throw ApiException.invalid("first_name", "give at least one of first_name, last_name and email");
         }
-        return riders.update(caller.userId(), request.firstName(), request.lastName(), request.email());
+        return view(riders.update(caller.userId(), request.firstName(), request.lastName(), request.email()));
+    }
+
+    private RiderView view(RiderRow rider) {
+        return new RiderView(rider.id(), rider.firstName(), rider.lastName(), rider.email(),
+                ratings.summary(rider.id(), Party.RIDER), rider.defaultPaymentMethodId(), rider.createdAt());
     }
 
     @GetMapping("/places")
@@ -91,6 +102,11 @@ class RiderProfileController {
     @PostMapping("/payment-methods/{methodId}/default")
     PaymentMethod setDefaultPaymentMethod(Caller caller, @PathVariable UUID methodId) {
         return riders.setDefaultPaymentMethod(caller.userId(), methodId);
+    }
+
+    /** The Rider schema of {@code openapi.yaml}. */
+    record RiderView(UUID id, String firstName, String lastName, String email, RatingSummary rating,
+            UUID defaultPaymentMethodId, Instant createdAt) {
     }
 
     record RiderUpdate(

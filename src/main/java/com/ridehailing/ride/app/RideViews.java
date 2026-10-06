@@ -1,5 +1,6 @@
 package com.ridehailing.ride.app;
 
+import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.ride.RideView;
 import com.ridehailing.ride.RideView.Cancellation;
 import com.ridehailing.ride.RideView.Fee;
@@ -30,9 +31,10 @@ class RideViews {
                 new PaymentMethodRef(ride.paymentMethodId(), ride.paymentMethodType()), ride.pin(),
                 ride.promisedPickupEtaS(),
                 driver == null || driver.firstName() == null ? null : new PersonSummary(ride.driverId(),
-                        driver.firstName()),
+                        driver.firstName(), driver.rating()),
                 driver == null ? null : driver.vehicle(),
-                rider.firstName() == null ? null : new PersonSummary(ride.riderId(), rider.firstName()),
+                rider.firstName() == null ? null : new PersonSummary(ride.riderId(), rider.firstName(),
+                        rider.rating()),
                 ride.cancelledBy() == null ? null : new Cancellation(ride.cancelledBy(), ride.cancelReason(),
                         ride.feePurpose() == null ? null : new Fee(ride.feePurpose(),
                                 new Money(ride.feePaise(), ride.currency()))),
@@ -40,17 +42,18 @@ class RideViews {
                 ride.endedAt(), ride.riderId(), ride.driverId(), ride.offerId());
     }
 
-    String riderSnapshot(String firstName) {
-        return json.writeValueAsString(new RiderJson(firstName));
+    String riderSnapshot(String firstName, RatingSummary rating) {
+        return json.writeValueAsString(new RiderJson(firstName, rating));
     }
 
-    String driverSnapshot(String firstName, VehicleSummary vehicle) {
-        return json.writeValueAsString(new DriverJson(firstName, vehicle));
+    String driverSnapshot(String firstName, VehicleSummary vehicle, RatingSummary rating) {
+        return json.writeValueAsString(new DriverJson(firstName, vehicle, rating));
     }
 
-    record RiderJson(String firstName) {
+    /** Snapshots from before phase 10 have no rating. */
+    record RiderJson(String firstName, RatingSummary rating) {
     }
 
-    record DriverJson(String firstName, VehicleSummary vehicle) {
+    record DriverJson(String firstName, VehicleSummary vehicle, RatingSummary rating) {
     }
 }

@@ -22,6 +22,8 @@ import com.ridehailing.platform.ApiException;
 import com.ridehailing.platform.Outbox;
 import com.ridehailing.platform.Timers;
 import com.ridehailing.platform.Transactions;
+import com.ridehailing.rating.RatingApi;
+import com.ridehailing.rating.RatingApi.Party;
 import com.ridehailing.ride.RideAssignment;
 import com.ridehailing.ride.RideAssignment.AssignDriver;
 import com.ridehailing.ride.RideAssignment.AssignedDriver;
@@ -56,6 +58,7 @@ class Offers {
     private final RideAssignment assignment;
     private final RideQueries rides;
     private final DriverApi drivers;
+    private final RatingApi ratings;
     private final GeographyApi geography;
     private final RoutingProvider routing;
     private final LiveIndex index;
@@ -68,8 +71,9 @@ class Offers {
 
     Offers(OfferRepository offers, AvailabilityRepository availability, SearchTaskRepository tasks,
             DriverStatsRepository stats, OfferEndings endings, RideAssignment assignment, RideQueries rides,
-            DriverApi drivers, GeographyApi geography, RoutingProvider routing, LiveIndex index, Timers timers,
-            Outbox outbox, LiveIndexMirror mirror, Transactions transactions, DispatchMetrics metrics, Clock clock) {
+            DriverApi drivers, RatingApi ratings, GeographyApi geography, RoutingProvider routing, LiveIndex index,
+            Timers timers, Outbox outbox, LiveIndexMirror mirror, Transactions transactions, DispatchMetrics metrics,
+            Clock clock) {
         this.offers = offers;
         this.availability = availability;
         this.tasks = tasks;
@@ -78,6 +82,7 @@ class Offers {
         this.assignment = assignment;
         this.rides = rides;
         this.drivers = drivers;
+        this.ratings = ratings;
         this.geography = geography;
         this.routing = routing;
         this.index = index;
@@ -113,7 +118,8 @@ class Offers {
         int eta = promisedPickupEta(ride.cityId(), driverId, ride.pickup(), offer.distanceM());
         Vehicle vehicle = driver.vehicle();
         AssignedDriver assigned = new AssignedDriver(driver.firstName(), new RideView.VehicleSummary(vehicle.id(),
-                vehicle.category(), vehicle.make(), vehicle.model(), vehicle.colour(), vehicle.plate()));
+                vehicle.category(), vehicle.make(), vehicle.model(), vehicle.colour(), vehicle.plate()),
+                ratings.summary(driverId, Party.DRIVER));
         return transactions.execute(() -> {
             Assignment result = assignment.assign(new AssignDriver(offer.rideId(), offerId, driverId, eta, assigned));
             if (result.repeated()) {

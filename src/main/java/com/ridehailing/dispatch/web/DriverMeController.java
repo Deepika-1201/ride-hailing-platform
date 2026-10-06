@@ -18,6 +18,9 @@ import com.ridehailing.platform.Caller;
 import com.ridehailing.platform.Idempotency;
 import com.ridehailing.platform.IdempotentCall;
 import com.ridehailing.platform.RateLimiter;
+import com.ridehailing.rating.RatingApi;
+import com.ridehailing.rating.RatingApi.Party;
+import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.UserRole;
 import jakarta.validation.Valid;
@@ -48,14 +51,16 @@ class DriverMeController {
 
     private final DriverApi drivers;
     private final DispatchApi dispatch;
+    private final RatingApi ratings;
     private final LocationIngestion ingestion;
     private final Idempotency idempotency;
     private final RateLimiter rateLimiter;
 
-    DriverMeController(DriverApi drivers, DispatchApi dispatch, LocationIngestion ingestion, Idempotency idempotency,
-            RateLimiter rateLimiter) {
+    DriverMeController(DriverApi drivers, DispatchApi dispatch, RatingApi ratings, LocationIngestion ingestion,
+            Idempotency idempotency, RateLimiter rateLimiter) {
         this.drivers = drivers;
         this.dispatch = dispatch;
+        this.ratings = ratings;
         this.ingestion = ingestion;
         this.idempotency = idempotency;
         this.rateLimiter = rateLimiter;
@@ -65,7 +70,8 @@ class DriverMeController {
     DriverView me(Caller caller) {
         DriverProfile profile = drivers.profile(caller.userId()).orElseThrow(ApiException::notFound);
         return new DriverView(profile.id(), profile.firstName(), profile.lastName(), profile.cityId(),
-                profile.verification(), profile.suspended(), profile.vehicles(), dispatch.status(caller.userId()));
+                profile.verification(), profile.suspended(), ratings.summary(profile.id(), Party.DRIVER),
+                profile.vehicles(), dispatch.status(caller.userId()));
     }
 
     @PostMapping("/online")
@@ -101,7 +107,7 @@ class DriverMeController {
     }
 
     record DriverView(UUID id, String firstName, String lastName, String cityId, Verification verification,
-            boolean suspended, List<Vehicle> vehicles, DriverStatusView status) {
+            boolean suspended, RatingSummary rating, List<Vehicle> vehicles, DriverStatusView status) {
     }
 
     record GoOnlineBody(@NotNull UUID vehicleId) {

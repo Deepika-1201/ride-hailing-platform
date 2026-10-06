@@ -71,7 +71,8 @@ class Assignments implements RideAssignment {
         try {
             assigned = rides.assign(ride.id(), ride.version(), command.driverId(), command.driver().vehicle().id(),
                     command.offerId(), "%04d".formatted(PINS.nextInt(10_000)), command.promisedPickupEtaS(),
-                    views.driverSnapshot(command.driver().firstName(), command.driver().vehicle())).orElseThrow();
+                    views.driverSnapshot(command.driver().firstName(), command.driver().vehicle(),
+                            command.driver().rating())).orElseThrow();
         } catch (DuplicateKeyException e) {
             // The driver holds another active ride, which only a newer offer can have given them.
             throw new ApiException(HttpStatus.CONFLICT, "OFFER_NO_LONGER_AVAILABLE",

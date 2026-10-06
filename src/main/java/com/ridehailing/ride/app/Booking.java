@@ -8,6 +8,8 @@ import com.ridehailing.platform.Timers;
 import com.ridehailing.platform.Transactions;
 import com.ridehailing.pricing.PricingApi;
 import com.ridehailing.pricing.PricingApi.ConsumedQuote;
+import com.ridehailing.rating.RatingApi;
+import com.ridehailing.rating.RatingApi.Party;
 import com.ridehailing.ride.RideDispatchParticipant;
 import com.ridehailing.ride.RideDispatchParticipant.SearchStarted;
 import com.ridehailing.ride.RideView;
@@ -37,6 +39,7 @@ public class Booking {
     private final PricingApi pricing;
     private final PaymentApi payments;
     private final RiderApi riders;
+    private final RatingApi ratings;
     private final RideRepository rides;
     private final RideLog log;
     private final RideViews views;
@@ -46,12 +49,13 @@ public class Booking {
     private final Transactions transactions;
     private final RideMetrics metrics;
 
-    Booking(PricingApi pricing, PaymentApi payments, RiderApi riders, RideRepository rides, RideLog log,
-            RideViews views, Outbox outbox, Timers timers, RideDispatchParticipant participant,
+    Booking(PricingApi pricing, PaymentApi payments, RiderApi riders, RatingApi ratings, RideRepository rides,
+            RideLog log, RideViews views, Outbox outbox, Timers timers, RideDispatchParticipant participant,
             Transactions transactions, RideMetrics metrics) {
         this.pricing = pricing;
         this.payments = payments;
         this.riders = riders;
+        this.ratings = ratings;
         this.rides = rides;
         this.log = log;
         this.views = views;
@@ -84,7 +88,8 @@ public class Booking {
                         quote.pickup(), quote.dropoff(), quote.pickupZone(), quote.distanceM(), quote.durationS(),
                         quote.fare().amountPaise(), quote.commission().amountPaise(), quote.fare().currency(),
                         quote.feeRuleId(), method.id(), method.type(),
-                        views.riderSnapshot(riders.snapshot(riderId).firstName())));
+                        views.riderSnapshot(riders.snapshot(riderId).firstName(),
+                                ratings.summary(riderId, Party.RIDER))));
             } catch (DuplicateKeyException e) {
                 // A concurrent booking by the same rider committed first.
                 throw activeRideExists();

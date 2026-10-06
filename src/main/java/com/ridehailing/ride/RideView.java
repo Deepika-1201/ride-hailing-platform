@@ -1,6 +1,7 @@
 package com.ridehailing.ride;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Money;
 import java.time.Instant;
@@ -66,8 +67,8 @@ public record RideView(
     public record PaymentMethodRef(UUID id, String type) {
     }
 
-    /** Ratings join it in phase 10. */
-    public record PersonSummary(UUID id, String firstName) {
+    /** {@code rating} is the person's when the ride took them: at booking for the rider, at assignment for the driver. */
+    public record PersonSummary(UUID id, String firstName, RatingSummary rating) {
     }
 
     public record VehicleSummary(UUID id, String category, String make, String model, String colour, String plate) {

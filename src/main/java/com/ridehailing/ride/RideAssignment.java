@@ -1,5 +1,6 @@
 package com.ridehailing.ride;
 
+import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.shared.GeoPoint;
 import java.time.Instant;
 import java.util.Optional;
@@ -30,8 +31,8 @@ public interface RideAssignment {
     record AssignDriver(UUID rideId, UUID offerId, UUID driverId, int promisedPickupEtaS, AssignedDriver driver) {
     }
 
-    /** What the ride keeps of its driver: {@code firstName} and the vehicle at assignment. */
-    record AssignedDriver(String firstName, RideView.VehicleSummary vehicle) {
+    /** What the ride keeps of its driver: {@code firstName}, the vehicle and the driver's rating at assignment. */
+    record AssignedDriver(String firstName, RideView.VehicleSummary vehicle, RatingSummary rating) {
     }
 
     /** {@code repeated} when this offer had already assigned the driver. */

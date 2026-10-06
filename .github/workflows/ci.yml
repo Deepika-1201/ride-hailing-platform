@@ -67,6 +67,8 @@ jobs:
         run: ./scripts/booking-smoke.sh
       - name: Have a declined fare become dues, pay them, and refund part as operations; read the driver's earnings
         run: ./scripts/payment-smoke.sh
+      - name: Rate each other after a ride as a seeded rider and driver, and see the ride's notifications sent
+        run: ./scripts/rating-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

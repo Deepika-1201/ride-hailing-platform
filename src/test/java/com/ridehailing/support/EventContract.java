@@ -64,10 +64,14 @@ public final class EventContract {
     public static void assertConforms(JsonNode envelope) {
         assertThat(SCHEMAS.getSchema(SchemaLocation.of(BASE + "envelope.v1.json")).validate(envelope))
                 .as("envelope %s", envelope).isEmpty();
-        String payloadSchema = envelope.get("event_type").asString() + ".v" + envelope.get("event_version").asInt()
-                + ".json";
-        assertThat(SCHEMAS.getSchema(SchemaLocation.of(BASE + payloadSchema)).validate(envelope.get("payload")))
-                .as("payload %s", envelope.get("payload")).isEmpty();
+        assertPayloadConforms(envelope.get("event_type").asString(), envelope.get("event_version").asInt(),
+                envelope.get("payload"));
+    }
+
+    /** A consumer test's fixture against its producer's schema (LLD §15.3). */
+    public static void assertPayloadConforms(String eventType, int version, JsonNode payload) {
+        assertThat(SCHEMAS.getSchema(SchemaLocation.of(BASE + eventType + ".v" + version + ".json")).validate(payload))
+                .as("payload %s", payload).isEmpty();
     }
 
     private static String read(String iri) {

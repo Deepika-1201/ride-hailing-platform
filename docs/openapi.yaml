@@ -474,7 +474,11 @@ paths:
       tags: [Rides]
       operationId: rateRide
       summary: Rate the other party of a completed ride
-      description: Once per side, within 7 days of completion.
+      description: >-
+        Once per side, within 7 days of completion: the rider rates the driver and the driver rates the rider.
+        `409 RATING_NOT_OPEN` for a ride the caller didn't take part in, one not completed (or whose completion
+        is still being recorded), or one completed more than 7 days ago; `409 ALREADY_RATED` for a second rating
+        by the same side.
       parameters:
         - $ref: '#/components/parameters/RideId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -492,8 +496,9 @@ paths:
               schema: {$ref: '#/components/schemas/Rating'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {$ref: '#/components/responses/NotFound'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
   /v1/rides/{ride_id}/receipt:
     get:
       tags: [Rides]

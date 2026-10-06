@@ -125,7 +125,7 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 | `audit` | `platform`, `shared` | Every module writes audit entries |
 | `notification` | `platform`, `shared` | One-time-code SMS for identity; consumes events as JSON |
 | `identity` | `notification`, `audit`, `platform`, `shared` | Sends one-time codes |
-| `rider` | `audit`, `platform`, `shared` | |
+| `rider` | `rating`, `audit`, `platform`, `shared` | The rider's own rating in their profile (added in phase 10) |
 | `driver` | `identity`, `geography`, `audit`, `platform`, `shared` | Admins create a driver's user; a driver's city and vehicles' categories must exist there (added in phase 4) |
 | `geography` | `audit`, `platform`, `shared` | Owns cities, areas, zones, categories and the `RoutingProvider` |
 | `rating` | `audit`, `platform`, `shared` | Opens rating windows from `TripCompleted` (JSON) |
@@ -1007,12 +1007,14 @@ CREATE TABLE notification.deliveries (
   notification_id uuid NOT NULL REFERENCES notification.notifications (id),
   channel         text NOT NULL CHECK (channel IN ('PUSH','SMS')),
   status          text NOT NULL CHECK (status IN ('PENDING','SENT','DEAD')),
-  attempts        smallint NOT NULL DEFAULT 0,
-  next_attempt_at timestamptz NOT NULL,
+  attempts        smallint NOT NULL DEFAULT 0,          -- sends started; counted when claimed
+  next_attempt_at timestamptz NOT NULL,                 -- while PENDING; also the lease of a send in progress
   last_error      text,
-  sent_at         timestamptz
+  sent_at         timestamptz,
+  CHECK ((status = 'SENT') = (sent_at IS NOT NULL))
 );
 CREATE INDEX deliveries_due ON notification.deliveries (next_attempt_at) WHERE status = 'PENDING';
+CREATE INDEX deliveries_by_notification ON notification.deliveries (notification_id);
 
 CREATE TABLE rating.rating_windows (
   ride_id      uuid PRIMARY KEY,
@@ -1037,7 +1039,7 @@ CREATE TABLE rating.summaries (
   user_id    uuid NOT NULL,
   party      text NOT NULL CHECK (party IN ('RIDER','DRIVER')),
   average    numeric(3,2) NOT NULL,
-  count      int NOT NULL,                             -- ratings in the average, at most 100
+  count      int NOT NULL CHECK (count BETWEEN 0 AND 100), -- ratings in the average
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (user_id, party)
 );
@@ -1347,7 +1349,7 @@ Phase 7 details:
 
 - Step 3 arrived with charges in phase 9: the sum of the rider's `FAILED` charges, read without locks.
 - `RiderApi.paymentMethod` first ensures the rider row and its cash method, as the first `/v1/riders/me` call does, and answers the default method when the request names none.
-- `rider_snapshot` holds the rider's first name; ratings join it in phase 10. A rider without a first name has no `rider` summary in the views.
+- `rider_snapshot` holds the rider's first name, and from phase 10 their rating summary (§13.4). A rider without a first name has no `rider` summary in the views.
 - The ride ID is generated before the transaction and is the correlation ID of the ride's events.
 - The search timeout is the one `searchStarted` answers (§2.3).
 
@@ -1593,7 +1595,7 @@ The driver's response contains pickup, drop-off, fare and the rider's first name
 Phase 7 details:
 
 - Without a live position, the promised pickup ETA is the offer's distance × 1.35 at 18 km/h **(assumed)**, the mock router's detour and slowest speed (ADR-013).
-- `DriverApi.snapshot` gives the driver's first name and the vehicle; ratings join it in phase 10.
+- `DriverApi.snapshot` gives the driver's first name and the vehicle; the rating summary joined it in phase 10 (§13.4).
 - The PIN is 4 digits from `SecureRandom`.
 - Someone else's offer, or an unknown one, is `404`.
 - A driver can still hold an old offer after accepting a newer one. Accepting the old one assigns its ride before step 2 checks the offer, so the driver's second active ride trips `one_active_ride_per_driver`. That is answered as `409 OFFER_NO_LONGER_AVAILABLE`, not `500` (found by the race in §17.2).
@@ -2356,7 +2358,7 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 
 | Area | Rules |
 |---|---|
-| Rider profile | The rider row and its cash method are created on the rider's first `/v1/riders/me/**` call, since `identity` doesn't depend on `rider`. `rating` joins the response in phase 10 |
+| Rider profile | The rider row and its cash method are created on the rider's first `/v1/riders/me/**` call, since `identity` doesn't depend on `rider`. `rating` joined the response in phase 10 (§13.4) |
 | Saved places | At most 10, counted under the rider row's lock (`409 PLACES_LIMIT_REACHED`); labels are unique per rider (`409 ALREADY_EXISTS`); someone else's place is `404` |
 | Payment methods | Card and UPI hold a mock provider token. Removing one deactivates it, and if it was the default, cash becomes the default. Cash can't be removed (`422 PAYMENT_METHOD_INVALID`). `is_default` comes from the rider row |
 | Drivers | `POST /v1/admin/drivers` calls `IdentityApi.ensureUser(phone, {DRIVER})` in the same transaction, so an existing rider keeps their account and gains the role; a phone that is already a driver is `409 ALREADY_EXISTS`. The city must exist (`400 VALIDATION_FAILED`) |
@@ -2370,6 +2372,28 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 | Auditing | Every admin change records an audit entry with the admin as actor and the changed fields |
 
 Every phase-4 response is checked against `openapi.yaml` by the contract tests (§17.1): the status must be documented for the operation, the documented headers present, and the body valid against its schema, formats included.
+
+### 13.4 Ratings (phase 10)
+
+- **The window:**
+  - The consumer `rating.windows` opens it from `TripCompleted`, closing 7 days after `completed_at` (FR-RT1).
+  - A rating sent before the event is delivered (the relay's idle poll is 100 ms) is `409 RATING_NOT_OPEN`, like one after the window.
+- **`POST /v1/rides/{id}/rating {stars, comment?}`** (Idempotency-Key; roles `RIDER` and `DRIVER`) is served by the rating module from its window, so rating needs no dependency on ride:
+  - The caller must be the window's rider, who rates as `RIDER`, or its driver, who rates as `DRIVER`. Anyone else, or a ride without an open window, gets `409 RATING_NOT_OPEN`: one answer for rides that don't exist, aren't the caller's, aren't completed or were completed too long ago, so the answer reveals nothing.
+  - A side that already rated gets `409 ALREADY_RATED`. A concurrent second rating queues behind the first on the ratee's summary lock (below), then finds it; `UNIQUE (ride_id, rater_role)` backs the rule up.
+  - `201` answers the rating; `RatingSubmitted` is appended, with `has_comment` but never the comment.
+- **The summary** is updated in the rating's transaction:
+  1. The ratee's summary row is created if missing and locked, so concurrent ratings of one person queue.
+  2. The rating is inserted.
+  3. The average is recomputed over the ratee's latest 100 ratings as that party (FR-RT2), rounded to 2 decimals.
+
+  Only the first rating creates a row, so a summary always counts at least one rating.
+- **`RatingApi.summary(user, party)`** answers the count, and the average when the count isn't zero. Views show it as `RatingSummary`:
+  - the rider's snapshot at booking, so the driver's offer and ride views show it;
+  - the driver's snapshot at assignment;
+  - `GET /v1/riders/me` and `GET /v1/drivers/me`, current.
+
+  The rider module now depends on rating for its profile (§2.1). Admin and operations driver views gain the rating with phase 11's driver lists.
 
 ## 14. Realtime (V2)
 
@@ -2491,6 +2515,38 @@ The operations timeline reads ride transitions, offers, decisions, charges and n
 - Failures back off 1 s, 5 s, 30 s, 2 min, 5 min, then the delivery is `DEAD` (FR-N2). A failed notification never touches the ride.
 - From V2, connected apps also see changes through `ride_status` pushes; notifications stand in for mobile push (FCM, APNs), which is out of scope.
 
+Phase 10 details:
+
+- **Kinds and recipients:**
+
+  | Event | Kind | Recipients |
+  |---|---|---|
+  | `DriverAssigned` | `DRIVER_ASSIGNED` | Rider |
+  | `DriverUnassigned` | `DRIVER_UNASSIGNED` | Rider; also the driver when the reason is `DRIVER_UNREACHABLE`, since they didn't choose it |
+  | `DriverArrived` | `DRIVER_ARRIVED` | Rider |
+  | `TripStarted` | `TRIP_STARTED` | Rider |
+  | `TripCompleted` | `TRIP_COMPLETED` | Rider and driver |
+  | `RideCancelled` | `RIDE_CANCELLED` | Whoever didn't cancel: the driver after a rider's cancel, the rider after a driver's; both after operations cancel |
+  | `RideNotMatched` | `NO_DRIVER_FOUND` | Rider |
+  | `ChargeSucceeded`, `ChargeFailed` | `PAYMENT_SUCCEEDED`, `PAYMENT_FAILED` | Rider |
+  | `DriverWentOffline` | `DRIVER_WENT_OFFLINE` | The driver, for the reasons they didn't choose: `SILENT`, `UNREACHABLE`, `UNRESPONSIVE`. A suspension is told by `DriverSuspended` |
+  | `DriverSuspended` | `DRIVER_SUSPENDED` | The driver |
+
+  "Arriving" (FR-N1) needs live ETAs and comes with V2. `DriverSuspended` is first appended in phase 11; its consumer is ready.
+- **Payloads** hold what the message needs, never more: the ride, and for some kinds the reason, the fee, the fare, or the charge's purpose, amount and failure code. No phone number, PIN or position, as in events.
+- **Deliveries:**
+  - The poller `notification-deliveries` runs in the `worker` role.
+  - It claims one due `PENDING` delivery with `SKIP LOCKED`, counts the attempt, and moves `next_attempt_at` 30 s ahead, which leases the delivery.
+  - It sends outside any transaction through `NotificationProvider`, then records the answer: `SENT`, or a failure.
+  - After failed attempt *n* the delivery waits `backoff[n]` (1 s, 5 s, 30 s, 2 min, 5 min); the sixth failure makes it `DEAD`, with the last error kept.
+  - A failure is recorded only if no later claim took the delivery over (its attempt count still matches); a send is recorded whichever claim made it, since the push went out.
+  - A crash after a send sends again once the lease passes: a push may arrive twice, which notifications tolerate.
+- `NotificationProvider` sends pushes; V1 has a log-only mock. SMS keeps its own provider, used synchronously for one-time codes and never queued (§12.1).
+- **Never touching the ride:** each consumer has its own inbox and retries, and the ride's transaction committed before the event was delivered. A dead delivery is a row in the notification schema and nothing else.
+- **Race 7:** the same event delivered twice at once, through the inbox and past it, makes one notification per recipient and kind, through the unique key, and one delivery each.
+- `notification_deliveries_total{channel,outcome}` counts `SENT`, `FAILED` (to be retried) and `DEAD`, registered at zero for `PUSH`.
+- Configuration: `ride.notifications.poll-interval` `500ms`, `workers` `1`, `lease` `30s`, `backoff` `1s,5s,30s,2m,5m`.
+
 ## 16. Observability
 
 Decisions in [ADR-017](decisions/ADR-017-observability.md); metric list in [HLD §15](architecture.md#15-observability).
@@ -2565,6 +2621,7 @@ The HLD's SLO burn-rate and platform alerts, plus `rides_stuck > 0` for 5 min, a
 | Driver cancels during trip start; operations cancel during completion | One transition wins; the other gets `409` |
 | Two bookings by one rider; the same booking twice with one key | One ride; the second gets the stored response |
 | Duplicated `TripCompleted`, duplicated and early webhooks | One charge, one outcome |
+| The same event delivered twice at once to notifications | One notification per recipient and kind, one delivery each |
 | Suspension during acceptance | Either the accept wins and the ride continues, or the offer is withdrawn |
 | Go online twice; go offline while an offer arrives | One session; no offer left on an offline driver |
 
@@ -2581,6 +2638,13 @@ Phase 9 details:
 - Races that need many charges create them directly as the consumer would, for a ride that exists only in the test, because rides take longer to make than the race takes to run.
 - The tests drive the executor with a circuit of their own, so timeouts in one test never open another test's circuit. A scripted provider wraps the mock to act during a call (a webhook before the response), crash before or after the provider acts, stop answering, or decline refunds.
 - Webhooks before, after and instead of the response are posted by the tests themselves, signed with the test secret; one test runs in a context with the mock's own webhooks turned on.
+
+Phase 10 details:
+
+- Race 7 delivers one `DriverUnassigned` of an unreachable driver (two recipients) twice at once: both through the inbox, where both orders occur; through the inbox and replayed past it; and replayed twice. Each ends with two notifications, one delivery each.
+- Two ratings of one person at once, and two ratings of one side of a ride at once, are forced to queue behind a gate on the person's summary: all ratings count in the first, one is stored and the other gets `409 ALREADY_RATED` in the second.
+- Delivery tests drive the executor with scripted providers: failing every time (the backoff to `DEAD`), stalling past the lease while another worker claims the delivery, and recording the send from another worker. Other tests' pending deliveries are put off a day first.
+- The end-to-end test takes rides through every FR-N1 moment (a fare paid, a fare declined, a cancellation, a search timing out), delivers their events, sends the charges through the payment poller and the pushes through the notification poller, and finds every kind sent once.
 
 ### 17.3 Invariant checks
 
@@ -2779,6 +2843,7 @@ As built: the sweeper's interval and safety-valve thresholds and the reconcile i
 | `ride.payments.not-received-after`, `webhook-tolerance` | `2m`, `5m` | §11.3, §11.4 (phase 9) |
 | `ride.payments.currency` | `INR` | Totals over no rows (phase 9) |
 | `ride.payments.mock.*` | §11.9 | Mock behaviour: `latency-median` `300ms`, `latency-p99` `2s`, `decline-rate` `0.05`, `timeout-rate` `0.02`, `webhook-secret`, `webhooks.enabled` `true`, `webhooks.url`, `webhooks.max-delay` `30s`, `webhooks.duplicate-rate` `0.10`, `webhooks.early-rate` `0.20` |
+| `ride.notifications.poll-interval`, `workers`, `lease`, `backoff` | `500ms`, `1`, `30s`, `1s,5s,30s,2m,5m` | Deliveries (§15.4, phase 10) |
 | `ride.security.jwt.issuer`, `access-ttl`, `refresh-ttl`, `refresh-reuse-grace` | `ride-hailing`, `15m`, `30d`, `10s` | §12.2 |
 | `ride.security.jwt.keys` | empty: generated in `local` and `test` only | §12.3; EC P-256 private JWKs |
 | `ride.security.otp.ttl`, `max-attempts`, `fixed-code`, `hmac-secret` | `5m`, `5`, unset, unset | §12.1; `fixed-code` only in local and test profiles; `hmac-secret` generated there when unset |
