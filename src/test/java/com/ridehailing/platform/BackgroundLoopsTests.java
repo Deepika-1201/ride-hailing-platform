@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.ridehailing.support.Effects;
 import com.ridehailing.support.Eventually;
 import com.ridehailing.support.IntegrationTest;
+import com.ridehailing.support.Postgis;
 import com.ridehailing.support.ScriptedConsumer;
 import com.ridehailing.support.ScriptedTimerHandler;
 import java.time.Duration;
@@ -20,15 +21,27 @@ import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** The loops as they run in production: started with the application, each with its role in the logging context. */
+/**
+ * The loops as they run in production: started with the application, each with its role in the logging context. On a
+ * database of their own: the relay delivers in ID order, and the shared one holds every event other classes left
+ * unpublished.
+ */
 @TestPropertySource(properties = "ride.workers.autostart=true")
 @DirtiesContext
 class BackgroundLoopsTests extends IntegrationTest {
 
     private static final Duration PATIENCE = Duration.ofSeconds(10);
+
+    /** Bound onto the pool after {@code spring.datasource.url}, so it replaces the shared database. */
+    @DynamicPropertySource
+    static void ownDatabase(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.hikari.jdbc-url", () -> Postgis.database("background_loops"));
+    }
 
     @Autowired
     private Outbox outbox;
@@ -56,10 +69,6 @@ class BackgroundLoopsTests extends IntegrationTest {
         Effects.reset(jdbc);
         firstConsumer.reset();
         timerHandler.reset();
-        // A relay lease left by an earlier test's node would keep this process's relay idle until it expired.
-        jdbc.sql("DELETE FROM platform.leases WHERE name = 'outbox-relay' AND holder <> :me")
-                .param("me", instance.value())
-                .update();
     }
 
     @Test

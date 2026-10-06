@@ -3,7 +3,10 @@ package com.ridehailing.support;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -41,5 +44,23 @@ public final class Postgis {
     public static Connection connection() throws SQLException {
         PostgreSQLContainer database = shared();
         return DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword());
+    }
+
+    /** The JDBC URL of another database in the shared container, created on first use. */
+    public static synchronized String database(String name) {
+        PostgreSQLContainer container = shared();
+        try (Connection connection = connection();
+                PreparedStatement exists = connection.prepareStatement("SELECT 1 FROM pg_database WHERE datname = ?")) {
+            exists.setString(1, name);
+            try (ResultSet found = exists.executeQuery(); Statement create = connection.createStatement()) {
+                if (!found.next()) {
+                    create.execute("CREATE DATABASE " + name);
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Couldn't create the database " + name, e);
+        }
+        return "jdbc:postgresql://" + container.getHost() + ":"
+                + container.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT) + "/" + name;
     }
 }

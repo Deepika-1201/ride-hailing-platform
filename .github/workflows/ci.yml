@@ -69,6 +69,8 @@ jobs:
         run: ./scripts/payment-smoke.sh
       - name: Rate each other after a ride as a seeded rider and driver, and see the ride's notifications sent
         run: ./scripts/rating-smoke.sh
+      - name: Suspend and reinstate a seeded driver, list rides and read a ride's timeline as operations, then cancel it
+        run: ./scripts/ops-smoke.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

@@ -7,9 +7,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.support.SqlArrayValue;
 import org.springframework.stereotype.Repository;
 
 /** Rating windows, ratings and summaries (LLD §4.7, §13.4). */
@@ -116,6 +120,18 @@ public class RatingRepository {
                 .param("party", party)
                 .query((row, rowNumber) -> new SummaryRow(row.getBigDecimal("average"), row.getInt("count")))
                 .optional();
+    }
+
+    public Map<UUID, SummaryRow> summaries(Collection<UUID> userIds, String party) {
+        Map<UUID, SummaryRow> found = new HashMap<>();
+        jdbc.sql("SELECT user_id, average, count FROM rating.summaries WHERE party = :party AND user_id = ANY(:ids)")
+                .param("party", party)
+                .param("ids", new SqlArrayValue("uuid", userIds.toArray()))
+                .query(row -> {
+                    found.put(row.getObject("user_id", UUID.class),
+                            new SummaryRow(row.getBigDecimal("average"), row.getInt("count")));
+                });
+        return found;
     }
 
     private static RatingRow rating(ResultSet row, int rowNumber) throws SQLException {

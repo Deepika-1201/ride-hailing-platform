@@ -30,7 +30,10 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   becomes dues, which refuse the next booking until the rider pays them with a card that succeeds; operations then
   refund part of the charge, and the driver's earnings show the trip. `scripts/rating-smoke.sh` has a random seeded
   rider and driver take a ride and rate each other, is refused a second rating, and sees the ride's notifications
-  sent. The picks are random so that a rerun after a failed run, which can leave a ride open, starts afresh.
+  sent. `scripts/ops-smoke.sh` signs in as the seeded operations user: a random seeded driver is suspended (taken
+  offline and refused going online) and reinstated, a seeded rider's ride shows in the active rides with its
+  timeline, and operations cancel it. The picks are random so that a rerun after a failed run, which can leave a
+  ride open, starts afresh.
 - Payments go to an in-process mock provider (LLD §11.9). Card tokens choose its answer: `tok_ok`, `tok_decline`,
   `tok_timeout_failed`, `tok_timeout_succeeded` and `tok_webhook_only`; other tokens draw from its decline and timeout
   rates. It posts signed webhooks to the application, late, duplicated or ahead of its answer.

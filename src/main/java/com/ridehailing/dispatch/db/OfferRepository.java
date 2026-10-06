@@ -52,6 +52,12 @@ public class OfferRepository {
                 .single();
     }
 
+    /** The ride's offers, oldest first. */
+    public List<OfferRow> ofRide(UUID rideId) {
+        return jdbc.sql(COLUMNS + "WHERE ride_id = :rideId ORDER BY created_at, id").param("rideId", rideId)
+                .query(OfferRepository::offer).list();
+    }
+
     public Optional<OfferRow> find(UUID id) {
         return jdbc.sql(COLUMNS + "WHERE id = :id").param("id", id).query(OfferRepository::offer).optional();
     }

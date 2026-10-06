@@ -1,6 +1,7 @@
 package com.ridehailing.dispatch;
 
 import com.ridehailing.ride.RideView;
+import com.ridehailing.shared.Actor;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Money;
 import java.time.Instant;
@@ -36,6 +37,16 @@ public interface DispatchApi {
 
     /** §8.7: declining again is no change; {@code 409 OFFER_NO_LONGER_AVAILABLE} if the offer ended otherwise. */
     OfferView decline(UUID offerId, UUID driverId);
+
+    /**
+     * Acts on the driver's suspension in the caller's transaction, which it requires (LLD §8.8): withdraws a pending
+     * offer, takes an online driver offline, and marks a driver on a ride to go offline when it ends. {@code 409
+     * INVALID_TRANSITION} if an offer reached the driver between its read and its lock.
+     */
+    void driverSuspended(UUID driverId, Actor ops);
+
+    /** A driver reinstated during the ride they were suspended in stays online after it (LLD §8.8). */
+    void driverReinstated(UUID driverId);
 
     /** Drivers {@code ASSIGNED} or {@code ON_TRIP}, in the city or in all when {@code cityId} is null (I4). */
     List<BusyDriver> busyDrivers(String cityId);

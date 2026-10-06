@@ -79,7 +79,7 @@ spikes/                           throwaway measurements (not product code)
 | `com.ridehailing.<module>` | The module's API: `…Api` interfaces, command and view records, enums, service-provider interfaces | The only package other modules may import |
 | `….domain` | Aggregates, state machines, policies (fees, fares, ranking) | Plain Java: no Spring, no SQL, no I/O |
 | `….app` | Application services: one method per command or query; transaction boundaries; role and ownership checks | Transactions start here and nowhere else |
-| `….db` | Repositories on `JdbcClient`, row mappers | SQL names only the module's own schema |
+| `….db` | Repositories on `JdbcClient`, row mappers | SQL names only the module's own schema; reads end in `list()`, `optional()` or `single()`, because a `stream()` keeps its pooled connection until it is closed |
 | `….web` | `@ApiController` classes, request and response records | No business logic |
 | `….jobs` | Pollers, consumers and scheduled jobs | Each declares its role (§1.3) |
 
@@ -126,7 +126,7 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 | `notification` | `platform`, `shared` | One-time-code SMS for identity; consumes events as JSON |
 | `identity` | `notification`, `audit`, `platform`, `shared` | Sends one-time codes |
 | `rider` | `rating`, `audit`, `platform`, `shared` | The rider's own rating in their profile (added in phase 10) |
-| `driver` | `identity`, `geography`, `audit`, `platform`, `shared` | Admins create a driver's user; a driver's city and vehicles' categories must exist there (added in phase 4) |
+| `driver` | `identity`, `geography`, `rating`, `audit`, `platform`, `shared` | Admins create a driver's user; a driver's city and vehicles' categories must exist there (added in phase 4); the driver's rating in admin views (added in phase 11) |
 | `geography` | `audit`, `platform`, `shared` | Owns cities, areas, zones, categories and the `RoutingProvider` |
 | `rating` | `audit`, `platform`, `shared` | Opens rating windows from `TripCompleted` (JSON) |
 | `location` | `geography`, `notification`, `platform`, `shared` | City bounds; live index; the "driver arriving" notification (V2) |
@@ -134,7 +134,7 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 | `payment` | `rider`, `geography`, `audit`, `platform`, `shared` | Payment methods; the city's time zone for earnings days (added in phase 9); consumes ride events as JSON |
 | `ride` | `pricing`, `payment`, `rider`, `rating`, `location`, `audit`, `platform`, `shared` | Consume quote, check dues, payment method, rider snapshot, arrival distance |
 | `dispatch` | `ride`, `driver`, `rating`, `location`, `geography`, `audit`, `platform`, `shared` | Assignment, eligibility, driver snapshot, candidates, policies |
-| `operations` | `ride`, `dispatch`, `driver`, `payment`, `notification`, `location`, `audit`, `platform`, `shared` | Read models and orchestrated operations commands |
+| `operations` | `ride`, `dispatch`, `driver`, `payment`, `notification`, `rating`, `location`, `audit`, `platform`, `shared` | Read models and orchestrated operations commands; the driver's rating in suspension answers (added in phase 11) |
 
 The graph is acyclic. Two runtime calls go against it, both by design (ADR-019):
 - **Events** travel as JSON (§15), so payment, notification and rating consume ride events without depending on `ride`.
@@ -176,8 +176,8 @@ public interface RideQueries {
     Optional<RideView> find(UUID rideId);
     Page<RideSummary> history(UUID userId, Party party, Cursor cursor);
     Optional<RideView> activeRide(UUID userId, Party party);
+    Page<RideView> list(RideFilter filter, Cursor cursor, int limit);   // operations' list (phase 11)
     List<TransitionView> transitions(UUID rideId);
-    List<RideView> overdue(Map<RideStatus, Duration> thresholds, int limit);   // stuck-ride detector
 }
 public interface RideAssignment {                       // dispatch only
     Optional<SearchingRide> lockIfSearching(UUID rideId);   // SELECT … FOR SHARE (§8.3)
@@ -186,7 +186,9 @@ public interface RideAssignment {                       // dispatch only
 }
 public interface RideOperations {                       // operations only
     RideView cancelBySystem(UUID rideId, Actor ops, String reason, Optional<FeeRequest> fee);  // T13
-    void resolveFlag(UUID flagId, Actor ops, String resolution);
+    Page<FlagView> flags(FlagFilter filter, Cursor cursor, int limit);
+    List<FlagView> flagsOfRide(UUID rideId);
+    FlagView resolveFlag(UUID flagId, Actor ops, String resolution);   // 409 FLAG_ALREADY_RESOLVED
 }
 public interface RideDispatchParticipant {              // declared by ride, implemented by dispatch
     Duration searchStarted(SearchStarted search);           // T1, T6, T7; answers the city's search timeout (phase 7)
@@ -204,12 +206,13 @@ public interface DispatchApi {
     void markOfferSeen(UUID offerId, UUID driverId);        // WebSocket acknowledgement (V2)
     RideView accept(UUID offerId, UUID driverId);           // T2
     OfferView decline(UUID offerId, UUID driverId);
-    void onDriverSuspended(UUID driverId);                  // operations, same transaction as the suspension
+    void driverSuspended(UUID driverId, Actor ops);         // operations, in the suspension's transaction (§8.8)
+    void driverReinstated(UUID driverId);
 }
-public interface DispatchQueries {
+public interface DispatchQueries {                      // operations (phase 11)
     List<DecisionView> decisions(UUID rideId);
-    List<OfferView> offers(UUID rideId);
-    Page<DriverStatusView> drivers(CityId city, Optional<AvailabilityStatus> status, Cursor cursor);
+    List<OfferRecord> offers(UUID rideId);
+    Page<DriverStatusView> drivers(String cityId, AvailabilityStatus status, Cursor cursor, int limit);
 }
 
 // location
@@ -228,7 +231,7 @@ public interface PricingApi {
 // payment
 public interface PaymentApi {
     Money outstandingDues(UUID riderId);                    // checked in the booking transaction
-    List<ChargeView> charges(UUID rideId);
+    RidePayments ofRide(UUID rideId);                       // charges with their attempts, and refunds (timeline)
     Page<ChargeView> charges(ChargeFilter filter, Cursor cursor);        // operations
     RefundView refund(UUID chargeId, Money amount, String reason, Actor ops);
     EarningsView earnings(UUID driverId, LocalDate from, LocalDate to);
@@ -238,14 +241,16 @@ public interface PaymentApi {
 public interface RiderApi {
     Optional<PaymentMethodView> paymentMethod(UUID riderId, Optional<UUID> methodId);  // default when empty
     Optional<PaymentMethodView> onlineMethod(UUID riderId, UUID preferredId);  // the method to charge (§11.10, phase 9)
-    RiderSnapshot snapshot(UUID riderId);                   // first name and rating
+    RiderSnapshot snapshot(UUID riderId);                   // first name; the rating comes from RatingApi (phase 10)
 }
 public interface DriverApi {
     Eligibility lockEligibility(UUID driverId, UUID vehicleId);   // driver row FOR SHARE (§6.1)
-    DriverSnapshot snapshot(UUID driverId, UUID vehicleId);       // first name, rating, vehicle
+    DriverSnapshot snapshot(UUID driverId, UUID vehicleId);       // first name and vehicle; the rating from RatingApi
     Optional<DriverProfile> profile(UUID driverId);               // GET /v1/drivers/me, served by dispatch (§13.3)
-    void suspend(UUID driverId, Actor ops, String reason);
-    void reinstate(UUID driverId, Actor ops, String reason);
+    boolean suspend(UUID driverId, Actor ops, String reason);     // driver FOR UPDATE; false if suspended already (§8.8)
+    boolean reinstate(UUID driverId, Actor ops, String reason);
+    Optional<AdminDriverView> admin(UUID driverId);               // the admin view, with the rating (phase 11)
+    List<UUID> suspended(String cityId);                          // I8
 }
 public interface GeographyApi {
     Optional<CityView> city(String cityId);                 // cached; currency and time zone
@@ -259,16 +264,23 @@ public interface RoutingProvider {
     Optional<Route> route(GeoPoint from, GeoPoint to, ZonedDateTime departure);   // empty: no route
     DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);  // V4, for ETA ranking
 }
-public interface RatingApi { RatingSummary summary(UUID userId, Party party); }
+public interface RatingApi {
+    RatingSummary summary(UUID userId, Party party);
+    Map<UUID, RatingSummary> summaries(Collection<UUID> userIds, Party party);   // admin lists (phase 11)
+}
 public interface IdentityApi { UUID ensureUser(String phone, Set<UserRole> roles); }  // creates, or adds the roles; joins the caller's transaction
 public interface NotificationApi {
     void sendOneTimeCode(String phone, String code);       // synchronous, never stored (§12.1)
-    void notify(Notice notice);                             // joins the caller's transaction
+    List<NotificationView> ofRide(UUID rideId);             // with their deliveries (timeline, phase 11)
 }
-public interface AuditLog { void record(AuditEntry entry); }   // joins the caller's transaction
+public interface AuditLog {
+    void record(AuditEntry entry);                          // joins the caller's transaction
+    List<AuditRecord> entries(String entityType, Collection<String> entityIds);   // oldest first (timeline, phase 11)
+}
 
 // platform
 public interface Outbox { void append(DomainEvent event); }    // joins the caller's transaction
+public interface EventLog { List<EventEnvelope> byPartitionKey(UUID key); }   // oldest first (timeline, phase 11)
 public interface EventConsumer { String name(); Set<String> eventTypes(); void handle(EventEnvelope event); }  // §5.3
 public interface FailedDeliveries { boolean redrive(String consumer, UUID eventId); }
 public interface Timers {
@@ -758,6 +770,8 @@ CREATE INDEX rides_driver_history ON ride.rides (driver_id, requested_at DESC, i
 CREATE INDEX rides_active ON ride.rides (city_id, status, requested_at)
   WHERE status IN ('SEARCHING','DRIVER_ASSIGNED','DRIVER_ARRIVED','IN_TRIP');
 CREATE INDEX rides_by_zone ON ride.rides (city_id, pickup_zone, requested_at);        -- surge demand (V4)
+CREATE INDEX rides_newest ON ride.rides (requested_at DESC, id DESC);                 -- operations' list (phase 11)
+CREATE INDEX rides_by_status ON ride.rides (status, requested_at DESC, id DESC);
 
 CREATE TABLE ride.transitions (
   id          uuid PRIMARY KEY,
@@ -1644,6 +1658,18 @@ after commit: mirror; push driver_status on drv:{id} (V2)
 
 Reinstatement clears `suspended`. The driver then goes online again normally.
 
+Phase 11 details:
+
+- Operations serves both endpoints (roles `OPS` and `ADMIN`, Idempotency-Key). It calls `DriverApi.suspend`, then `DispatchApi.driverSuspended`, in the key's transaction, and answers `200` with the driver as `AdminDriver`, their availability as `status`. A user who isn't a driver gets `404`.
+- `DriverApi.suspend` locks the driver row. Suspending a suspended driver changes nothing and keeps the first reason, and dispatch isn't called. Otherwise it sets `suspended` and `suspension_reason` and writes a `SUSPENSION` row in `status_changes`, `DriverSuspended` and the audit entry `driver.suspend`.
+- `DispatchApi.driverSuspended` works like going offline (§8.2). It reads the availability row and locks a pending offer first (§6.1), withdrawing it with reason `SUSPENDED` and making the ride's task due at once. Then it locks the row:
+  - `AVAILABLE`, or `OFFERED` with that offer: `OFFLINE`, session reason `SUSPENDED`.
+  - `ASSIGNED` or `ON_TRIP`: `offline_after_ride`. The ride continues and ends with the driver offline (§2.3).
+  - `OFFERED` with an offer that arrived between the read and the lock: `409 INVALID_TRANSITION`. The transaction rolls back, the key is released, and operations try again. Locking that offer after the row would break the lock order.
+- Reinstating a driver who isn't suspended changes nothing. Otherwise it clears `suspended`, writes a `REINSTATEMENT` row, `DriverReinstated` and the audit entry `driver.reinstate`, and `DispatchApi.driverReinstated` clears `offline_after_ride` for a driver still on the ride they were suspended during.
+- Going online stays refused while suspended. Eligibility reads the driver row `FOR SHARE` (§8.2), so it waits for a suspension in progress and then sees it.
+- I8 (§17.3): no suspended driver is `AVAILABLE` or `OFFERED`.
+
 ### 8.9 Sweeper
 
 Runs in the `dispatch` role every 5 s per city:
@@ -2395,6 +2421,32 @@ Every phase-4 response is checked against `openapi.yaml` by the contract tests (
 
   The rider module now depends on rating for its profile (§2.1). Admin and operations driver views gain the rating with phase 11's driver lists.
 
+### 13.5 Operations (phase 11)
+
+Everything here is under `/v1/ops`, for roles `OPS` and `ADMIN`. The operations module serves it over the other modules' APIs; it owns no tables.
+
+- **Lists**, newest first with cursors (§13.1):
+  - `GET /v1/ops/rides?status=…&city_id=…`: rides in any of the statuses, by `requested_at`, as operations see them (everything but the PIN). The indexes `rides_newest` and `rides_by_status` serve it (§4.5).
+  - `GET /v1/ops/drivers?city_id=…&status=…`: availability rows by `status_changed_at`. Drivers who never went online have no row and aren't listed; the admin list has every driver. A driver whose status changes while operations page through may appear twice or not at all.
+  - `GET /v1/ops/flags?open=true&kind=…`: the review queue (§7.11), by `created_at`.
+- **`POST /v1/ops/flags/{id}/resolve {resolution}`** sets `resolved_at`, `resolved_by` and `resolution`, with the audit entry `flag.resolve`. An unknown flag is `404`; a resolved one is `409 FLAG_ALREADY_RESOLVED`. The OpenAPI document gives this command no Idempotency-Key, so a retry after a lost response reads the flag in the list.
+- **The timeline**, `GET /v1/ops/rides/{id}/timeline`, answers "why did this take so long?" from the ride's data alone (FR-O1, FR-DS6). A ride that doesn't exist is `404`.
+
+  | Kind | From | One entry per | `at` |
+  |---|---|---|---|
+  | `TRANSITION` | `RideQueries.transitions` | transition, with its command, actor and reason | `occurred_at` |
+  | `DISPATCH_DECISION` | `DispatchQueries.decisions` | search attempt: radius, outcome, candidates and exclusions | `created_at` |
+  | `OFFER` | `DispatchQueries.offers` | offer: driver, rank, distance, outcome, whether it was seen | `created_at` |
+  | `EVENT` | `EventLog.byPartitionKey` | event of the ride and its offers, charges and refunds, with correlation and causation IDs | `occurred_at` |
+  | `CHARGE`, `REFUND` | `PaymentApi.ofRide` | charge, with its attempts; refund | `created_at` |
+  | `NOTIFICATION` | `NotificationApi.ofRide` | notification, with its delivery | `created_at` |
+  | `FLAG` | `RideOperations.flagsOfRide` | flag opened, and flag resolved | `created_at`, `resolved_at` |
+  | `AUDIT` | `AuditLog.entries` | entry about one of the ride's charges, refunds or flags (the ride's own entries repeat its transitions) | `occurred_at` |
+
+  - Entries are ordered by `at`, then by kind in the table's order, then by their order in the source.
+  - `summary` is one line for people. `data` holds the source's fields; like the events, it never holds a PIN or a phone number (NFR-10).
+  - Events, decisions and audit entries leave with their retention (§5.7), so an old ride's timeline is shorter.
+
 ## 14. Realtime (V2)
 
 Decisions in [ADR-006](decisions/ADR-006-realtime-transport.md) and [ADR-020](decisions/ADR-020-valkey-access.md). Message schemas: [schemas/websocket/](schemas/websocket/).
@@ -2562,7 +2614,7 @@ Decisions in [ADR-017](decisions/ADR-017-observability.md); metric list in [HLD 
 | `dispatch_search_attempts_total{outcome}`, `dispatch_reservation_conflicts_total` | Each search attempt (§8.3) |
 | `rides_not_matched_total`, `rides_stuck{status}` | T3; stuck-ride detector |
 | `location_updates_total{result}`, `location_pipeline_seconds` | Ingestion (§9.6): receive → script applied and position published |
-| `live_drivers{status}`, `active_rides{status}` | Gauges refreshed every 15 s from the database (per city and category labels) |
+| `live_drivers{status}`, `active_rides{status}` | Gauges refreshed every 5 s from the database (per city and category labels) |
 | `websocket_connections{kind}` | Realtime sessions (V2) |
 | `payment_charges_total{outcome}`, `notification_deliveries_total{channel,outcome}` | Executor; delivery job |
 | `outbox_oldest_unpublished_seconds`, `timers_overdue_seconds`, `search_tasks_due` | Gauges every 5 s |
@@ -2574,7 +2626,11 @@ Decisions in [ADR-017](decisions/ADR-017-observability.md); metric list in [HLD 
   - `dispatch_first_offer_seconds` is recorded for the first offer of a ride with no earlier offer. Both times are database times (`requested_at`, the offer's `created_at`), so the application's clock doesn't enter.
   - Prometheus needs every meter of a name to carry the same labels. Counters labelled by city therefore appear with their city's first ride rather than at zero; only the outcome counters and `dispatch_reservation_conflicts_total` are registered at startup.
   - The two timers publish histogram buckets, so p95 is computed in Prometheus.
-  - The gauges in the table (`live_drivers`, `active_rides`, `outbox_oldest_unpublished_seconds`, `timers_overdue_seconds`, `search_tasks_due`) are not built yet. They come with the operations views in phase 11.
+  - The gauges in the table (`live_drivers`, `active_rides`, `outbox_oldest_unpublished_seconds`, `timers_overdue_seconds`, `search_tasks_due`) came with the operations views in phase 11.
+- Phase 11 details:
+  - Every `worker` node refreshes the gauges every 5 s, so each node exports fresh values and dashboards take the maximum over instances. The refreshers are pollers that always answer they found nothing: `platform-gauges`, `dispatch-gauges` and `ride-gauges`.
+  - `outbox_oldest_unpublished_seconds` is the age of the oldest unpublished event and `timers_overdue_seconds` how long the earliest due timer that isn't parked has waited; both are 0 when there is none.
+  - `live_drivers{city,category,status}` counts online drivers by status, and `active_rides{city,category,status}` active rides. A label set appears with its first count and reads 0 once its count is, so no gauge is left at a stale value.
 - Labels are limited to city, category, status, outcome, channel and kind (ADR-017).
 
 ### 16.2 Traces and logs
@@ -2646,6 +2702,16 @@ Phase 10 details:
 - Delivery tests drive the executor with scripted providers: failing every time (the backoff to `DEAD`), stalling past the lease while another worker claims the delivery, and recording the send from another worker. Other tests' pending deliveries are put off a day first.
 - The end-to-end test takes rides through every FR-N1 moment (a fare paid, a fare declined, a cancellation, a search timing out), delivers their events, sends the charges through the payment poller and the pushes through the notification poller, and finds every kind sent once.
 
+Phase 11 details:
+
+- Race 9 suspends a driver as they accept their offer. Either the acceptance commits first, and the driver is `ASSIGNED` with `offline_after_ride` while the ride goes on, or the suspension withdraws the offer and the acceptance gets `409 OFFER_NO_LONGER_AVAILABLE`. Both orders occur.
+- A second race suspends a driver as a search attempt offers them the ride. The driver ends offline with no pending offer and the ride keeps searching. A suspension that met an offer arriving between its read and its lock gets `409` and succeeds when tried again.
+- I3 and I8 run after every repetition of both.
+- The suspension's own test checks that one commit withdraws the pending offer (`OfferWithdrawn`, reason `SUSPENDED`), makes the ride's task due, cancels the offer's timer, takes the driver offline (`DriverWentOffline`, reason `SUSPENDED`) and appends `DriverSuspended`.
+- The timeline test takes one ride through a search that finds nobody, an offer that expires unseen, an offer declined, an acceptance, the driver's cancellation, a second search and acceptance, the trip, the fare's charge and an operations refund. It then reads the wait for a driver from the timeline alone.
+- The admin driver list read vehicles through a `stream()` it never closed, so every call kept a pooled connection (from phase 4). The tests that line five requests up behind a lock found it once the test context's pool had only five connections left. A test now reads the list more times than the pool has connections (§1.2).
+- The one test class whose loops start with the application runs on a database of its own in the test container. The relay delivers in ID order, and on the shared database it would first deliver every event that classes driving their loops step by step left unpublished.
+
 ### 17.3 Invariant checks
 
 Each module implements `InvariantCheck` over its own tables; operations runs them all and compares across modules through APIs. From V2 they are served at `GET /v1/ops/invariants`, which the simulator calls after every run.
@@ -2661,6 +2727,7 @@ Phase 7 details: `InvariantCheck.violations(cityId)` checks one city, or all wit
 | I5 | Every transition row follows the transition table | ride |
 | I6 | A terminal ride has no pending offer, no search task and no timer | operations |
 | I7 | One charge per ride and purpose; refunds never exceed their charge | payment |
+| I8 | No suspended driver is `AVAILABLE` or `OFFERED` | operations, across driver and dispatch |
 
 Phase 8 details:
 

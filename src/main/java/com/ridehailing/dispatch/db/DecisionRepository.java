@@ -1,6 +1,9 @@
 package com.ridehailing.dispatch.db;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -39,6 +42,22 @@ public class DecisionRepository {
                 .update();
     }
 
+    /** The ride's decisions, oldest first; {@code detail} is JSON text. */
+    public List<DecisionRow> ofRide(UUID rideId) {
+        return jdbc.sql("""
+                        SELECT attempt, created_at, strategy, strategy_version, radius_m, outcome, chosen_driver_id,
+                               offer_id, detail::text AS detail, duration_us
+                        FROM dispatch.decisions WHERE ride_id = :rideId ORDER BY created_at, attempt
+                        """)
+                .param("rideId", rideId)
+                .query((row, rowNumber) -> new DecisionRow(row.getInt("attempt"),
+                        row.getObject("created_at", OffsetDateTime.class).toInstant(), row.getString("strategy"),
+                        row.getString("strategy_version"), row.getInt("radius_m"), row.getString("outcome"),
+                        row.getObject("chosen_driver_id", UUID.class), row.getObject("offer_id", UUID.class),
+                        row.getString("detail"), row.getInt("duration_us")))
+                .list();
+    }
+
     /** Deletes up to {@code batch} decisions older than {@code age}; answers how many. */
     public int deleteOlderThan(Duration age, int batch) {
         return jdbc.sql("""
@@ -49,5 +68,9 @@ public class DecisionRepository {
                 .param("ageS", age.toSeconds())
                 .param("batch", batch)
                 .update();
+    }
+
+    public record DecisionRow(int attempt, Instant createdAt, String strategy, String strategyVersion, int radiusM,
+            String outcome, UUID chosenDriverId, UUID offerId, String detail, int durationUs) {
     }
 }

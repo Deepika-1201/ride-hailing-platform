@@ -7,6 +7,8 @@ import com.ridehailing.driver.db.DriverRepository;
 import com.ridehailing.driver.db.DriverRepository.DriverRow;
 import com.ridehailing.driver.db.VehicleRepository;
 import com.ridehailing.geography.GeographyApi;
+import com.ridehailing.shared.Actor;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -19,11 +21,36 @@ class DriverService implements DriverApi {
     private final DriverRepository drivers;
     private final VehicleRepository vehicles;
     private final GeographyApi geography;
+    private final DriverAdministration administration;
 
-    DriverService(DriverRepository drivers, VehicleRepository vehicles, GeographyApi geography) {
+    DriverService(DriverRepository drivers, VehicleRepository vehicles, GeographyApi geography,
+            DriverAdministration administration) {
         this.drivers = drivers;
         this.vehicles = vehicles;
         this.geography = geography;
+        this.administration = administration;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean suspend(UUID driverId, Actor ops, String reason) {
+        return administration.suspend(driverId, ops, reason);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean reinstate(UUID driverId, Actor ops, String reason) {
+        return administration.reinstate(driverId, ops, reason);
+    }
+
+    @Override
+    public Optional<AdminDriver> admin(UUID driverId) {
+        return administration.find(driverId);
+    }
+
+    @Override
+    public List<UUID> suspended(String cityId) {
+        return drivers.suspended(cityId);
     }
 
     @Override

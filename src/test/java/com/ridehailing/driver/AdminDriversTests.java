@@ -12,10 +12,13 @@ import com.ridehailing.support.TestCities;
 import com.ridehailing.support.TestCities.TestCity;
 import com.ridehailing.support.TestUsers;
 import com.ridehailing.support.TestUsers.TestUser;
+import com.zaxxer.hikari.HikariDataSource;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +46,9 @@ class AdminDriversTests extends IntegrationTest {
 
     @Autowired
     private JdbcClient jdbc;
+
+    @Autowired
+    private DataSource dataSource;
 
     private TestUser admin;
     private TestCity city;
@@ -159,6 +165,18 @@ class AdminDriversTests extends IntegrationTest {
                 "VALIDATION_FAILED");
         assertProblem("GET", DRIVERS, call("GET", admin.authorization(), DRIVERS + "?limit=101", null), 400,
                 "VALIDATION_FAILED");
+    }
+
+    /** A read that kept its connection would leave the last of these reads none. */
+    @Test
+    void theDriverListCanBeReadMoreTimesThanThePoolHasConnections() throws SQLException {
+        onboard();
+        int connections = dataSource.unwrap(HikariDataSource.class).getMaximumPoolSize();
+
+        for (int read = 0; read <= connections; read++) {
+            assertAnswered("GET", DRIVERS, call("GET", admin.authorization(), DRIVERS + "?city_id=" + city.id(), null),
+                    200);
+        }
     }
 
     @Test

@@ -68,6 +68,7 @@ public class VehicleRepository {
         return jdbc.sql(COLUMNS + "WHERE driver_id = ANY(:driverIds) ORDER BY created_at, id")
                 .param("driverIds", new SqlArrayValue("uuid", driverIds.toArray()))
                 .query(VehicleRepository::vehicle)
+                .list()
                 .stream()
                 .collect(Collectors.groupingBy(Vehicle::driverId));
     }

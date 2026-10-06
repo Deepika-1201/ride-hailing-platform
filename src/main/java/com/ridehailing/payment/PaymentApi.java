@@ -18,6 +18,9 @@ public interface PaymentApi {
     /** Operations' list of charges, newest first (§11.10). */
     Page<ChargeView> charges(ChargeFilter filter, Cursor after, int limit);
 
+    /** The ride's charges with their attempts, and their refunds, oldest first (the timeline, §13.5). */
+    RidePayments ofRide(UUID rideId);
+
     /**
      * Starts an operations refund of a succeeded online charge (§11.6); the executor sends it.
      *
@@ -42,5 +45,13 @@ public interface PaymentApi {
     /** The Refund schema of {@code openapi.yaml}. */
     record RefundView(UUID id, UUID chargeId, Money amount, String status, String reason, boolean automatic,
             Instant createdAt, Instant completedAt) {
+    }
+
+    record RidePayments(List<ChargeView> charges, List<RefundView> refunds) {
+
+        public RidePayments {
+            charges = List.copyOf(charges);
+            refunds = List.copyOf(refunds);
+        }
     }
 }

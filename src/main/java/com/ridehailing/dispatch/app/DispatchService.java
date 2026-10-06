@@ -6,6 +6,7 @@ import com.ridehailing.dispatch.db.OfferRepository;
 import com.ridehailing.dispatch.db.SearchTaskRepository;
 import com.ridehailing.platform.Timers;
 import com.ridehailing.ride.RideView;
+import com.ridehailing.shared.Actor;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -13,6 +14,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 class DispatchService implements DispatchApi {
@@ -49,6 +52,18 @@ class DispatchService implements DispatchApi {
     @Override
     public DriverStatusView status(UUID driverId) {
         return availability.status(driverId);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void driverSuspended(UUID driverId, Actor ops) {
+        availability.suspend(driverId, ops);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void driverReinstated(UUID driverId) {
+        availabilityRows.setOfflineAfterRide(driverId, false);
     }
 
     @Override

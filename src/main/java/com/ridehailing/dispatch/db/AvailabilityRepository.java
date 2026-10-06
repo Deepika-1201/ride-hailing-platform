@@ -6,6 +6,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -195,6 +196,41 @@ public class AvailabilityRepository {
                         """)
                 .param("cityId", cityId)
                 .query(String.class)
+                .list();
+    }
+
+    /** Set by a suspension during a ride and cleared by a reinstatement during it (§8.8); only while on a ride. */
+    public void setOfflineAfterRide(UUID driverId, boolean offlineAfterRide) {
+        jdbc.sql("""
+                        UPDATE dispatch.driver_availability SET offline_after_ride = :offlineAfterRide
+                        WHERE driver_id = :driverId AND status IN ('ASSIGNED', 'ON_TRIP')
+                        """)
+                .param("offlineAfterRide", offlineAfterRide)
+                .param("driverId", driverId)
+                .update();
+    }
+
+    /**
+     * Operations' list (LLD §13.5): by the latest status change, newest first after the cursor; {@code cityId} and
+     * {@code status} filter when not null.
+     */
+    public List<AvailabilityRow> list(String cityId, AvailabilityStatus status, Instant afterChangedAt,
+            UUID afterDriverId, int limit) {
+        return jdbc.sql(COLUMNS + """
+                        WHERE (CAST(:cityId AS text) IS NULL OR city_id = :cityId)
+                          AND (CAST(:status AS text) IS NULL OR status = :status)
+                          AND (CAST(:afterChangedAt AS timestamptz) IS NULL
+                               OR (status_changed_at, driver_id)
+                                  < (CAST(:afterChangedAt AS timestamptz), CAST(:afterDriverId AS uuid)))
+                        ORDER BY status_changed_at DESC, driver_id DESC
+                        LIMIT :limit
+                        """)
+                .param("cityId", cityId)
+                .param("status", status == null ? null : status.name())
+                .param("afterChangedAt", afterChangedAt == null ? null : afterChangedAt.atOffset(ZoneOffset.UTC))
+                .param("afterDriverId", afterDriverId)
+                .param("limit", limit)
+                .query(AvailabilityRepository::row)
                 .list();
     }
 

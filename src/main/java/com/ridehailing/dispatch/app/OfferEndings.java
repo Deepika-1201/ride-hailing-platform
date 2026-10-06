@@ -74,6 +74,13 @@ class OfferEndings {
         return withdrawn;
     }
 
+    /** Because the driver was suspended (§8.8); the search goes on at once. */
+    OfferRow withdrawFromSuspended(OfferRow offer) {
+        OfferRow withdrawn = withdraw(offer, "SUSPENDED");
+        tasks.makeDue(offer.rideId());
+        return withdrawn;
+    }
+
     /** Offer events belong to the offer and are ordered with the ride's events. */
     static DomainEvent event(String type, int version, OfferRow offer, Object payload) {
         return new DomainEvent(type, version, "offer", offer.id(), offer.version(), offer.rideId(), payload);

@@ -41,6 +41,10 @@ class OutboxRows {
         return jdbc.sql(COLUMNS + "WHERE event_id = :eventId").param("eventId", eventId).query(this::row).optional();
     }
 
+    List<Row> byPartitionKey(UUID key) {
+        return jdbc.sql(COLUMNS + "WHERE partition_key = :key ORDER BY id").param("key", key).query(this::row).list();
+    }
+
     /** Marks rows published only while {@code holder} still has the lease with {@code token}, in one statement. */
     int markPublished(List<Long> ids, String lease, String holder, long token) {
         return jdbc.sql("""

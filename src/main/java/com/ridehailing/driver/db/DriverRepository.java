@@ -89,6 +89,34 @@ public class DriverRepository {
                 .single();
     }
 
+    /** {@code reason} is null when the suspension is lifted. */
+    public DriverRow setSuspended(UUID id, boolean suspended, String reason) {
+        return jdbc.sql("""
+                        UPDATE driver.drivers
+                        SET suspended = :suspended, suspension_reason = :reason, updated_at = now(),
+                            version = version + 1
+                        WHERE id = :id
+                        RETURNING id, city_id, first_name, last_name, verification, suspended, suspension_reason,
+                                  created_at, version
+                        """)
+                .param("suspended", suspended)
+                .param("reason", reason)
+                .param("id", id)
+                .query(DriverRepository::driver)
+                .single();
+    }
+
+    /** {@code cityId} null: every city. */
+    public List<UUID> suspended(String cityId) {
+        return jdbc.sql("""
+                        SELECT id FROM driver.drivers
+                        WHERE suspended AND (CAST(:cityId AS text) IS NULL OR city_id = :cityId)
+                        """)
+                .param("cityId", cityId)
+                .query(UUID.class)
+                .list();
+    }
+
     public void recordStatusChange(UUID id, UUID driverId, String kind, String from, String to, String reason,
             String actorId, Instant occurredAt) {
         jdbc.sql("""

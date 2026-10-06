@@ -1,11 +1,15 @@
 package com.ridehailing.ride.app;
 
+import com.ridehailing.platform.Cursor;
 import com.ridehailing.platform.InvariantCheck;
 import com.ridehailing.platform.Timers;
 import com.ridehailing.ride.RideQueries;
 import com.ridehailing.ride.RideStatus;
 import com.ridehailing.ride.RideView;
 import com.ridehailing.ride.db.RideRepository;
+import com.ridehailing.ride.db.RideRepository.RideRow;
+import com.ridehailing.ride.db.TransitionRepository;
+import com.ridehailing.shared.Page;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
@@ -21,11 +25,13 @@ class RideQueryService implements RideQueries, InvariantCheck {
     static final Duration RECENTLY_ENDED = Duration.ofDays(1);
 
     private final RideRepository rides;
+    private final TransitionRepository transitions;
     private final RideViews views;
     private final Timers timers;
 
-    RideQueryService(RideRepository rides, RideViews views, Timers timers) {
+    RideQueryService(RideRepository rides, TransitionRepository transitions, RideViews views, Timers timers) {
         this.rides = rides;
+        this.transitions = transitions;
         this.views = views;
         this.timers = timers;
     }
@@ -33,6 +39,21 @@ class RideQueryService implements RideQueries, InvariantCheck {
     @Override
     public Optional<RideView> find(UUID rideId) {
         return rides.find(rideId).map(views::of);
+    }
+
+    @Override
+    public Page<RideView> list(RideFilter filter, Cursor after, int limit) {
+        List<RideRow> rows = rides.list(filter.statuses(), filter.cityId(), after == null ? null : after.createdAt(),
+                after == null ? null : after.id(), limit + 1);
+        List<RideRow> page = rows.subList(0, Math.min(limit, rows.size()));
+        String next = rows.size() > limit ? new Cursor(page.getLast().requestedAt(), page.getLast().id()).encode()
+                : null;
+        return new Page<>(page.stream().map(views::of).toList(), next);
+    }
+
+    @Override
+    public List<TransitionView> transitions(UUID rideId) {
+        return transitions.ofRide(rideId);
     }
 
     @Override

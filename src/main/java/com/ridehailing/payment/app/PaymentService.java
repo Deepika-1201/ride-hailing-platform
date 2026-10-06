@@ -5,6 +5,7 @@ import com.ridehailing.payment.db.AttemptRepository;
 import com.ridehailing.payment.db.AttemptRepository.AttemptRow;
 import com.ridehailing.payment.db.ChargeRepository;
 import com.ridehailing.payment.db.ChargeRepository.ChargeRow;
+import com.ridehailing.payment.db.RefundRepository;
 import com.ridehailing.platform.Cursor;
 import com.ridehailing.shared.Actor;
 import com.ridehailing.shared.Money;
@@ -22,12 +23,15 @@ class PaymentService implements PaymentApi {
     private final Refunds refunds;
     private final ChargeRepository charges;
     private final AttemptRepository attempts;
+    private final RefundRepository refundRows;
 
-    PaymentService(Dues dues, Refunds refunds, ChargeRepository charges, AttemptRepository attempts) {
+    PaymentService(Dues dues, Refunds refunds, ChargeRepository charges, AttemptRepository attempts,
+            RefundRepository refundRows) {
         this.dues = dues;
         this.refunds = refunds;
         this.charges = charges;
         this.attempts = attempts;
+        this.refundRows = refundRows;
     }
 
     @Override
@@ -49,6 +53,18 @@ class PaymentService implements PaymentApi {
         }
         return new Page<>(page.stream().map(charge -> view(charge, byCharge.getOrDefault(charge.id(), List.of())))
                 .toList(), next);
+    }
+
+    @Override
+    public RidePayments ofRide(UUID rideId) {
+        List<ChargeRow> rows = charges.ofRide(rideId);
+        Map<UUID, List<AttemptView>> byCharge = attempts.ofCharges(rows.stream().map(ChargeRow::id).toList()).stream()
+                .collect(Collectors.groupingBy(AttemptRow::chargeId,
+                        Collectors.mapping(PaymentService::attempt, Collectors.toList())));
+        List<RefundView> refunded = rows.stream().flatMap(charge -> refundRows.ofCharge(charge.id()).stream()
+                .map(refund -> Refunds.view(refund, charge.currency()))).toList();
+        return new RidePayments(rows.stream().map(charge -> view(charge, byCharge.getOrDefault(charge.id(),
+                List.of()))).toList(), refunded);
     }
 
     @Override

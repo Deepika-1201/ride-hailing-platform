@@ -3,7 +3,7 @@ package com.ridehailing.driver.web;
 import com.ridehailing.driver.DriverApi.Vehicle;
 import com.ridehailing.driver.Verification;
 import com.ridehailing.driver.app.DriverAdministration;
-import com.ridehailing.driver.app.DriverAdministration.AdminDriver;
+import com.ridehailing.driver.DriverApi.AdminDriver;
 import com.ridehailing.platform.AllowedRoles;
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.Caller;

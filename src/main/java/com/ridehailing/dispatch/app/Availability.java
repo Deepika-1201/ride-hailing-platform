@@ -30,6 +30,7 @@ import org.springframework.stereotype.Service;
 class Availability {
 
     static final String AGGREGATE = "availability";
+    static final String SUSPENDED = "SUSPENDED";
 
     private final AvailabilityRepository availability;
     private final SessionRepository sessions;
@@ -118,6 +119,36 @@ class Availability {
     DriverStatusView status(UUID driverId) {
         return availability.find(driverId).map(Availability::view)
                 .orElseGet(() -> DriverStatusView.neverOnline(driverId));
+    }
+
+    /**
+     * §8.8, in the caller's transaction: like going offline, but a pending offer is withdrawn and a ride in progress
+     * continues. An offer that arrived between the two reads would have to be locked after the row, so operations try
+     * again instead.
+     */
+    void suspend(UUID driverId, Actor ops) {
+        AvailabilityRow current = availability.find(driverId).orElse(null);
+        if (current == null || current.status() == AvailabilityStatus.OFFLINE) {
+            return;
+        }
+        if (current.status() == AvailabilityStatus.OFFERED) {
+            offers.lock(current.offerId()).filter(offer -> offer.status() == OfferStatus.PENDING)
+                    .ifPresent(endings::withdrawFromSuspended);
+        }
+        AvailabilityRow locked = availability.lock(driverId).orElseThrow();
+        switch (locked.status()) {
+            case OFFLINE -> {
+            }
+            case AVAILABLE -> takeOffline(locked, SUSPENDED, ops);
+            case OFFERED -> {
+                if (!locked.offerId().equals(current.offerId())) {
+                    throw new ApiException(HttpStatus.CONFLICT, "INVALID_TRANSITION",
+                            "An offer reached the driver as they were suspended; try again.");
+                }
+                takeOffline(locked, SUSPENDED, ops);
+            }
+            case ASSIGNED, ON_TRIP -> availability.setOfflineAfterRide(driverId, true);
+        }
     }
 
     /**

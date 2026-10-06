@@ -8,6 +8,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -228,6 +229,36 @@ public class RideRepository {
                 .query((row, number) -> new DrivenRide(row.getObject("driver_id", UUID.class),
                         row.getObject("id", UUID.class), RideStatus.valueOf(row.getString("status"))))
                 .list();
+    }
+
+    /**
+     * Operations' list (LLD §13.5): newest first after the cursor; no statuses means any, a null city every city. Only
+     * the filters given are in the query, so the planner can use {@code rides_by_status} or {@code rides_newest}.
+     */
+    public List<RideRow> list(Collection<RideStatus> statuses, String cityId, Instant afterRequestedAt, UUID afterId,
+            int limit) {
+        StringBuilder where = new StringBuilder("WHERE true");
+        if (!statuses.isEmpty()) {
+            where.append(" AND status = ANY(:statuses)");
+        }
+        if (cityId != null) {
+            where.append(" AND city_id = :cityId");
+        }
+        if (afterRequestedAt != null) {
+            where.append(" AND (requested_at, id) < (:afterRequestedAt, :afterId)");
+        }
+        JdbcClient.StatementSpec query = jdbc.sql(COLUMNS + where + " ORDER BY requested_at DESC, id DESC LIMIT :limit")
+                .param("limit", limit);
+        if (!statuses.isEmpty()) {
+            query = query.param("statuses", new SqlArrayValue("text", statuses.stream().map(RideStatus::name).toArray()));
+        }
+        if (cityId != null) {
+            query = query.param("cityId", cityId);
+        }
+        if (afterRequestedAt != null) {
+            query = query.param("afterRequestedAt", afterRequestedAt.atOffset(ZoneOffset.UTC)).param("afterId", afterId);
+        }
+        return query.query(RideRepository::ride).list();
     }
 
     public Map<UUID, RideStatus> statuses(Collection<UUID> ids) {

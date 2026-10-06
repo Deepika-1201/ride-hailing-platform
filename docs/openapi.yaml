@@ -802,7 +802,10 @@ paths:
       tags: [Operations]
       operationId: suspendDriver
       summary: Suspend a driver
-      description: Withdraws a pending offer at once and takes the driver offline; a ride in progress continues.
+      description: >-
+        Withdraws a pending offer at once and takes the driver offline; a ride in progress continues, and the driver
+        goes offline when it ends. Suspending a suspended driver changes nothing. `409 INVALID_TRANSITION` if an offer
+        reached the driver while they were being suspended: nothing changed, so try again.
       parameters:
         - $ref: '#/components/parameters/DriverId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -817,6 +820,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /v1/ops/drivers/{driver_id}/reinstate:
     post:
       tags: [Operations]

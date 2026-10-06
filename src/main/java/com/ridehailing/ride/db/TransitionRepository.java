@@ -1,6 +1,8 @@
 package com.ridehailing.ride.db;
 
+import com.ridehailing.ride.RideQueries.TransitionView;
 import com.ridehailing.ride.RideStatus;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -44,6 +46,21 @@ public class TransitionRepository {
                 .param("rideId", rideId)
                 .param("actorId", actorId)
                 .query(String.class)
+                .list();
+    }
+
+    /** The ride's transitions, oldest first. */
+    public List<TransitionView> ofRide(UUID rideId) {
+        return jdbc.sql("""
+                        SELECT version, from_status, to_status, command, actor_type, actor_id, reason, occurred_at,
+                               request_id
+                        FROM ride.transitions WHERE ride_id = :rideId ORDER BY version
+                        """)
+                .param("rideId", rideId)
+                .query((row, rowNumber) -> new TransitionView(row.getInt("version"), row.getString("from_status"),
+                        row.getString("to_status"), row.getString("command"), row.getString("actor_type"),
+                        row.getString("actor_id"), row.getString("reason"),
+                        row.getObject("occurred_at", OffsetDateTime.class).toInstant(), row.getString("request_id")))
                 .list();
     }
 

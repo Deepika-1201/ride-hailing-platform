@@ -9,7 +9,7 @@ import com.ridehailing.pricing.PricingApi;
 import com.ridehailing.ride.RideDispatchParticipant;
 import com.ridehailing.ride.RideDispatchParticipant.DriverRelease;
 import com.ridehailing.ride.RideDispatchParticipant.SearchStop;
-import com.ridehailing.ride.RideOperations;
+import com.ridehailing.ride.RideOperations.FeeRequest;
 import com.ridehailing.ride.RideStatus;
 import com.ridehailing.ride.RideView;
 import com.ridehailing.ride.app.Fees.RideFee;
@@ -29,7 +29,7 @@ import org.springframework.stereotype.Service;
  * state. T4 and T8 for the rider, T6 and T11 for the driver, T13 for operations.
  */
 @Service
-public class Cancellations implements RideOperations {
+public class Cancellations {
 
     private final RideRepository rides;
     private final RideCommands commands;
@@ -79,8 +79,8 @@ public class Cancellations implements RideOperations {
         });
     }
 
-    @Override
-    public RideView cancelBySystem(UUID rideId, Actor ops, String reason, Optional<FeeRequest> fee) {
+    /** T13 (LLD §7.4), for {@code RideOperations}. */
+    RideView cancelBySystem(UUID rideId, Actor ops, String reason, Optional<FeeRequest> fee) {
         return transactions.execute(() -> {
             RideRow ride = rides.lock(rideId).orElseThrow(ApiException::notFound);
             RideStatus to = RideCommands.target(ride, Command.CANCEL, ops.type());

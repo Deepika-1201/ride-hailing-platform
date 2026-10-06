@@ -1,5 +1,8 @@
 package com.ridehailing.driver;
 
+import com.ridehailing.rating.RatingApi.RatingSummary;
+import com.ridehailing.shared.Actor;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -19,7 +22,22 @@ public interface DriverApi {
     /** What a ride keeps of its driver at assignment (LLD §8.4); empty if the vehicle isn't the driver's. */
     Optional<DriverSnapshot> snapshot(UUID driverId, UUID vehicleId);
 
-    /** Ratings join it in phase 10. */
+    /**
+     * Suspends the driver (LLD §8.8) in the caller's transaction, which it requires; false if they are suspended
+     * already, which changes nothing. {@code 404} if the user isn't a driver.
+     */
+    boolean suspend(UUID driverId, Actor ops, String reason);
+
+    /** Lifts the suspension (LLD §8.8) in the caller's transaction; false if the driver isn't suspended. */
+    boolean reinstate(UUID driverId, Actor ops, String reason);
+
+    /** The driver as admins and operations see them; empty if the user isn't a driver. */
+    Optional<AdminDriver> admin(UUID driverId);
+
+    /** Suspended drivers of the city, or of every city when {@code cityId} is null (I8). */
+    List<UUID> suspended(String cityId);
+
+    /** The rating comes from the rating module (LLD §13.4). */
     record DriverSnapshot(UUID driverId, String firstName, Vehicle vehicle) {
     }
 
@@ -45,5 +63,15 @@ public interface DriverApi {
 
     record Vehicle(UUID id, UUID driverId, String category, String plate, String make, String model, String colour,
             boolean active, int version) {
+    }
+
+    /** The AdminDriver schema of {@code openapi.yaml}, but for {@code status}, which dispatch knows. */
+    record AdminDriver(UUID id, String firstName, String lastName, String cityId, Verification verification,
+            boolean suspended, String suspensionReason, RatingSummary rating, List<Vehicle> vehicles,
+            Instant createdAt) {
+
+        public AdminDriver {
+            vehicles = List.copyOf(vehicles);
+        }
     }
 }

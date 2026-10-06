@@ -154,6 +154,14 @@ public class ChargeRepository {
                 .list();
     }
 
+    /** The ride's charges, oldest first. */
+    public List<ChargeRow> ofRide(UUID rideId) {
+        return jdbc.sql(COLUMNS + "WHERE ride_id = :rideId ORDER BY created_at, id")
+                .param("rideId", rideId)
+                .query(ChargeRepository::charge)
+                .list();
+    }
+
     /** Newest first after the cursor; {@code status} and {@code unchangedFor} filter when not null. */
     public List<ChargeRow> list(String status, Duration unchangedFor, Cursor after, int limit) {
         return jdbc.sql(COLUMNS + """
