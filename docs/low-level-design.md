@@ -2753,6 +2753,7 @@ Phase 12 details, the full race suite:
 
 - The table above adds acceptance at the offer's expiry and at the search timeout, going offline as an offer arrives, two bookings at once (NFR-1's acknowledged booking is the same-key case: the second request gets the first's stored response), webhooks against status checks, and concurrent dues payments and refunds. Going online twice had been checked only one call after the other; phase 12 races it (`DispatchRaceTests.goingOnlineTwiceAtOnceOpensOneSession`).
 - These tests carry the JUnit tag `race`. `./gradlew test -Ptags=race -PraceRepetitions=1000` runs the suite alone; every build runs it at 200.
+- At 1,000 repetitions the suite makes about 17,000 test cities, each with a service area of its own. The grid that placed them had room for 16,800, so the 1,000-repetition run is what found its edge. The grid now lies west of Greenwich, where no seed or test places anything, with room for 68,000; a test that would need more fails saying so.
 
 ### 17.3 Invariant checks
 

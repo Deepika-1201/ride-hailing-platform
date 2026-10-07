@@ -24,8 +24,13 @@ import tools.jackson.databind.json.JsonMapper;
 @TestComponent
 public class TestCities {
 
-    /** Service areas are squares of this many degrees, on a grid in the South Atlantic. */
+    /** Service areas are squares of this many degrees, on a grid west of Greenwich, where no seed or test places any. */
     public static final double SIZE = 0.4;
+
+    private static final double STEP = 0.5;
+    /** South-west corners from 180° W to 10.5° W and 50° S to 49.5° N: room for the races at about 4,000 repetitions. */
+    private static final int COLUMNS = 340;
+    private static final int ROWS = 200;
 
     private static final AtomicInteger NEXT = new AtomicInteger();
     private static final Caller ADMIN = new Caller(Ids.newId(), Set.of(UserRole.ADMIN));
@@ -44,8 +49,11 @@ public class TestCities {
     /** A city with its own service area, offering the categories with default settings. */
     public TestCity create(String... offered) {
         int n = NEXT.getAndIncrement();
-        double lon = -40 + (n % 60) * 0.5;
-        double lat = -50 + (n / 60) * 0.5;
+        if (n >= COLUMNS * ROWS) {
+            throw new IllegalStateException("Every test-city square is taken after " + n + " cities");
+        }
+        double lon = -180 + (n % COLUMNS) * STEP;
+        double lat = -50 + (n / COLUMNS) * STEP;
         String id = newId();
         cities.create(ADMIN, new NewCity(id, "Test " + id, "Asia/Kolkata", "INR", polygon(lon, lat, SIZE)));
         cities.replaceServiceArea(ADMIN, id, multiPolygon(lon, lat, SIZE));
