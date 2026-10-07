@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Phase | 5 — Implementation plan |
-| Status | Approved 2026-10-02, with the [LLD](low-level-design.md) and the [architecture review](architecture-review.md). Current phase: 13 (Valkey), the first of V2; V1 is complete |
+| Status | Approved 2026-10-02, with the [LLD](low-level-design.md) and the [architecture review](architecture-review.md). Current phase: 14 (Realtime); V1 and phase 13 (Valkey) are complete |
 | Builds | [Requirements](requirements.md) §8 (V1–V8), designed in the [HLD](architecture.md) and [LLD](low-level-design.md) |
 
 ## Working agreement
@@ -44,7 +44,7 @@
 
 | # | Phase | Scope | Exit criteria |
 |---|---|---|---|
-| 13 | Valkey | Lettuce client, script loading, the Valkey live index with all five scripts, Valkey rate limiter and tickets, epoch, reconciler against Valkey (§9.3–§9.4, ADR-020) | The live-index contract suite passes on both implementations; a 3-shard cluster test passes; total loss of Valkey recovers matching within 10 s (NFR-7) |
+| 13 | Valkey | Lettuce client, script loading, the Valkey live index with all five scripts, Valkey rate limiter and tickets, epoch, reconciler against Valkey (§9.3–§9.4, ADR-020) | The live-index contract suite passes on both implementations; a 3-shard cluster test passes; total loss of Valkey recovers matching within 10 s (NFR-7): **done 2026-10-07** (818 tests; the live-index contract suite of 27 cases passes on the in-memory index, one Valkey node and a 3-shard cluster in one container whose cities land on every shard; after `FLUSHALL`, with drivers sending every 4 s and the 2 s watch running, every driver was a candidate again after 5.7 s; the rate-limiter and ticket-store contracts pass on both implementations, and a paused container shows the limits failing open, sign-in's failing closed and every wait bounded; Compose runs the app on Valkey, so CI's container job ran every smoke script and the demo on it; 70 of 70 mutations caught; 10 repeated runs of the new and changed tests without a failure; CI build and container jobs green) |
 | 14 | Realtime | WebSocket endpoint, tickets, channels including `rdr:`, pushes, coalescing, heartbeats, draining; quality rules; tracking and ETA; trip points; offline replays over REST; offline ride commands (§9.5–§9.8, §14, §7.10) | WebSocket message contract tests; a node drain moves every client without losing a ride; replays land in the trip route exactly once |
 | 15 | Simulator and web app | Go simulator with scenarios, faults and reports; OSRM routing data and recorded routes; `GET /v1/ops/invariants`; React web app with the operations map, rider and driver screens (§17.3, §18, ADR-021, ADR-022) | A recorded scenario runs in CI without OSRM; the operations map shows a live run |
 | 16 | Laptop tier | 2,000 drivers with rider demand for 30 min on the laptop; tuning | **V2 done:** NFR-5 met (location to rider's screen within 1 s p95); invariant checks clean after the run |
