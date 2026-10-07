@@ -6,9 +6,11 @@ import com.ridehailing.location.LiveIndex.Candidate;
 import com.ridehailing.location.LiveIndex.LivePosition;
 import com.ridehailing.location.LiveIndex.LocationUpdate;
 import com.ridehailing.location.LiveIndex.MirrorState;
+import com.ridehailing.location.LiveIndex.OnlineDriver;
 import com.ridehailing.location.LiveIndex.Status;
 import com.ridehailing.location.LiveIndex.UpdateResult;
 import com.ridehailing.location.LiveIndex.UpdateResult.Outcome;
+import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Ids;
 import com.ridehailing.support.MutableClock;
@@ -25,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.LongStream;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -215,6 +218,45 @@ public abstract class LiveIndexContract {
     }
 
     @Test
+    void theNearestComeFirstAmongManyCandidates() {
+        List<UUID> drivers = new ArrayList<>();
+        for (int metres = 600; metres >= 100; metres -= 100) {
+            drivers.addFirst(at(north(metres)));
+        }
+
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 1)).extracting(Candidate::driverId)
+                .containsExactly(drivers.getFirst());
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 2)).extracting(Candidate::driverId)
+                .containsExactlyElementsOf(drivers.subList(0, 2));
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 0)).isEmpty();
+    }
+
+    @Test
+    void theRadiusIsMeasuredByHaversineDistance() {
+        UUID inside = at(north(999.9));
+        at(north(1_000.1));
+
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 5)).extracting(Candidate::driverId, Candidate::distanceM)
+                .containsExactly(tuple(inside, 1_000));
+    }
+
+    @Test
+    void equallyDistantDriversComeInDriverIdOrder() {
+        // UUID order compares signed halves, so it isn't the order of the ids as text, which Valkey keeps ties in.
+        List<UUID> drivers = Stream.of("00000000", "40000000", "7fffffff", "80000000", "c0000000", "ffffffff")
+                .map(high -> UUID.fromString(high + "-0000-7000-8000-000000000001"))
+                .toList();
+        for (UUID driver : drivers) {
+            index.mirror(city, driver, new MirrorState(Status.AVAILABLE, 1, MINI, null));
+            send(driver, 1, north(100));
+        }
+
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 6)).extracting(Candidate::driverId)
+                .containsExactlyElementsOf(drivers.stream().sorted().toList())
+                .doesNotContainSequence(drivers);
+    }
+
+    @Test
     void aSweepTakesDriversLastHeardInTheMinuteBeforeTheCutoffOutOfMatching() {
         UUID early = at(north(100));
         Instant first = clock.instant();
@@ -245,7 +287,8 @@ public abstract class LiveIndexContract {
     }
 
     @Test
-    void theEpochPrecedesWhatTheIndexHoldsAndStaysPut() {
+    void aBegunEpochPrecedesWhatTheIndexHoldsAndStaysPut() {
+        index.beginEpoch(city);
         Instant epoch = index.epoch(city);
         assertThat(epoch).isBeforeOrEqualTo(clock.instant());
 
@@ -253,6 +296,80 @@ public abstract class LiveIndexContract {
         clock.advance(Duration.ofMinutes(1));
 
         assertThat(index.epoch(city)).isEqualTo(epoch);
+    }
+
+    @Test
+    void anEpochBeginsOncePerCity() {
+        assertThat(index.epoch(city)).as("no older than now before it begins").isBeforeOrEqualTo(clock.instant());
+
+        assertThat(index.beginEpoch(city)).isTrue();
+        assertThat(index.beginEpoch(city)).isFalse();
+        assertThat(index.beginEpoch(TestCities.newId())).isTrue();
+    }
+
+    @Test
+    void sequenceNumbersAreComparedExactlyEvenBeyondADoublesPrecision() {
+        UUID driver = available(MINI, 1);
+        long large = (1L << 53) + 2;
+
+        assertThat(send(driver, large, north(100)).outcome()).isEqualTo(Outcome.APPLIED);
+        assertThat(send(driver, large - 1, north(200)).outcome()).isEqualTo(Outcome.STALE);
+        assertThat(send(driver, large + 1, north(300)).outcome()).isEqualTo(Outcome.APPLIED);
+        assertThat(send(driver, 99, north(400)).outcome()).as("fewer digits").isEqualTo(Outcome.STALE);
+        assertThat(send(driver, Long.MAX_VALUE, north(500)).outcome()).isEqualTo(Outcome.APPLIED);
+        assertThat(index.position(city, driver)).hasValueSatisfying(position ->
+                assertThat(position.seq()).isEqualTo(Long.MAX_VALUE));
+    }
+
+    @Test
+    void aCategoryChangeWithoutGoingOfflineMovesTheDriverToTheNewCategory() {
+        UUID driver = at(north(100));
+
+        assertThat(index.mirror(city, driver, new MirrorState(Status.AVAILABLE, 3, SEDAN, null))).isTrue();
+
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 5)).isEmpty();
+        assertThat(index.nearby(city, SEDAN, HERE, 1_000, 5))
+                .containsExactly(new Candidate(driver, north(100), 100, clock.instant()));
+        assertThat(index.update(city, driver, MINI, update(2, north(100))))
+                .isEqualTo(new UpdateResult(Outcome.CATEGORY_MISMATCH, Status.AVAILABLE, SEDAN, null));
+        assertThat(index.mirrored(city)).containsEntry(driver, new MirrorState(Status.AVAILABLE, 3, SEDAN, null));
+    }
+
+    @Test
+    void theSnapshotShowsOnlineDriversWithAPositionInsideTheBox() {
+        UUID available = at(north(100));
+        UUID assigned = at(north(200));
+        UUID ride = Ids.newId();
+        index.mirror(city, assigned, new MirrorState(Status.ASSIGNED, 2, MINI, ride));
+        UUID silent = at(north(300));
+        Instant silentSince = clock.instant();
+        clock.advance(Duration.ofMinutes(1));
+        index.sweep(city, clock.instant());
+        send(available, 2, north(100));
+        send(assigned, 2, north(200));
+        available(MINI, 1);
+        at(north(5_000));
+        at(north(1_005));
+        UUID offline = at(north(400));
+        index.mirror(city, offline, new MirrorState(Status.OFFLINE, 2, null, null));
+
+        assertThat(index.snapshot(city, around(HERE, 1_000), 10)).as("nearest the centre first").containsExactly(
+                new OnlineDriver(available, north(100), Status.AVAILABLE, MINI, null, clock.instant()),
+                new OnlineDriver(assigned, north(200), Status.ASSIGNED, MINI, ride, clock.instant()),
+                new OnlineDriver(silent, north(300), Status.AVAILABLE, MINI, null, silentSince));
+        assertThat(index.snapshot(TestCities.newId(), around(HERE, 1_000), 10)).isEmpty();
+    }
+
+    @Test
+    void theSnapshotKeepsTheDriversNearestTheCentreUpToMax() {
+        UUID far = at(north(-300));
+        UUID nearest = at(north(100));
+        UUID middle = at(north(-200));
+
+        assertThat(index.snapshot(city, around(HERE, 1_000), 2)).extracting(OnlineDriver::driverId)
+                .containsExactly(nearest, middle);
+        assertThat(index.snapshot(city, around(north(-300), 50), 5)).extracting(OnlineDriver::driverId)
+                .containsExactly(far);
     }
 
     @Test
@@ -331,9 +448,16 @@ public abstract class LiveIndexContract {
         return new LocationUpdate(seq, position, 5.0, null, null, clock.instant());
     }
 
-    /** The point this many metres due north of {@link #HERE}, by the haversine distance. */
+    /** The point this many metres due north of {@link #HERE}, by the haversine distance; south when negative. */
     protected static GeoPoint north(double metres) {
         return new GeoPoint(HERE.lat() + Math.toDegrees(metres / EARTH_RADIUS_M), HERE.lon());
+    }
+
+    /** A box reaching this many metres north, south, east and west of the point. */
+    protected static BoundingBox around(GeoPoint centre, double metres) {
+        double lat = Math.toDegrees(metres / EARTH_RADIUS_M);
+        double lon = lat / Math.cos(Math.toRadians(centre.lat()));
+        return new BoundingBox(centre.lat() - lat, centre.lon() - lon, centre.lat() + lat, centre.lon() + lon);
     }
 
     private static org.assertj.core.groups.Tuple tuple(Object... values) {

@@ -3,6 +3,7 @@ package com.ridehailing.location.index;
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LocationProperties;
 import com.ridehailing.platform.Role;
+import com.ridehailing.platform.Valkey;
 import java.time.Clock;
 import java.util.EnumSet;
 import java.util.Set;
@@ -24,6 +25,13 @@ class LiveIndexConfiguration {
                     .orElseGet(() -> EnumSet.allOf(Role.class)));
         }
         return new InMemoryLiveIndex(clock, properties.freshness(), properties.tombstoneTtl());
+    }
+
+    /** Shared by every process, so any split of roles is correct (LLD §1.3). */
+    @Bean
+    @ConditionalOnProperty(name = "ride.location.store", havingValue = "valkey")
+    LiveIndex valkeyLiveIndex(Valkey valkey, LocationProperties properties, Clock clock) {
+        return new ValkeyLiveIndex(valkey, clock, properties.freshness(), properties.tombstoneTtl());
     }
 
     /** The in-memory index is only right when the API and dispatch share it (LLD §1.3). */

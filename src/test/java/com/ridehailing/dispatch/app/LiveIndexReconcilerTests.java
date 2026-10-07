@@ -10,6 +10,7 @@ import com.ridehailing.location.LocationProperties;
 import com.ridehailing.location.index.InMemoryLiveIndex;
 import com.ridehailing.platform.LogContext;
 import com.ridehailing.support.IntegrationTest;
+import com.ridehailing.support.MutableClock;
 import com.ridehailing.support.TestCities;
 import com.ridehailing.support.TestCities.TestCity;
 import com.ridehailing.support.TestDrivers;
@@ -17,6 +18,7 @@ import com.ridehailing.support.TestDrivers.TestDriver;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,7 +53,8 @@ class LiveIndexReconcilerTests extends IntegrationTest {
     @BeforeEach
     void setUp() {
         index = new InMemoryLiveIndex(Clock.systemUTC(), Duration.ofSeconds(30), Duration.ofMinutes(10));
-        reconciler = new LiveIndexReconciler(availability, index, new LiveIndexMirror(index, meters), location);
+        reconciler = new LiveIndexReconciler(availability, index, new LiveIndexMirror(index, meters), location,
+                Clock.systemUTC());
         city = cities.create("MINI");
     }
 
@@ -112,6 +115,41 @@ class LiveIndexReconcilerTests extends IntegrationTest {
 
         assertThat(index.mirrored(city.id())).containsKey(online);
         assertThat(index.mirrored(quiet.id())).containsEntry(gone, new MirrorState(Status.OFFLINE, 2, null, null));
+        assertThat(index.beginEpoch(city.id())).as("the run began the epoch").isFalse();
+    }
+
+    @Test
+    void theWatchReconcilesACityAtOnceOnlyWhenItsEpochWasMissing() {
+        UUID driver = online(city);
+
+        reconciler.watch();
+        assertThat(index.mirrored(city.id())).containsEntry(driver, new MirrorState(Status.AVAILABLE, 1, "MINI", null));
+
+        inApi(() -> dispatch.goOffline(driver));
+        reconciler.watch();
+        assertThat(index.mirrored(city.id())).as("missed writes wait for the full run")
+                .containsEntry(driver, new MirrorState(Status.AVAILABLE, 1, "MINI", null));
+
+        reconciler.reconcileAll();
+        assertThat(index.mirrored(city.id())).containsEntry(driver, new MirrorState(Status.OFFLINE, 2, null, null));
+    }
+
+    @Test
+    void theWatchRereadsItsCitiesEveryThirtySeconds() {
+        MutableClock clock = new MutableClock(Instant.now());
+        LiveIndexReconciler watching = new LiveIndexReconciler(availability, index,
+                new LiveIndexMirror(index, meters), location, clock);
+        watching.watch();
+        TestCity later = cities.create("MINI");
+        UUID driver = online(later);
+
+        clock.advance(LiveIndexReconciler.CITIES_FOR.minusMillis(1));
+        watching.watch();
+        assertThat(index.mirrored(later.id())).isEmpty();
+
+        clock.advance(Duration.ofMillis(1));
+        watching.watch();
+        assertThat(index.mirrored(later.id())).containsKey(driver);
     }
 
     private UUID online(TestCity where) {

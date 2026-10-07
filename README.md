@@ -13,7 +13,7 @@ JDK 25 and Docker are required (on macOS, Colima works).
 ```bash
 ./gradlew build            # compile (-Werror), module-boundary and architecture checks, all tests
 ./gradlew bootTestRun      # run against a throwaway PostgreSQL + PostGIS container: API :8080, management :8081
-docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the app in containers, with JSON logs
+docker compose up --build  # or PostgreSQL + PostGIS (host port 5434), Valkey (6380) and the app in containers, with JSON logs
 ./scripts/demo.sh          # with either running: one ride end to end, told step by step (FR-S1)
 ```
 
@@ -23,6 +23,8 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   its earnings, and prints the ride's timeline as operations see it. It needs `curl` and `python3`.
 
 - `RIDE_ROLES` chooses what a process runs: any of `api`, `realtime`, `dispatch` and `worker` (default: all four).
+- `RIDE_LOCATION_STORE` chooses where the live index, rate limits and WebSocket tickets live: `memory` (the default,
+  for one process) or `valkey` at `RIDE_VALKEY_URI`, which Compose uses and any split of roles needs.
 - Both local runs use the `local` profile: the sign-in code is always `123456`, and seeds load Bengaluru (service
   area, airport and station areas, four categories, fare, fee and surge rules), 2,000 verified drivers with vehicles
   (`+917000000001` to `+917000002000`), 500 riders (`+918000000001` to `+918000000500`), operations `+919000000001`

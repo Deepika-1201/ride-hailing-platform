@@ -6,4 +6,9 @@ public record BoundingBox(double minLat, double minLon, double maxLat, double ma
     public boolean contains(GeoPoint point) {
         return point.lat() >= minLat && point.lat() <= maxLat && point.lon() >= minLon && point.lon() <= maxLon;
     }
+
+    /** The midpoint of the latitudes and of the longitudes; boxes don't cross the antimeridian. */
+    public GeoPoint centre() {
+        return new GeoPoint((minLat + maxLat) / 2, (minLon + maxLon) / 2);
+    }
 }

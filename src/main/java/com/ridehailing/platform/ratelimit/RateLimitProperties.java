@@ -3,8 +3,12 @@ package com.ridehailing.platform.ratelimit;
 import java.time.Duration;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 
-/** {@code ride.rate-limits.<name>.capacity} requests per {@code .period}, refilled continuously (LLD §5.8, §20). */
+/**
+ * {@code ride.rate-limits.<name>.capacity} requests per {@code .period}, refilled continuously; {@code fail-closed}
+ * rejects rather than allows when the limiter's store is unreachable (LLD §5.8, §20).
+ */
 @ConfigurationProperties(prefix = "ride")
 public record RateLimitProperties(Map<String, Limit> rateLimits) {
 
@@ -20,7 +24,7 @@ public record RateLimitProperties(Map<String, Limit> rateLimits) {
         return limit;
     }
 
-    public record Limit(int capacity, Duration period) {
+    public record Limit(int capacity, Duration period, @DefaultValue("false") boolean failClosed) {
 
         public Limit {
             if (capacity < 1 || period == null || period.isNegative() || period.isZero()) {

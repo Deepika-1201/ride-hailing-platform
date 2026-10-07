@@ -25,8 +25,8 @@ ride:
   roles: ${RIDE_ROLES:api,realtime,dispatch,worker}
   # HLD §14, LLD §5.8.
   rate-limits:
-    otp-per-phone: {capacity: 5, period: 1h}
-    otp-per-ip: {capacity: 20, period: 1h}
+    otp-per-phone: {capacity: 5, period: 1h, fail-closed: true}
+    otp-per-ip: {capacity: 20, period: 1h, fail-closed: true}
     quotes-per-rider: {capacity: 30, period: 1m}
     location-per-driver: {capacity: 1, period: 1s}
 

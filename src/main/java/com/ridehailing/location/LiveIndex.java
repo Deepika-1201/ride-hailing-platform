@@ -1,5 +1,6 @@
 package com.ridehailing.location;
 
+import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import java.time.Instant;
 import java.util.Collection;
@@ -31,11 +32,20 @@ public interface LiveIndex {
     /** When each of the drivers was last heard from; drivers never heard from are absent. */
     Map<UUID, Instant> lastSeen(String cityId, Collection<UUID> drivers);
 
-    /** When the index started holding this city's data: before then, silence means nothing. */
+    /** When the index began holding this city's data (§8.10); now, the youngest it can be, if it hasn't begun. */
     Instant epoch(String cityId);
+
+    /**
+     * Sets the city's epoch to now unless the index has one, and answers whether it did: then the index never held the
+     * city's data or lost it, and the reconciler repairs the city at once (§8.10).
+     */
+    boolean beginEpoch(String cityId);
 
     /** Every driver whose state the index holds, offline tombstones included, for the reconciler. */
     Map<UUID, MirrorState> mirrored(String cityId);
+
+    /** Up to {@code max} online drivers with a position inside the box, nearest its centre first (operations map). */
+    List<OnlineDriver> snapshot(String cityId, BoundingBox box, int max);
 
     enum Status {
         OFFLINE,
@@ -69,5 +79,10 @@ public interface LiveIndex {
     }
 
     record LivePosition(GeoPoint position, Instant receivedAt, long seq) {
+    }
+
+    /** {@code rideId} may be null; {@code lastSeen} is when the position arrived. */
+    record OnlineDriver(UUID driverId, GeoPoint position, Status status, String category, UUID rideId,
+            Instant lastSeen) {
     }
 }

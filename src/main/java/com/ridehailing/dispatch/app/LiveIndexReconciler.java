@@ -6,7 +6,11 @@ import com.ridehailing.dispatch.db.AvailabilityRepository.AvailabilityRow;
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LiveIndex.MirrorState;
 import com.ridehailing.location.LocationProperties;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -18,36 +22,62 @@ import org.springframework.stereotype.Service;
 
 /**
  * Repairs the live index from PostgreSQL (LLD §8.10): missed mirror writes, and an index that lost its data. Every
- * write carries the row's version, so a repair can't undo a newer change that raced with it.
+ * write carries the row's version, so a repair can't undo a newer change that raced with it. The watch repairs a city
+ * at once when its epoch was missing, which is how matching comes back within seconds after Valkey loses its data.
  */
 @Service
 public class LiveIndexReconciler {
 
     private static final Logger log = LoggerFactory.getLogger(LiveIndexReconciler.class);
+    /** How long the watch reuses its list of cities. */
+    static final Duration CITIES_FOR = Duration.ofSeconds(30);
 
     private final AvailabilityRepository availability;
     private final LiveIndex index;
     private final LiveIndexMirror mirror;
     private final LocationProperties location;
+    private final Clock clock;
+    private volatile Cities cities;
 
     LiveIndexReconciler(AvailabilityRepository availability, LiveIndex index, LiveIndexMirror mirror,
-            LocationProperties location) {
+            LocationProperties location, Clock clock) {
         this.availability = availability;
         this.index = index;
         this.mirror = mirror;
         this.location = location;
+        this.clock = clock;
     }
 
     /** The cities with online drivers, or with a driver whose offline tombstone may still be due. */
     public void reconcileAll() {
         for (String cityId : availability.citiesWithChanges(location.tombstoneTtl())) {
             try {
+                index.beginEpoch(cityId);
                 int repaired = reconcile(cityId);
                 if (repaired > 0) {
                     log.warn("Repaired {} live-index entries in city {}", repaired, cityId);
                 }
             } catch (RuntimeException e) {
                 log.error("Reconciling city {} failed; the next run tries again", cityId, e);
+            }
+        }
+    }
+
+    /** Reconciles at once each city whose epoch the index lacked: it lost the city's data, or never held it. */
+    public void watch() {
+        for (String cityId : cities()) {
+            try {
+                if (index.beginEpoch(cityId)) {
+                    int repaired = reconcile(cityId);
+                    if (repaired > 0) {
+                        log.warn("The live index had no epoch for city {}; reconciled at once, repairing {} entries",
+                                cityId, repaired);
+                    } else {
+                        log.info("The live index began city {}; nothing to repair", cityId);
+                    }
+                }
+            } catch (RuntimeException e) {
+                log.error("Watching city {} failed; the next run tries again", cityId, e);
             }
         }
     }
@@ -80,5 +110,18 @@ public class LiveIndexReconciler {
     private static AvailabilityRow offlineIn(String cityId, AvailabilityRow row) {
         return new AvailabilityRow(row.driverId(), cityId, AvailabilityStatus.OFFLINE, null, null, null, null, 0, null,
                 row.statusChangedAt(), row.version(), false);
+    }
+
+    private List<String> cities() {
+        Instant now = clock.instant();
+        Cities known = cities;
+        if (known == null || !now.isBefore(known.readAt().plus(CITIES_FOR))) {
+            known = new Cities(availability.citiesWithChanges(location.tombstoneTtl()), now);
+            cities = known;
+        }
+        return known.ids();
+    }
+
+    private record Cities(List<String> ids, Instant readAt) {
     }
 }

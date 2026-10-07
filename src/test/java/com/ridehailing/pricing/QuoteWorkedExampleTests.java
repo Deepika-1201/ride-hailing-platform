@@ -178,7 +178,17 @@ class QuoteWorkedExampleTests extends IntegrationTest {
         }
 
         @Override
+        public boolean beginEpoch(String cityId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public Map<UUID, MirrorState> mirrored(String cityId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<OnlineDriver> snapshot(String cityId, com.ridehailing.shared.BoundingBox box, int max) {
             throw new UnsupportedOperationException();
         }
     }

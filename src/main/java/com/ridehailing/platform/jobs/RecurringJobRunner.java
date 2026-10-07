@@ -29,6 +29,7 @@ class RecurringJobRunner implements SmartLifecycle {
     private static final Duration MIN_CHECK = Duration.ofSeconds(1);
     private static final Duration MAX_CHECK = Duration.ofMinutes(1);
     private static final Duration STOP_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration QUIET_BELOW = Duration.ofMinutes(1);
 
     private final List<RecurringJob> jobs;
     private final Leases leases;
@@ -62,7 +63,13 @@ class RecurringJobRunner implements SmartLifecycle {
         long started = System.nanoTime();
         try {
             job.run();
-            log.info("Job {} finished in {} ms", job.name(), (System.nanoTime() - started) / 1_000_000);
+            long tookMs = (System.nanoTime() - started) / 1_000_000;
+            // A job that runs every few seconds would flood the log at INFO (LLD §8.10).
+            if (job.interval().compareTo(QUIET_BELOW) < 0) {
+                log.debug("Job {} finished in {} ms", job.name(), tookMs);
+            } else {
+                log.info("Job {} finished in {} ms", job.name(), tookMs);
+            }
         } catch (RuntimeException e) {
             log.error("Job {} failed; it runs again after its interval", job.name(), e);
         }

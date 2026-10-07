@@ -105,7 +105,7 @@ GEOSEARCH {city}:geo:<category> FROMLONLAT lon lat BYRADIUS r m ASC COUNT 2k WIT
 
 The script keeps only members seen within 30 s and returns up to k with distances. Spike S-1 measured 0.19 ms inside the server at cloud-tier density.
 
-**Rebuild:** after a total loss of Valkey, the reconciler restores every online driver's status from PostgreSQL within 30 s, and positions come back with the next update (≤ 4 s). Matching therefore resumes within NFR-7's 10 s as soon as the status of most drivers is back. To shorten this, the reconciler runs at once when it detects an empty city.
+**Rebuild:** after a total loss of Valkey, the reconciler restores every online driver's status from PostgreSQL within 30 s, and positions come back with the next update (≤ 4 s). Matching therefore resumes within NFR-7's 10 s as soon as the status of most drivers is back. To shorten this, the reconciler runs at once when it detects an empty city: a watch job checks every 2 s for a city whose epoch is missing ([LLD §8.10](low-level-design.md#810-mirror-writes-and-the-reconciler)).
 
 ## 7. Tracking for riders
 

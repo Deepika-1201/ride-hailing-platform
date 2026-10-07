@@ -7,6 +7,8 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LocationProperties;
 import com.ridehailing.platform.Role;
+import com.ridehailing.platform.Valkey;
+import com.ridehailing.support.Valkeys;
 import java.time.Clock;
 import java.util.EnumSet;
 import org.junit.jupiter.api.Test;
@@ -51,9 +53,17 @@ class LiveIndexConfigurationTests {
     }
 
     @Test
-    void anotherStoreLeavesTheIndexToItsOwnConfiguration() {
-        contexts.withPropertyValues("ride.location.store=valkey").run(context ->
-                assertThat(context).doesNotHaveBean(LiveIndex.class));
+    void valkeyHoldsTheIndexForAnySplitOfRoles() {
+        // The shared client outlives this context, so the context mustn't close it.
+        contexts.withBean("valkey", Valkey.class, Valkeys::standalone, bean -> bean.setDestroyMethodName(""))
+                .withPropertyValues("ride.location.store=valkey", "ride.roles=worker")
+                .run(context -> assertThat(context).hasSingleBean(ValkeyLiveIndex.class));
+    }
+
+    @Test
+    void anUnknownStoreFailsStartup() {
+        contexts.withPropertyValues("ride.location.store=redis").run(context -> assertThat(context).hasFailed()
+                .getFailure().rootCause().hasMessageContaining("memory or valkey"));
     }
 
     @Configuration(proxyBeanMethods = false)

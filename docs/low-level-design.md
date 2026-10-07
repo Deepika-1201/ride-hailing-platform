@@ -58,7 +58,8 @@ src/main/resources/
   application.yml, application-local.yml
   db/migration/<module>/V<n>__<description>.sql
   db/seed/                        local and demo seed data (Bengaluru), loaded in the local profile only
-  valkey/*.lua                    live-index, mirror, sweep, snapshot and rate-limit scripts (V2)
+  valkey/*.lua                    live-index update, query, mirror, sweep and states scripts, and the
+                                  rate-limit script (V2, phase 13)
 src/test/java/com/ridehailing/
   architecture/                   module, schema-ownership and coding rules
   support/                        Testcontainers set-up, fixtures, test clock, API client
@@ -90,6 +91,7 @@ spikes/                           throwaway measurements (not product code)
 - **Background loops** (relay, pollers, recurring jobs) run on virtual threads that put their role in the logging context. They start with the application unless `ride.workers.autostart=false`, which tests use to drive each loop step by step, and they stop before the connection pool closes.
 - Port 8080 serves the public REST API (role `api`) and WebSockets (role `realtime`, V2). Port 8081 serves management: health, info (active roles), Prometheus metrics.
 - **V1 runs on PostgreSQL alone** (ADR-001): the live index, rate limiter and push bus use in-memory implementations of their ports (§9.2, §5.8). Those implementations are only correct inside one process, so startup fails if `ride.location.store=memory` is combined with a role set that doesn't include both `api` and `dispatch`. Tests that start a single role to check its wiring turn the check off with `ride.location.single-process-check=false` (phase 6).
+- **V2 adds Valkey** (phase 13): `ride.location.store=valkey` puts the live index, the rate limits and the WebSocket tickets in Valkey (§9.3, §5.8, §14.1), so any split of roles across processes is correct; the push bus joins them in phase 14. The single-process check applies only to `memory`, and any other value fails startup.
 
 ### 1.4 Conventions
 
@@ -107,6 +109,7 @@ spikes/                           throwaway measurements (not product code)
 ### 1.5 Local runs, image and CI
 
 - **Local:** `docker compose up` starts PostgreSQL + PostGIS and the application with all roles, in the `local` profile, so seed data, the fixed sign-in code and in-memory signing keys apply (§4.9, §12). Profiles add Valkey (V2 default), Kafka, observability, routing and the simulator as their versions arrive (HLD §16.1). Host ports: the API on 8080, management on 8081, PostgreSQL on **5434**, because the sibling projects' stacks use 5432 and 5433.
+- **Phase 13:** Compose also starts Valkey 8 (host port **6380**, for the same reason) and runs the application with `ride.location.store=valkey`, so CI's container job runs the smoke scripts and the demo on Valkey. `./gradlew bootRun` and `bootTestRun` keep the in-memory stores unless `RIDE_LOCATION_STORE=valkey` and `RIDE_VALKEY_URI` say otherwise.
 - **Without Compose:** `./gradlew bootTestRun` starts the application with the `local` profile against a PostgreSQL + PostGIS container that Testcontainers starts and stops with it.
 - **Tests** use Testcontainers with the same PostgreSQL image, built from `docker/postgres/Dockerfile` on first use and cached by Docker. The siblings' embedded PostgreSQL has no PostGIS, so it isn't used. On macOS with Colima, Testcontainers needs `docker.host` pointing at Colima's socket (in `~/.testcontainers.properties`), and the build sets `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock` so the cleanup container can mount the socket inside the VM; the same setting is correct on Linux CI.
 - **Image:** two stages (JDK 25 build, JRE 25 run), layered jar, non-root user, `-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError`.
@@ -1252,6 +1255,7 @@ Jobs that must run once per cluster take a `job:<name>` lease; pollers that use 
 - **V1:** token buckets in process memory, per node. A bucket holds `capacity` tokens and refills continuously at `capacity` per `period`; buckets that have refilled completely are dropped at most once a minute, so memory follows the keys in active use. **V2+:** one Valkey script per call on `rl:{scope}:{id}` (token bucket with the refill computed from the stored timestamp), so limits hold across nodes.
 - If Valkey is unavailable, the limiter allows the request (fails open), except for one-time codes, which fail closed (HLD §12.1).
 - A rejected request gets `429 RATE_LIMITED` with `Retry-After`: the seconds until a token is available, rounded up. Its `Idempotency-Key` isn't consumed, because the check runs before the command's transaction.
+- Phase 13 details: `ValkeyRateLimiter` replaces the in-memory limiter when `ride.location.store=valkey`. Each call runs `rate_limit.lua` once on `rl:<limit>:<key>`, a hash of the tokens left and when they were counted. The refill uses the application clock's milliseconds, passed to the script, like the live index (§9.3). The key expires after one period unused, when its bucket would be full anyway. A limit that fails closed says so in its configuration (`fail-closed: true`, set for `otp-per-phone` and `otp-per-ip`). When Valkey fails or times out (`ride.valkey.timeouts.other`), such a limit rejects with a 5 s retry, and every other limit allows. Each failure counts in `valkey_errors_total{operation="rate_limit"}`.
 
 ## 6. Concurrency rules
 
@@ -1701,6 +1705,7 @@ Phase 8 details: the unreachable rule runs before the idle rule, over `ASSIGNED`
   4. remove GEO-set members that aren't `AVAILABLE` in the database;
   5. set the epoch if it is missing. A city found empty is reconciled at once, which is how matching recovers within NFR-7's 10 s after a total loss of Valkey.
 - Phase 6 details: mirror writes register a transaction synchronization, so a rolled-back change is never mirrored; outside a transaction they apply at once. The reconciler is one recurring job, `live-index-reconciler`, every 30 s under its job lease rather than one lease per city, over the cities with online drivers or with an availability change within the tombstone lifetime. In each, it compares every driver the index holds and every online driver with PostgreSQL; a driver whose row is in another city is mirrored offline in this one. A city with no online drivers and no recent change is skipped: a stale entry there can't be matched, since nothing refreshes its last-seen time.
+- Phase 13 details: the epoch (step 5) is set by `beginEpoch(city)` (§9.1), which answers whether it had to. A second recurring job, `live-index-watch`, runs every 2 s over the same cities, read from PostgreSQL at most every 30 s. It begins each city's epoch and reconciles the city at once when the epoch was missing: the index lost the city's data, as after a Valkey restart or a failover to an empty replica, or never held it. The 30 s reconciler begins the epoch too, before each city. After a total loss of Valkey, the next watch run, within 2 s, restores every online driver's status with its version. Each driver's next update, within 4 s, restores the position and with it matching, inside NFR-7's 10 s. Until then the sweeper sees a young epoch, so its safety valve holds. Recurring jobs with an interval under a minute log their runs at DEBUG, not INFO, so the watch doesn't flood the logs.
 
 ### 8.11 Ranking
 
@@ -1738,6 +1743,13 @@ public interface LiveIndex {
 
 As built in phase 6: city IDs are strings; `mirror` answers whether the write was newer than what the index held; `mirrored(city)` returns every driver the index holds, for the reconciler; candidates carry their last-seen time, which ranking uses to break ties (§8.11); `UpdateResult` carries the mirror's category only on a mismatch, as the script does; the operations snapshot waits for V2. The contract suite is `LiveIndexContract` in the tests, driven by a clock the suite moves.
 
+Phase 13 details:
+
+- The port gains `beginEpoch(city)`. It sets the city's epoch to now unless the index has one, and answers whether it did. An index without an epoch for a city never held its data or lost it, so the reconciler repairs that city at once (§8.10). Until then `epoch(city)` answers now, the youngest an index can be. The in-memory index's epoch stays its creation time, and `beginEpoch` answers true once per city.
+- The operations snapshot arrives as `snapshot(city, box, max)`, for the operations map of phase 15. It returns up to `max` online drivers with a position inside the box, nearest its centre first. Each comes with position, status, category, ride and last-seen time.
+- A driver whose category changes without an offline write in between leaves the old category's matching, in both implementations. That happens when the offline mirror write was missed.
+- Times are kept to the millisecond in Valkey. The contract suite moves its clock in whole milliseconds, so both implementations answer alike.
+
 ### 9.2 V1: in-memory implementation
 
 - Per city, a `ConcurrentHashMap<UUID, Entry>`. Each update or mirror write runs in `compute`, so it is atomic per driver, with the same rules as the scripts: sequence check, status from the mirror, version guard, offline tombstones.
@@ -1755,6 +1767,16 @@ As built in phase 6: city IDs are strings; `mirror` answers whether the write wa
 | `{city}:geo:online` | GEO set | Every online driver at its last usable position (operations map, ADR-022) |
 | `{city}:seen` | Sorted set | Last receive time per driver |
 | `{city}:epoch` | String | When this city's index was (re)started; set by the reconciler with `SET NX` |
+
+Phase 13 details:
+
+- **Two more keys.**
+  - `{city}:drivers` is a set of the drivers that have a hash; `mirrored` reads it, since a script can't search for keys. Members whose hash has expired leave the set when `mirrored` next reads them.
+  - `{city}:cats` is a set of the categories that mirror writes have named, so a sweep knows every GEO set to clear.
+- **Tombstone expiry.** A tombstone also records `exp`, its expiry by the application clock, and the scripts treat a tombstone past `exp` as no entry. The key's own TTL has the same length and only frees the memory.
+- **Time.** Every time in the index is epoch milliseconds from the application clock, passed to the scripts, never the server's `TIME`. The minute-long thresholds are application-clock decisions (§1.4), and the contract suite needs to move time.
+- **The epoch** is written only by `beginEpoch`.
+- **Latitude range.** Valkey's GEO sets hold latitudes within ±85.05° only, which every city's bounds respect.
 
 ### 9.4 Scripts
 
@@ -1860,6 +1882,34 @@ return silent
 ```
 
 **Operations snapshot** (`live_snapshot.lua`, V2): `GEOSEARCH {city}:geo:online … BYBOX … WITHCOORD COUNT max`, then `HMGET status, cat, ride, ts` for each member, returned in one reply.
+
+Phase 13 details:
+
+- **Access.** `platform` owns the Lettuce client behind the `Valkey` interface (ADR-020): one multiplexed connection, to a single node or a cluster (`ride.valkey.cluster`).
+  - Scripts are files in `src/main/resources/valkey/`. Each is loaded with `SCRIPT LOAD` on every primary when its user starts, and called with `EVALSHA`, repeated once with `EVAL` on `NOSCRIPT`, which covers a node that restarted or joined later.
+  - Each call waits for its own timeout (`ride.valkey.timeouts.*`): query and mirror 50 ms; update and everything else 100 ms.
+  - While the connection is down, commands fail at once instead of queueing for the reconnect. Failures count in `valkey_errors_total{operation}`.
+  - The cluster client refreshes its topology on `MOVED`, `ASK` and reconnects, and every 30 s.
+- **Update** (`live_update.lua`):
+  - The script above without the quality rules, which arrive in phase 14 in both implementations. Every applied update writes the position fields, `pts` included.
+  - Sequence numbers and versions are compared as decimal strings, by length and then character by character, because Lua numbers are doubles and lose precision above 2^53.
+  - It returns `{code, status, category, ride}`, with the category only on a mismatch.
+- **Query** (`live_query.lua`):
+  - Returns the ids and last-seen times of fresh members, nearest first.
+  - The index then reads their exact positions with one pipelined `HMGET` each, because `GEOSEARCH` coordinates are approximations: Valkey stores positions as 52-bit geohashes and measures with an Earth radius of 6,372,797.6 m.
+  - It measures each haversine distance, keeps those within the radius and sorts by distance, then driver id, as the in-memory index does. The script searches a radius 0.1% + 1 m wider than asked, so no driver inside the radius is missed.
+  - The hashes are read in a second call because a script may only touch keys it declares (ADR-020).
+- **Mirror** (`live_mirror.lua`):
+  - The script above, plus a category check. The caller reads the hash's category first and passes it with that category's GEO key. If the category has changed since, the script answers `-1` and the caller reads again, up to ten times. Each `-1` means a newer write landed in between, so the retries end.
+  - So a driver whose category changed without an offline write in between leaves the old category's GEO set.
+  - Every applied write adds the driver to `{city}:drivers`, and a write that names a category adds it to `{city}:cats`.
+  - A tombstone past `exp` counts as no entry.
+- **Sweep** (`live_sweep.lua`): as above, over the categories in `{city}:cats`, read just before the call. A category added in between is covered by the next sweep, whose one-minute window still holds the same silences.
+- **States** (`live_states.lua`) replaces the planned snapshot script.
+  - Given the hashes of some drivers, it returns each one's status, version, category, ride, last-seen time and position, skipping tombstones past `exp`. When asked, it also removes drivers whose hash is gone from `{city}:drivers`.
+  - `mirrored` runs it over `{city}:drivers` in chunks of 500.
+  - `snapshot` first runs `GEOSEARCH {city}:geo:online … BYBOX … COUNT 2·max`, then the script over the members found. It keeps those inside the box, nearest its centre first.
+- **Epoch:** `beginEpoch` is `SET {city}:epoch <now> NX`; `epoch` is a `GET`, or now when the key is missing.
 
 ### 9.5 Quality rules (V2, FR-L4)
 
@@ -2474,6 +2524,8 @@ Decisions in [ADR-006](decisions/ADR-006-realtime-transport.md) and [ADR-020](de
 2. The client connects to `wss://…/ws?ticket=…`. The handshake takes the ticket with `GETDEL`, so it works once. A missing or used ticket gets `401` before the upgrade.
 3. The session holds the identity for its lifetime. After every connect the client fetches its current state over HTTPS: active ride, pending offer (ADR-006).
 
+Phase 13 details: `identity` keeps tickets behind a `TicketStore` port. With `ride.location.store=valkey` they live in Valkey: `SET wsticket:<ticket> … EX 60`, redeemed with `GETDEL`. Otherwise they live in process memory. The value holds the user, roles and city, plus the expiry by the application clock, which redemption also checks. So a ticket lasts 60 s by the application's clock, whatever the server's clock says. The endpoint and the handshake arrive in phase 14.
+
 ### 14.2 Messages
 
 All messages are JSON text frames with a `type` field, under 1 KB, matching the 1 KB buffers chosen from spike S-3.
@@ -2682,6 +2734,20 @@ Phase 12 details:
 - **Contract coverage.** Operations of later versions carry `x-since` in `openapi.yaml`; every other operation is V1's. `OpenApiContract` records each response a test checks, and `EventContract` each outbox event. `ContractCoverageTests` runs after every other class (JUnit orders it last) when the build runs the whole suite, which Gradle tells it when no `--tests` filter is given. It fails unless every V1 operation answered at least one success that a test checked, and every event schema had an outbox event of its type checked. It also compares the application's handler mappings with the document: every handler is a documented operation, and every V1 operation has a handler.
 - **The demo**, `scripts/demo.sh` (FR-S1), runs one ride end to end on the local stack and prints each step. A seeded rider adds a card and a seeded driver goes online; the ride goes from quote to completion, the fare is charged, both sides rate each other, and the receipt, both histories and the driver's earnings show the ride. It exits non-zero on the first unexpected answer; CI's container job runs it.
 
+Phase 13 details:
+
+- **Three runs of the live-index contract suite** (§9.1): against the in-memory index, a single Valkey node and a 3-shard Valkey cluster.
+- **The containers.** Both Valkey setups are Testcontainers `valkey/valkey:8` containers, started once per JVM.
+  - The cluster is three nodes in one container, joined by `valkey-cli --cluster create`. The client maps the addresses the nodes announce to the container's mapped ports.
+  - Every test uses a city of its own, so tests share the containers without cleaning up.
+- **Other contract suites.** The rate limiter and the ticket store have contract suites of their own, run against both implementations. Failure tests pause the container to check fail-open and fail-closed.
+- **The recovery test (NFR-7)** starts the application with `ride.location.store=valkey`.
+  - Drivers go online and send locations every 4 s; then `FLUSHALL` empties Valkey.
+  - The watch job runs on its 2 s schedule, and the test checks that every driver is a candidate again within 10 s.
+  - The test drives the job itself, as other integration tests drive the loops (§1.3).
+  - The application runs on a database of its own in the test container. After a total loss the watch repairs every city with online drivers, one after another, and the shared database holds every city that other classes left online.
+- **Wiring tests.** Contexts started with `ride.location.store=valkey` check which implementations are wired and that a process with a single role starts.
+
 ### 17.2 Concurrency harness
 
 - `RaceRunner` starts N commands on N threads behind a barrier, through the public API of an application started on a random port, so idempotency, transactions and locking run as in production.
@@ -2748,7 +2814,7 @@ Phase 12 details, the full race suite:
   | 6 | Completion is retried after payment succeeded | `PaymentRaceTests.race6_aCompletionRetriedAfterTheChargeSucceededChangesNothing` |
   | 7 | The same event is delivered twice | `NotificationRaceTests` (three races), `PaymentRaceTests.twoDeliveriesOfOneTripCompletedAtOnceCreateOneCharge` |
   | 8 | Two components update the same ride | `RideRaceTests.cancellingAsOperationsDuringCompletionHasOneOutcome`, `SuspensionRaceTests` (two races) |
-  | 9 | An older location update arrives after a newer one | `LiveIndexContract.concurrentUpdatesKeepTheHighestSequenceNumber` |
+  | 9 | An older location update arrives after a newer one | `LiveIndexContract.concurrentUpdatesKeepTheHighestSequenceNumber`, on the in-memory index, one Valkey node and a 3-shard cluster from phase 13 |
   | 10 | Driver loses connectivity after accepting | `UnreachableDriverTests.actingOnTheRideAsTheSweeperUnassignsItsDriverHasOneOutcome` |
 
 - The table above adds acceptance at the offer's expiry and at the search timeout, going offline as an offer arrives, two bookings at once (NFR-1's acknowledged booking is the same-key case: the second request gets the first's stored response), webhooks against status checks, and concurrent dues payments and refunds. Going online twice had been checked only one call after the other; phase 12 races it (`DispatchRaceTests.goingOnlineTwiceAtOnceOpensOneSession`).
@@ -2923,7 +2989,7 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | Property | Default | Meaning |
 |---|---|---|
 | `ride.roles` | `api,realtime,dispatch,worker` | Roles of this process (§1.3) |
-| `ride.location.store` | `memory` (V1), `valkey` (V2+) | Live index, rate limiter and push bus implementation |
+| `ride.location.store` | `memory`; `valkey` in Compose (phase 13) | Live index, rate limiter, WebSocket tickets and (phase 14) push bus implementation |
 | `ride.location.freshness` | `30s` | Candidates must have been heard from within this |
 | `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |
 | `ride.location.offline-after` | `10m` | Available driver silence before going offline |
@@ -2933,7 +2999,7 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.dispatch.retry-after`, `contention-retry-after` | `5s`, `1s` | When nothing was reserved |
 | `ride.dispatch.max-consecutive-expired` | `3` | Seen offers left to expire before going offline |
 | `ride.dispatch.sweeper.interval`, `safety-valve-share`, `safety-valve-min` | `5s`, `0.10`, `5` | §8.9 |
-| `ride.dispatch.reconcile-interval` | `30s` | §8.10 |
+| `ride.dispatch.reconcile-interval` | `30s`; the watch every `2s` | §8.10 |
 | `ride.timers.poll-interval`, `workers`, `max-failures` | `250ms`, `4`, `10` | §5.4 |
 | `ride.outbox.idle-poll`, `batch-size`, `retry-delays` | `100ms`, `500`, `500ms,1s,2s` | §5.2, §5.3 |
 
@@ -2957,9 +3023,10 @@ As built: the sweeper's interval and safety-valve thresholds and the reconcile i
 | `ride.security.jwt.issuer`, `access-ttl`, `refresh-ttl`, `refresh-reuse-grace` | `ride-hailing`, `15m`, `30d`, `10s` | §12.2 |
 | `ride.security.jwt.keys` | empty: generated in `local` and `test` only | §12.3; EC P-256 private JWKs |
 | `ride.security.otp.ttl`, `max-attempts`, `fixed-code`, `hmac-secret` | `5m`, `5`, unset, unset | §12.1; `fixed-code` only in local and test profiles; `hmac-secret` generated there when unset |
-| `ride.rate-limits.<name>.capacity`, `period` | HLD §14; `otp-per-phone` 5 per `1h`, `otp-per-ip` 20 per `1h` (200 in `local`, where every client shares an address; phase 12) | §5.8 |
+| `ride.rate-limits.<name>.capacity`, `period`, `fail-closed` | HLD §14; `otp-per-phone` 5 per `1h`, `otp-per-ip` 20 per `1h` (200 in `local`, where every client shares an address; phase 12); `fail-closed` `false`, `true` for both one-time-code limits (phase 13) | §5.8 |
 | `ride.seed.enabled` | `false`; `true` in `local` | §4.9 |
-| `ride.valkey.uri`, `cluster`, `timeouts.*` | — | V2 (ADR-020) |
+| `ride.valkey.uri`, `cluster` | `redis://localhost:6379`, `false` | ADR-020 (phase 13); the URI is a seed node in a cluster |
+| `ride.valkey.timeouts.query`, `mirror`, `update`, `other` | `50ms`, `50ms`, `100ms`, `100ms` | ADR-020; `other` covers sweeps, the reconciler's reads, rate limits and tickets |
 | `ride.kafka.*` | — | V3 (§19.1) |
 | `ride.routing.provider`, `osrm.url`, `timeout` | `mock`, —, `300ms` | V4 |
 | `DB_URL`, `DB_USER`, `DB_PASSWORD`, `DB_POOL_SIZE` | local values, pool `20` | Database (pool per role in the cloud, HLD §5.1) |

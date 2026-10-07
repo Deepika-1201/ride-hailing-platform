@@ -63,6 +63,10 @@ jobs:
         run: ./scripts/quote-smoke.sh
       - name: Take a seeded driver online, send a location, find them in a quote and go offline
         run: ./scripts/driver-online-smoke.sh
+      - name: Check the live index and the rate limits are in Valkey
+        run: |
+          docker compose exec -T valkey valkey-cli --scan --pattern '*:drv:*' | grep -q drv
+          docker compose exec -T valkey valkey-cli --scan --pattern 'rl:*' | grep -q rl
       - name: Book, cancel and book again as a seeded rider; accept, arrive, start with the PIN and complete as a seeded driver
         run: ./scripts/booking-smoke.sh
       - name: Have a declined fare become dues, pay them, and refund part as operations; read the driver's earnings

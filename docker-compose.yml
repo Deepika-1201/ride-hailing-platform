@@ -20,10 +20,23 @@ services:
       timeout: 3s
       retries: 20
 
+  # V2 (LLD §1.5): the live index, rate limits and WebSocket tickets; host port 6380 beside the siblings' 6379.
+  valkey:
+    image: valkey/valkey:8
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   app:
     build: .
     depends_on:
       postgres:
+        condition: service_healthy
+      valkey:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: local
@@ -31,6 +44,8 @@ services:
       DB_USER: ridehailing
       DB_PASSWORD: ridehailing
       RIDE_ROLES: api,realtime,dispatch,worker
+      RIDE_LOCATION_STORE: valkey
+      RIDE_VALKEY_URI: redis://valkey:6379
     ports:
       - "8080:8080"
       - "8081:8081"

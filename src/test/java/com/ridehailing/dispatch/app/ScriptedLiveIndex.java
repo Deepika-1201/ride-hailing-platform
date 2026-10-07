@@ -1,6 +1,7 @@
 package com.ridehailing.dispatch.app;
 
 import com.ridehailing.location.LiveIndex;
+import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import java.time.Instant;
 import java.util.Collection;
@@ -87,7 +88,17 @@ class ScriptedLiveIndex implements LiveIndex {
     }
 
     @Override
+    public boolean beginEpoch(String cityId) {
+        return real.beginEpoch(cityId);
+    }
+
+    @Override
     public Map<UUID, MirrorState> mirrored(String cityId) {
         return real.mirrored(cityId);
+    }
+
+    @Override
+    public List<OnlineDriver> snapshot(String cityId, BoundingBox box, int max) {
+        return real.snapshot(cityId, box, max);
     }
 }

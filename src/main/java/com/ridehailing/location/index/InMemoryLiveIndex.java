@@ -1,6 +1,7 @@
 package com.ridehailing.location.index;
 
 import com.ridehailing.location.LiveIndex;
+import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import java.time.Clock;
 import java.time.Duration;
@@ -12,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -25,6 +27,7 @@ public class InMemoryLiveIndex implements LiveIndex {
     static final Duration SWEEP_WINDOW = Duration.ofMinutes(1);
 
     private final Map<String, Map<UUID, Entry>> cities = new ConcurrentHashMap<>();
+    private final Set<String> begun = ConcurrentHashMap.newKeySet();
     private final Clock clock;
     private final Duration freshness;
     private final Duration tombstoneTtl;
@@ -144,9 +147,15 @@ public class InMemoryLiveIndex implements LiveIndex {
         return seen;
     }
 
+    /** The index's creation, whether or not the city has begun: the process's memory began then. */
     @Override
     public Instant epoch(String cityId) {
         return epoch;
+    }
+
+    @Override
+    public boolean beginEpoch(String cityId) {
+        return begun.add(cityId);
     }
 
     @Override
@@ -161,6 +170,28 @@ public class InMemoryLiveIndex implements LiveIndex {
             }
         });
         return states;
+    }
+
+    @Override
+    public List<OnlineDriver> snapshot(String cityId, BoundingBox box, int max) {
+        Instant now = clock.instant();
+        GeoPoint centre = box.centre();
+        record Found(UUID driverId, Entry entry, double metres) {
+        }
+        List<Found> found = new ArrayList<>();
+        city(cityId).forEach((driverId, current) -> {
+            Entry entry = live(current, now);
+            // Tombstones have no position.
+            if (entry != null && entry.position() != null && box.contains(entry.position())) {
+                found.add(new Found(driverId, entry, centre.metresTo(entry.position())));
+            }
+        });
+        return found.stream()
+                .sorted(Comparator.comparingDouble(Found::metres).thenComparing(Found::driverId))
+                .limit(max)
+                .map(driver -> new OnlineDriver(driver.driverId(), driver.entry().position(), driver.entry().status(),
+                        driver.entry().category(), driver.entry().rideId(), driver.entry().seenAt()))
+                .toList();
     }
 
     private Map<UUID, Entry> city(String cityId) {

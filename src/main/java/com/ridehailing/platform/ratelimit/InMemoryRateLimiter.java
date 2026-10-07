@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -14,6 +15,7 @@ import org.springframework.stereotype.Component;
  * at most once a minute, so memory follows the keys in active use.
  */
 @Component
+@ConditionalOnProperty(name = "ride.location.store", havingValue = "memory", matchIfMissing = true)
 class InMemoryRateLimiter implements RateLimiter {
 
     private static final long SWEEP_EVERY = TimeUnit.MINUTES.toNanos(1);
