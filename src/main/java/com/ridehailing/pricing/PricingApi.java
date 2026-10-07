@@ -35,9 +35,10 @@ public interface PricingApi {
             Money tax, Money rounding, Money total) {
     }
 
-    /** What a ride keeps from its quote. */
+    /** What a ride keeps from its quote; {@code breakdown} is for the ride's receipt (LLD §13.6). */
     record ConsumedQuote(UUID quoteId, String cityId, String category, GeoPoint pickup, GeoPoint dropoff,
-            String pickupZone, int distanceM, int durationS, Money fare, Money commission, UUID feeRuleId) {
+            String pickupZone, int distanceM, int durationS, Money fare, Money commission, UUID feeRuleId,
+            FareBreakdown breakdown) {
     }
 
     /** The cancellation and no-show terms of a fee rule version. */

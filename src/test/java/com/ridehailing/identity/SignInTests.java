@@ -1,5 +1,6 @@
 package com.ridehailing.identity;
 
+import static com.ridehailing.support.OpenApiContract.assertAnswered;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ridehailing.shared.Phones;
@@ -45,8 +46,7 @@ class SignInTests extends IntegrationTest {
 
         HttpResponse<String> response = requestCode(phone);
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        JsonNode body = json(response);
+        JsonNode body = assertAnswered("POST", "/v1/auth/otp", response, 202);
         assertThat(body.get("resend_after_s").asInt()).isEqualTo(30);
         assertThat(Instant.parse(body.get("expires_at").asString()))
                 .isBetween(Instant.now().plus(Duration.ofMinutes(4)), Instant.now().plus(Duration.ofMinutes(6)));
@@ -68,8 +68,7 @@ class SignInTests extends IntegrationTest {
 
         HttpResponse<String> response = exchange(phone, CODE);
 
-        assertThat(response.statusCode()).isEqualTo(200);
-        JsonNode tokens = json(response);
+        JsonNode tokens = assertAnswered("POST", "/v1/auth/token", response, 200);
         assertThat(tokens.get("token_type").asString()).isEqualTo("Bearer");
         assertThat(tokens.get("expires_in").asInt()).isEqualTo(900);
         assertThat(tokens.get("refresh_expires_in").asInt()).isEqualTo(30 * 24 * 3600);

@@ -10,3 +10,6 @@ ride:
     otp:
       # Allowed only in the local and test profiles (LLD §12.1).
       fixed-code: "123456"
+  rate-limits:
+    # Every local client signs in from one address; the demo and the smoke scripts alone ask for over 20 codes.
+    otp-per-ip: {capacity: 200, period: 1h}

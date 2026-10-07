@@ -12,6 +12,8 @@ import com.ridehailing.ride.app.Booking;
 import com.ridehailing.ride.app.Cancellations;
 import com.ridehailing.ride.app.DriverCommands;
 import com.ridehailing.ride.app.DriverCommands.StartOutcome;
+import com.ridehailing.ride.app.MyRides;
+import com.ridehailing.ride.app.MyRides.Receipt;
 import com.ridehailing.shared.UserRole;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
@@ -30,7 +32,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 
-/** Booking, reading, the driver's commands and cancelling (LLD §7); each party sees its own view of a ride. */
+/** Booking, reading, receipts, the driver's commands and cancelling (LLD §7, §13.6); each party sees its own view. */
 @ApiController
 @RequestMapping(RideController.RIDES)
 class RideController {
@@ -41,14 +43,16 @@ class RideController {
     private final Cancellations cancellations;
     private final DriverCommands drivers;
     private final RideQueries queries;
+    private final MyRides myRides;
     private final Idempotency idempotency;
 
     RideController(Booking booking, Cancellations cancellations, DriverCommands drivers, RideQueries queries,
-            Idempotency idempotency) {
+            MyRides myRides, Idempotency idempotency) {
         this.booking = booking;
         this.cancellations = cancellations;
         this.drivers = drivers;
         this.queries = queries;
+        this.myRides = myRides;
         this.idempotency = idempotency;
     }
 
@@ -73,6 +77,13 @@ class RideController {
             return ride.forDriver();
         }
         throw ApiException.notFound();
+    }
+
+    /** The rider's alone (LLD §13.6): it shows their payments. */
+    @GetMapping("/{rideId}/receipt")
+    @AllowedRoles(UserRole.RIDER)
+    Receipt receipt(Caller caller, @PathVariable UUID rideId) {
+        return myRides.receipt(caller.userId(), rideId);
     }
 
     @PostMapping("/{rideId}/cancel")

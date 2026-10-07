@@ -9,7 +9,7 @@ import java.util.UUID;
 
 /**
  * A ride as the Ride schema shows it. {@link #forRider()} and {@link #forDriver()} give each party its own view: the
- * PIN is the rider's alone (FR-RD5), and the rider summary is for the driver.
+ * PIN is the rider's alone (FR-RD5), the rider summary and the trip's earnings (FR-D4) are for the driver.
  */
 public record RideView(
         UUID id,
@@ -27,6 +27,7 @@ public record RideView(
         VehicleSummary vehicle,
         PersonSummary rider,
         Cancellation cancellation,
+        TripEarnings earnings,
         Instant requestedAt,
         Instant assignedAt,
         Instant arrivedAt,
@@ -37,26 +38,26 @@ public record RideView(
         @JsonIgnore UUID driverId,
         @JsonIgnore UUID offerId) {
 
-    /** The PIN only from assignment until the trip starts; no summary of the rider themselves. */
+    /** The PIN only from assignment until the trip starts; no summary of the rider themselves, no earnings. */
     public RideView forRider() {
         boolean pinShown = status == RideStatus.DRIVER_ASSIGNED || status == RideStatus.DRIVER_ARRIVED;
         return new RideView(id, status, version, cityId, category, pickup, dropoff, fare, paymentMethod,
-                pinShown ? pin : null, promisedPickupEtaS, driver, vehicle, null, cancellation, requestedAt,
+                pinShown ? pin : null, promisedPickupEtaS, driver, vehicle, null, cancellation, null, requestedAt,
                 assignedAt, arrivedAt, startedAt, completedAt, endedAt, riderId, driverId, offerId);
     }
 
     /** Never the PIN. */
     public RideView forDriver() {
         return new RideView(id, status, version, cityId, category, pickup, dropoff, fare, paymentMethod, null,
-                promisedPickupEtaS, driver, vehicle, rider, cancellation, requestedAt, assignedAt, arrivedAt,
+                promisedPickupEtaS, driver, vehicle, rider, cancellation, earnings, requestedAt, assignedAt, arrivedAt,
                 startedAt, completedAt, endedAt, riderId, driverId, offerId);
     }
 
     /** For a driver who cancelled (T6, T11): no rider, no PIN, and not whoever drives the ride now (LLD §7.1). */
     public RideView forReleasedDriver() {
         return new RideView(id, status, version, cityId, category, pickup, dropoff, fare, paymentMethod, null,
-                null, null, null, null, cancellation, requestedAt, null, null, null, null, endedAt, riderId, null,
-                null);
+                null, null, null, null, cancellation, null, requestedAt, null, null, null, null, endedAt, riderId,
+                null, null);
     }
 
     /** Operations see everything but the PIN, as the driver does. */
@@ -80,5 +81,9 @@ public record RideView(
 
     /** {@code CANCELLATION_FEE} or {@code NO_SHOW_FEE}. */
     public record Fee(String purpose, Money amount) {
+    }
+
+    /** A completed trip's row of earnings (LLD §11.8): {@code cashCollected} is the fare on a cash ride, else zero. */
+    public record TripEarnings(Money gross, Money commission, Money net, Money cashCollected) {
     }
 }

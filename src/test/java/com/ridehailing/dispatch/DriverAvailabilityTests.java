@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -296,6 +297,7 @@ class DriverAvailabilityTests extends IntegrationTest {
     }
 
     @Test
+    @Tag("race")
     void twoRacingGoOfflineCallsTakeTheDriverOfflineOnce() throws Exception {
         assertAnswered("POST", ONLINE, online(driver, driver.vehicleId(), key()), 200);
         List<Future<DispatchApi.DriverStatusView>> calls = new ArrayList<>();

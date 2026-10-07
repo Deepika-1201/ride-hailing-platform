@@ -504,6 +504,7 @@ paths:
       tags: [Rides]
       operationId: getReceipt
       summary: Receipt of a completed ride
+      description: The rider's alone, since it shows their payments; a ride not completed is `409 RECEIPT_NOT_AVAILABLE`.
       parameters:
         - $ref: '#/components/parameters/RideId'
       responses:
@@ -514,12 +515,14 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Receipt'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /v1/rides/{ride_id}/route:
     get:
       tags: [Rides]
       operationId: getTripRoute
+      x-since: V2
       summary: (V2) The trip route
       description: Points in sequence order, thinned to at most 2,000. Reads by operations are audited.
       parameters:
@@ -710,6 +713,7 @@ paths:
     post:
       tags: [Realtime]
       operationId: createRealtimeTicket
+      x-since: V2
       summary: (V2) A single-use ticket for the WebSocket handshake
       description: Valid for 60 s. Connect to `url`; message schemas are in `docs/schemas/websocket/`.
       responses:
@@ -937,6 +941,7 @@ paths:
     get:
       tags: [Operations]
       operationId: checkInvariants
+      x-since: V2
       summary: (V2) Run the correctness checks
       description: Read-only checks of the NFR-1 invariants ([LLD §17.3](low-level-design.md#173-invariant-checks)). The simulator calls it after every run.
       responses:
@@ -952,6 +957,7 @@ paths:
     get:
       tags: [Operations]
       operationId: listDeadLetters
+      x-since: V3
       summary: (V3) Events a consumer gave up on
       parameters:
         - {name: consumer, in: query, schema: {type: string}}
@@ -970,6 +976,7 @@ paths:
     post:
       tags: [Operations]
       operationId: redriveDeadLetter
+      x-since: V3
       summary: (V3) Run the consumer again on a dead letter
       parameters:
         - {name: dead_letter_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
@@ -990,6 +997,7 @@ paths:
     post:
       tags: [Operations]
       operationId: replayEvents
+      x-since: V3
       summary: (V3) Re-deliver past events to one consumer
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -1940,6 +1948,7 @@ components:
         vehicle: {$ref: '#/components/schemas/VehicleSummary'}
         rider: {$ref: '#/components/schemas/PersonSummary'}
         cancellation: {$ref: '#/components/schemas/Cancellation'}
+        earnings: {$ref: '#/components/schemas/TripEarnings'}
         requested_at: {$ref: '#/components/schemas/Timestamp'}
         assigned_at: {$ref: '#/components/schemas/Timestamp'}
         arrived_at: {$ref: '#/components/schemas/Timestamp'}
@@ -1952,6 +1961,15 @@ components:
       properties:
         items: {type: array, items: {$ref: '#/components/schemas/Ride'}}
         next_cursor: {type: string}
+    TripEarnings:
+      type: object
+      description: The driver's earnings from a completed ride, in the driver's and operations' views only (FR-D4).
+      required: [gross, commission, net, cash_collected]
+      properties:
+        gross: {$ref: '#/components/schemas/Money'}
+        commission: {$ref: '#/components/schemas/Money'}
+        net: {$ref: '#/components/schemas/Money'}
+        cash_collected: {$ref: '#/components/schemas/Money'}
     CancelRideRequest:
       type: object
       properties:

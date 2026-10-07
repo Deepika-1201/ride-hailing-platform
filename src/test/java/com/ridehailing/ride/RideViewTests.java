@@ -4,12 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.ride.RideView.PersonSummary;
+import com.ridehailing.ride.RideView.TripEarnings;
+import com.ridehailing.shared.Money;
 import java.math.BigDecimal;
 import java.util.UUID;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
-/** FR-RD5: the PIN is the rider's alone, from assignment until the trip starts. */
+/** FR-RD5: the PIN is the rider's alone, from assignment until the trip starts; FR-D4: the earnings the driver's. */
 class RideViewTests {
 
     @ParameterizedTest
@@ -33,12 +35,23 @@ class RideViewTests {
         assertThat(ride(status).forDriver().rider()).isEqualTo(ASHA);
     }
 
+    @ParameterizedTest
+    @EnumSource(RideStatus.class)
+    void theTripsEarningsAreTheDriversAndOperationsAlone(RideStatus status) {
+        assertThat(ride(status).forRider().earnings()).isNull();
+        assertThat(ride(status).forReleasedDriver().earnings()).isNull();
+        assertThat(ride(status).forDriver().earnings()).isEqualTo(EARNINGS);
+        assertThat(ride(status).forOperations().earnings()).isEqualTo(EARNINGS);
+    }
+
     private static final UUID RIDER = UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final PersonSummary ASHA = new PersonSummary(RIDER, "Asha",
             new RatingSummary(new BigDecimal("4.75"), 12));
+    private static final TripEarnings EARNINGS = new TripEarnings(new Money(25_900, "INR"), new Money(5_180, "INR"),
+            new Money(20_720, "INR"), new Money(0, "INR"));
 
     private static RideView ride(RideStatus status) {
         return new RideView(UUID.randomUUID(), status, 1, "BLR", "MINI", null, null, null, null, "4821", null, null,
-                null, ASHA, null, null, null, null, null, null, null, RIDER, null, null);
+                null, ASHA, null, EARNINGS, null, null, null, null, null, null, RIDER, null, null);
     }
 }

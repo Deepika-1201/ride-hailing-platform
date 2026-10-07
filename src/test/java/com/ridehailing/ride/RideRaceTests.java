@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -34,6 +35,7 @@ import tools.jackson.databind.json.JsonMapper;
  * invariant checks I1–I6 hold after every repetition. Race 4 is in the dispatch races; race 10 with the sweeper's. A
  * window too narrow for timing is forced with a gate, as in phase 7.
  */
+@Tag("race")
 class RideRaceTests extends IntegrationTest {
 
     private static final double METRES_PER_DEGREE = 6_371_008.8 * Math.PI / 180;

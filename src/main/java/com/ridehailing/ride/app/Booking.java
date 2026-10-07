@@ -89,7 +89,7 @@ public class Booking {
                         quote.fare().amountPaise(), quote.commission().amountPaise(), quote.fare().currency(),
                         quote.feeRuleId(), method.id(), method.type(),
                         views.riderSnapshot(riders.snapshot(riderId).firstName(),
-                                ratings.summary(riderId, Party.RIDER))));
+                                ratings.summary(riderId, Party.RIDER)), views.breakdown(quote.breakdown())));
             } catch (DuplicateKeyException e) {
                 // A concurrent booking by the same rider committed first.
                 throw activeRideExists();

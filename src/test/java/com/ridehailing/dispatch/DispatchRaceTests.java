@@ -12,6 +12,7 @@ import com.ridehailing.support.Postgis;
 import com.ridehailing.support.RaceRunner;
 import com.ridehailing.support.TestCities;
 import com.ridehailing.support.TestCities.TestCity;
+import com.ridehailing.support.TestDrivers;
 import com.ridehailing.support.TestDrivers.TestDriver;
 import com.ridehailing.support.TestPrices;
 import com.ridehailing.support.TestRides;
@@ -30,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -37,8 +39,9 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * The races of dispatch §6 and ride lifecycle §8 that phase 7 can run (LLD §17.2), each repeated on fresh data in a
- * city of its own, followed by the invariant checks I1–I3.
+ * city of its own, followed by the invariant checks.
  */
+@Tag("race")
 class DispatchRaceTests extends IntegrationTest {
 
     private static final double METRES_PER_DEGREE = 6_371_008.8 * Math.PI / 180;
@@ -52,6 +55,9 @@ class DispatchRaceTests extends IntegrationTest {
 
     @Autowired
     private TestRides rides;
+
+    @Autowired
+    private TestDrivers drivers;
 
     @Autowired
     private JdbcClient jdbc;
@@ -403,6 +409,26 @@ class DispatchRaceTests extends IntegrationTest {
         return city;
     }
 
+    /** Go online twice at once, with two keys, before the driver has an availability row: one session either way. */
+    @Test
+    void goingOnlineTwiceAtOnceOpensOneSession() throws Exception {
+        for (int repetition = 0; repetition < RaceRunner.repetitions(); repetition++) {
+            TestCity city = city();
+            TestDriver driver = drivers.create(city, "MINI");
+
+            List<String> outcomes = RaceRunner.race(() -> goOnline(driver), () -> goOnline(driver));
+
+            assertThat(outcomes).as("repetition %d", repetition).containsExactly("200", "200");
+            assertThat(availability(driver)).as("repetition %d", repetition).isEqualTo("AVAILABLE");
+            assertThat(count("SELECT count(*) FROM dispatch.driver_sessions WHERE driver_id = :driver",
+                    Map.of("driver", driver.id()))).as("repetition %d: sessions", repetition).isEqualTo(1);
+            assertThat(count("""
+                    SELECT count(*) FROM platform.outbox WHERE event_type = 'DriverWentOnline' AND aggregate_id = :driver
+                    """, Map.of("driver", driver.id()))).as("repetition %d: events", repetition).isEqualTo(1);
+            assertThat(rides.violations(city.id())).as("repetition %d", repetition).isEmpty();
+        }
+    }
+
     private UUID offer(TestCity city, RideView ride) {
         rides.onlyDueIn(city.id());
         rides.search();
@@ -429,6 +455,11 @@ class DispatchRaceTests extends IntegrationTest {
 
     private String goOffline(TestDriver driver) {
         return outcome(postJson("/v1/drivers/me/offline", headers(driver.authorization()), "{}"));
+    }
+
+    private String goOnline(TestDriver driver) {
+        return outcome(postJson("/v1/drivers/me/online", headers(driver.authorization()),
+                "{\"vehicle_id\": \"" + driver.vehicleId() + "\"}"));
     }
 
     private long sessionsWaitingForALock() {

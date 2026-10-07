@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import tools.jackson.databind.JsonNode;
@@ -193,6 +194,7 @@ class RefundTests extends PaymentTest {
     }
 
     @Test
+    @Tag("race")
     void concurrentRefundsNeverExceedTheCharge() throws InterruptedException {
         for (int repetition = 0; repetition < RaceRunner.repetitions(); repetition++) {
             ChargeRow charge = paidCharge();

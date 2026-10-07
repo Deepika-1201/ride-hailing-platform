@@ -14,6 +14,7 @@ import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
@@ -116,6 +117,7 @@ class DuesTests extends PaymentTest {
     }
 
     @Test
+    @Tag("race")
     void concurrentPaymentsStartOneAttemptPerCharge() throws InterruptedException {
         for (int repetition = 0; repetition < RaceRunner.repetitions(); repetition++) {
             TestUser rider = riderWith("tok_ok");

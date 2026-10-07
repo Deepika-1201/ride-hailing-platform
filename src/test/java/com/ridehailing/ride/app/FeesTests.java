@@ -112,6 +112,6 @@ class FeesTests {
         return new RideRow(UUID.randomUUID(), UUID.randomUUID(), "blr", "MINI", UUID.randomUUID(), here, here, "z",
                 20_000, "INR", UUID.randomUUID(), "CASH", status, 2, 1, UUID.randomUUID(), UUID.randomUUID(),
                 UUID.randomUUID(), "{}", "{}", "1234", ETA_S, ASSIGNED.minusSeconds(60), assignedAt, arrivedAt, null,
-                null, null, null, null, 0, 4_000, RULE.id(), 0, null, null);
+                null, null, null, null, 0, 4_000, RULE.id(), 0, null, null, 5_000, 600, null);
     }
 }

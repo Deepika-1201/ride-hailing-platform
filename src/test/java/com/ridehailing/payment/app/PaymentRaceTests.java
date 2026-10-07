@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
@@ -23,6 +24,7 @@ import tools.jackson.databind.JsonNode;
  * Races on charges (LLD §17.2, ride lifecycle §8 scenario 6): a retried completion and redelivered events never
  * charge twice, and a webhook racing a status check applies the outcome once.
  */
+@Tag("race")
 class PaymentRaceTests extends PaymentTest {
 
     @Test

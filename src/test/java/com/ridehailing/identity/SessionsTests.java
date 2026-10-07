@@ -1,5 +1,6 @@
 package com.ridehailing.identity;
 
+import static com.ridehailing.support.OpenApiContract.assertAnswered;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ridehailing.support.Eventually;
@@ -33,8 +34,7 @@ class SessionsTests extends IntegrationTest {
 
         HttpResponse<String> response = refresh(refreshToken(first));
 
-        assertThat(response.statusCode()).isEqualTo(200);
-        JsonNode second = json(response);
+        JsonNode second = assertAnswered("POST", "/v1/auth/refresh", response, 200);
         assertThat(refreshToken(second)).isNotEqualTo(refreshToken(first));
         assertThat(getAs("Bearer " + second.get("access_token").asString(), "/test/access/rider/things/" + userId(first))
                 .statusCode()).isEqualTo(200);
@@ -96,7 +96,7 @@ class SessionsTests extends IntegrationTest {
     void logoutRevokesTheSessionAndAnswersTheSameForUnknownTokens() {
         JsonNode session = signIn();
 
-        assertThat(logout(refreshToken(session)).statusCode()).isEqualTo(204);
+        assertAnswered("POST", "/v1/auth/logout", logout(refreshToken(session)), 204);
 
         assertProblem(refresh(refreshToken(session)), 401, "REFRESH_TOKEN_INVALID");
         assertThat(logout("y".repeat(43)).statusCode()).isEqualTo(204);

@@ -12,7 +12,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -28,6 +32,8 @@ public final class EventContract {
             builder -> builder
                     .schemaRegistryConfig(SchemaRegistryConfig.builder().formatAssertionsEnabled(true).build())
                     .schemas(EventContract::read));
+    private static final Set<String> CHECKED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> FROM_OUTBOX = ConcurrentHashMap.newKeySet();
 
     private EventContract() {
     }
@@ -56,6 +62,7 @@ public final class EventContract {
                         envelope.put("causation_id", row.getString("causation_id"));
                     }
                     envelope.set("payload", JSON.readTree(row.getString("payload")));
+                    FROM_OUTBOX.add(envelope.get("event_id").asString());
                     return (JsonNode) envelope;
                 })
                 .list();
@@ -66,6 +73,24 @@ public final class EventContract {
                 .as("envelope %s", envelope).isEmpty();
         assertPayloadConforms(envelope.get("event_type").asString(), envelope.get("event_version").asInt(),
                 envelope.get("payload"));
+        if (FROM_OUTBOX.contains(envelope.get("event_id").asString())) {
+            CHECKED.add(envelope.get("event_type").asString() + ".v" + envelope.get("event_version").asInt());
+        }
+    }
+
+    /** {@code Type.vN} of every event a test read from the outbox and checked, in this JVM (LLD §17.1). */
+    static Set<String> checked() {
+        return Set.copyOf(CHECKED);
+    }
+
+    /** {@code Type.vN} of every event schema in {@code docs/schemas/events}. */
+    static Set<String> documented() {
+        try (Stream<Path> files = Files.list(DIRECTORY)) {
+            return files.map(file -> file.getFileName().toString()).filter(name -> name.matches("[A-Z]\\w+\\.v\\d+\\.json"))
+                    .map(name -> name.substring(0, name.length() - ".json".length())).collect(Collectors.toSet());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     /** A consumer test's fixture against its producer's schema (LLD §15.3). */

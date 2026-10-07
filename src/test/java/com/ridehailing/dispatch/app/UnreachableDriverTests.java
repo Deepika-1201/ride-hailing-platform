@@ -37,6 +37,7 @@ import java.util.UUID;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -292,6 +293,7 @@ class UnreachableDriverTests extends IntegrationTest {
      * The ride is unassigned at most once, so a ride searching again is on its second search with one timeout.
      */
     @Test
+    @Tag("race")
     void actingOnTheRideAsTheSweeperUnassignsItsDriverHasOneOutcome() throws Exception {
         Map<String, Integer> seen = new TreeMap<>();
         List<String> actions = List.of("driver arrives", "driver cancels", "rider cancels");

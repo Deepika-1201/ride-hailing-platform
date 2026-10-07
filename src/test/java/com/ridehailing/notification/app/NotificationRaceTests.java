@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -24,6 +25,7 @@ import org.springframework.beans.factory.annotation.Autowired;
  * Race 7 (LLD §15.4, §17.2): the same event delivered twice at once makes one notification per recipient and kind,
  * each with one delivery, whether both deliveries go through the inbox or one goes past it.
  */
+@Tag("race")
 class NotificationRaceTests extends NotificationTest {
 
     @Autowired

@@ -172,10 +172,8 @@ Signatures are indicative; records are in each module's API package. Every metho
 
 ```java
 // ride: queries for everyone, assignment for dispatch, operations commands
-public interface RideQueries {
+public interface RideQueries {                          // histories, active rides and receipts are ride's own endpoints (§13.6)
     Optional<RideView> find(UUID rideId);
-    Page<RideSummary> history(UUID userId, Party party, Cursor cursor);
-    Optional<RideView> activeRide(UUID userId, Party party);
     Page<RideView> list(RideFilter filter, Cursor cursor, int limit);   // operations' list (phase 11)
     List<TransitionView> transitions(UUID rideId);
 }
@@ -224,7 +222,7 @@ public interface LocationIngestion {
 // pricing
 public interface PricingApi {
     QuoteView quote(UUID riderId, QuoteRequest request);
-    ConsumedQuote consume(UUID quoteId, UUID riderId, UUID rideId);     // conditional update (§7.2)
+    ConsumedQuote consume(UUID quoteId, UUID riderId, UUID rideId);     // conditional update (§7.2); with the fare's breakdown (phase 12)
     FeeRuleView feeRule(UUID feeRuleId);
 }
 
@@ -733,6 +731,7 @@ CREATE TABLE ride.rides (
   duration_s            int NOT NULL,
   fare_paise            bigint NOT NULL,
   commission_paise      bigint NOT NULL,
+  fare_breakdown        jsonb,                       -- the quote's, for the receipt (phase 12); null on rides booked before
   currency              char(3) NOT NULL,
   fee_rule_id           uuid NOT NULL,
   payment_method_id     uuid NOT NULL,
@@ -1366,6 +1365,8 @@ Phase 7 details:
 - `rider_snapshot` holds the rider's first name, and from phase 10 their rating summary (§13.4). A rider without a first name has no `rider` summary in the views.
 - The ride ID is generated before the transaction and is the correlation ID of the ride's events.
 - The search timeout is the one `searchStarted` answers (§2.3).
+
+Phase 12 details: step 6 also copies the quote's fare breakdown onto the ride (`fare_breakdown`), which `ConsumedQuote` now carries. Pricing deletes used quotes after 30 days (§10.4), and the receipt (§13.6) must outlive them.
 
 ### 7.3 Search timeout (T3)
 
@@ -2222,7 +2223,7 @@ A decline reported for any final attempt, and any answer for a refund that is al
   - no attempt's non-failed refunds exceed the charge;
   - no double charge: a charge's succeeded attempts, less its non-failed automatic refunds, are at most one.
 
-**Not in this phase:** the receipt (`GET /v1/rides/{id}/receipt`, FR-R3) belongs to `ride` and needs the quote's fare breakdown. It joins the ride history and active-ride reads, which no phase row names yet; phase 12's contract coverage needs all three. `PaymentApi.charges(rideId)` comes with them.
+**Not in this phase:** the receipt (`GET /v1/rides/{id}/receipt`, FR-R3) belongs to `ride` and needs the quote's fare breakdown. It joins the ride history and active-ride reads, which no phase row names yet; phase 12's contract coverage needs all three. Phase 12 serves them (§13.6); the receipt reads the ride's charges through `PaymentApi.ofRide`.
 
 ## 12. Identity and security
 
@@ -2283,7 +2284,8 @@ POST /v1/auth/token {phone, code}
 |---|---|---|---|---|
 | `/v1/riders/me/**`, `POST /v1/quotes`, `POST /v1/rides` | ✓ | | | |
 | `/v1/drivers/me/**`, `/v1/offers/**` | | ✓ | | |
-| `GET /v1/rides/{id}`, `/cancel`, `/rating`, `/receipt`, `/route` (V2) | own | assigned | ✓ (route read audited) | |
+| `GET /v1/rides/{id}`, `/cancel`, `/rating`, `/route` (V2) | own | assigned | ✓ (route read audited) | |
+| `GET /v1/rides/{id}/receipt` (phase 12) | own | | | |
 | `/arrive`, `/start`, `/complete`, `/no-show` | | assigned | | |
 | `POST /v1/realtime/tickets` (V2) | ✓ | ✓ | ✓ | |
 | `/v1/ops/**` | | | ✓ | ✓ |
@@ -2361,7 +2363,7 @@ The contract is [openapi.yaml](openapi.yaml); contract tests fail the build if t
 | `CHARGE_NOT_REFUNDABLE` | 409 | The charge didn't succeed, or was paid in cash |
 | `RATING_NOT_OPEN` | 409 | Not a participant, ride not completed, or the 7-day window closed |
 | `ALREADY_RATED` | 409 | This side already rated the ride |
-| `RECEIPT_NOT_AVAILABLE` | 409 | The ride isn't completed |
+| `RECEIPT_NOT_AVAILABLE` | 409 | The ride isn't completed, or was booked before rides kept their fare breakdown (phase 12) |
 | `VERSION_CONFLICT` | 409 | An admin update with a stale or missing `version`; `current_version` |
 | `ALREADY_EXISTS` | 409 | A city ID, special-area code, vehicle plate, saved-place label or driver that already exists (added in phase 4) |
 | `FLAG_ALREADY_RESOLVED` | 409 | Resolving a resolved flag |
@@ -2446,6 +2448,21 @@ Everything here is under `/v1/ops`, for roles `OPS` and `ADMIN`. The operations 
   - Entries are ordered by `at`, then by kind in the table's order, then by their order in the source.
   - `summary` is one line for people. `data` holds the source's fields; like the events, it never holds a PIN or a phone number (NFR-10).
   - Events, decisions and audit entries leave with their retention (§5.7), so an old ride's timeline is shorter.
+
+### 13.6 Histories, active rides and receipts (phase 12)
+
+The ride module serves these from its own tables, so `RideQueries` doesn't grow; the paths under `/me` take their roles from §12.4.
+
+- **Histories**, newest first by `requested_at` with cursors (§13.1):
+  - `GET /v1/riders/me/rides`: the rider's rides, each in the rider's view (the PIN only while a driver is assigned or arrived). The index `rides_rider_history` serves it.
+  - `GET /v1/drivers/me/rides`: the rides whose driver is the caller, so the ones they drive now or that ended with them. A ride they left before it ended (T6, T7) went on without them and isn't listed. Each is in the driver's view; the index `rides_driver_history` serves it.
+  - **Earnings per trip** (FR-D4): the driver's view of a completed ride carries `earnings`, the trip's own row of §11.8: `gross` is the fare, `commission` the ride's (from its quote, as `TripCompleted` carries it), `net` their difference, and `cash_collected` the fare on a cash ride. Earnings per day and week come from `GET /v1/drivers/me/earnings`. The rider's view never carries `earnings`; operations' views do.
+- **Active rides**, for a client's resync after it reconnects (§14): `GET /v1/riders/me/active-ride` answers the rider's ride from `SEARCHING` to `IN_TRIP`, and `GET /v1/drivers/me/active-ride` the driver's from `DRIVER_ASSIGNED` to `IN_TRIP`, each in the caller's view; `204` when there is none. The indexes `one_active_ride_per_rider` and `one_active_ride_per_driver` serve them.
+- **The receipt**, `GET /v1/rides/{id}/receipt` (FR-R3), is the rider's:
+  - the quoted route (`distance_m`, `duration_s`), the fare's breakdown as quoted, the payment method's type, the ride's charges of every purpose from `PaymentApi.ofRide`, the driver and vehicle as the ride keeps them, and the trip's start and completion;
+  - another rider's ride, or one that doesn't exist, is `404`; a ride not completed is `409 RECEIPT_NOT_AVAILABLE`;
+  - drivers get `403`: the receipt shows the rider's payments. A driver's record of a trip is the ride in their history, with its earnings.
+- **The fare breakdown** is the quote's, copied onto the ride at booking (§7.2). Rides booked before phase 12 have none (development databases only), and their receipt is `409 RECEIPT_NOT_AVAILABLE`.
 
 ## 14. Realtime (V2)
 
@@ -2660,6 +2677,11 @@ The HLD's SLO burn-rate and platform alerts, plus `rides_stuck > 0` for 5 min, a
 | Failure | Database, Valkey and Kafka outages; provider timeouts; duplicated, delayed and reordered events and webhooks | Testcontainers pause and stop; Toxiproxy |
 | Load | Laptop tier on release candidates; cloud tier in V6 | Simulator, k6 |
 
+Phase 12 details:
+
+- **Contract coverage.** Operations of later versions carry `x-since` in `openapi.yaml`; every other operation is V1's. `OpenApiContract` records each response a test checks, and `EventContract` each outbox event. `ContractCoverageTests` runs after every other class (JUnit orders it last) when the build runs the whole suite, which Gradle tells it when no `--tests` filter is given. It fails unless every V1 operation answered at least one success that a test checked, and every event schema had an outbox event of its type checked. It also compares the application's handler mappings with the document: every handler is a documented operation, and every V1 operation has a handler.
+- **The demo**, `scripts/demo.sh` (FR-S1), runs one ride end to end on the local stack and prints each step. A seeded rider adds a card and a seeded driver goes online; the ride goes from quote to completion, the fare is charged, both sides rate each other, and the receipt, both histories and the driver's earnings show the ride. It exits non-zero on the first unexpected answer; CI's container job runs it.
+
 ### 17.2 Concurrency harness
 
 - `RaceRunner` starts N commands on N threads behind a barrier, through the public API of an application started on a random port, so idempotency, transactions and locking run as in production.
@@ -2711,6 +2733,26 @@ Phase 11 details:
 - The timeline test takes one ride through a search that finds nobody, an offer that expires unseen, an offer declined, an acceptance, the driver's cancellation, a second search and acceptance, the trip, the fare's charge and an operations refund. It then reads the wait for a driver from the timeline alone.
 - The admin driver list read vehicles through a `stream()` it never closed, so every call kept a pooled connection (from phase 4). The tests that line five requests up behind a lock found it once the test context's pool had only five connections left. A test now reads the list more times than the pool has connections (§1.2).
 - The one test class whose loops start with the application runs on a database of its own in the test container. The relay delivers in ID order, and on the shared database it would first deliver every event that classes driving their loops step by step left unpublished.
+
+Phase 12 details, the full race suite:
+
+- Every scenario of the HLD's list ([architecture §11.3](architecture.md#113-the-ten-race-scenarios)) has a race below. Each repeats `ride.races.repetitions` times on fresh data, with every invariant check of its city after each repetition, except the live index's, which races 2,000 shuffled updates on 8 threads in one run.
+
+  | # | HLD scenario | Race |
+  |---|---|---|
+  | 1 | Two riders' searches pick the same driver | `DispatchRaceTests.searchesRacingForOneDriverMakeOneOffer` |
+  | 2 | Two dispatch workers pick the same driver | `DispatchRaceTests.pollersRacingForOneRideMakeOneOffer` |
+  | 3 | A driver accepts two requests at once | `DispatchRaceTests.aDriverAcceptingTwoOffersGetsOneRide` |
+  | 4 | Rider cancels while the driver accepts | `DispatchRaceTests.cancellingDuringAcceptanceHasOneOutcome`, `…cancellingDuringAnAttemptLeavesNoOffer` |
+  | 5 | Driver cancels while the trip starts | `RideRaceTests.endingTheRideWhileTheTripStartsHasOneOutcome` |
+  | 6 | Completion is retried after payment succeeded | `PaymentRaceTests.race6_aCompletionRetriedAfterTheChargeSucceededChangesNothing` |
+  | 7 | The same event is delivered twice | `NotificationRaceTests` (three races), `PaymentRaceTests.twoDeliveriesOfOneTripCompletedAtOnceCreateOneCharge` |
+  | 8 | Two components update the same ride | `RideRaceTests.cancellingAsOperationsDuringCompletionHasOneOutcome`, `SuspensionRaceTests` (two races) |
+  | 9 | An older location update arrives after a newer one | `LiveIndexContract.concurrentUpdatesKeepTheHighestSequenceNumber` |
+  | 10 | Driver loses connectivity after accepting | `UnreachableDriverTests.actingOnTheRideAsTheSweeperUnassignsItsDriverHasOneOutcome` |
+
+- The table above adds acceptance at the offer's expiry and at the search timeout, going offline as an offer arrives, two bookings at once (NFR-1's acknowledged booking is the same-key case: the second request gets the first's stored response), webhooks against status checks, and concurrent dues payments and refunds. Going online twice had been checked only one call after the other; phase 12 races it (`DispatchRaceTests.goingOnlineTwiceAtOnceOpensOneSession`).
+- These tests carry the JUnit tag `race`. `./gradlew test -Ptags=race -PraceRepetitions=1000` runs the suite alone; every build runs it at 200.
 
 ### 17.3 Invariant checks
 
@@ -2914,7 +2956,7 @@ As built: the sweeper's interval and safety-valve thresholds and the reconcile i
 | `ride.security.jwt.issuer`, `access-ttl`, `refresh-ttl`, `refresh-reuse-grace` | `ride-hailing`, `15m`, `30d`, `10s` | §12.2 |
 | `ride.security.jwt.keys` | empty: generated in `local` and `test` only | §12.3; EC P-256 private JWKs |
 | `ride.security.otp.ttl`, `max-attempts`, `fixed-code`, `hmac-secret` | `5m`, `5`, unset, unset | §12.1; `fixed-code` only in local and test profiles; `hmac-secret` generated there when unset |
-| `ride.rate-limits.<name>.capacity`, `period` | HLD §14; `otp-per-phone` 5 per `1h`, `otp-per-ip` 20 per `1h` | §5.8 |
+| `ride.rate-limits.<name>.capacity`, `period` | HLD §14; `otp-per-phone` 5 per `1h`, `otp-per-ip` 20 per `1h` (200 in `local`, where every client shares an address; phase 12) | §5.8 |
 | `ride.seed.enabled` | `false`; `true` in `local` | §4.9 |
 | `ride.valkey.uri`, `cluster`, `timeouts.*` | — | V2 (ADR-020) |
 | `ride.kafka.*` | — | V3 (§19.1) |

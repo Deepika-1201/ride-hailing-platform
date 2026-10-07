@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -30,6 +31,7 @@ public final class OpenApiContract {
             builder -> builder.schemaRegistryConfig(
                     SchemaRegistryConfig.builder().formatAssertionsEnabled(true).build()));
     private static final Map<String, Schema> COMPILED = new ConcurrentHashMap<>();
+    private static final Set<String> CHECKED = ConcurrentHashMap.newKeySet();
 
     private OpenApiContract() {
     }
@@ -39,6 +41,7 @@ public final class OpenApiContract {
             int status) {
         assertThat(response.statusCode()).as("%s %s: %s", method, pathTemplate, response.body()).isEqualTo(status);
         assertConforms(method, pathTemplate, response);
+        CHECKED.add(method + " " + pathTemplate + " " + status);
         return response.body().isEmpty() ? null : JSON.readTree(response.body());
     }
 
@@ -87,6 +90,15 @@ public final class OpenApiContract {
         schema.set("components", SPEC.path("components"));
         schema.setAll((ObjectNode) responseSchema);
         return SCHEMAS.getSchema(schema);
+    }
+
+    /** {@code METHOD /path/{template} status} of every response a test checked in this JVM (LLD §17.1). */
+    static Set<String> checked() {
+        return Set.copyOf(CHECKED);
+    }
+
+    static JsonNode spec() {
+        return SPEC;
     }
 
     private static JsonNode resolve(JsonNode node) {

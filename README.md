@@ -14,7 +14,13 @@ JDK 25 and Docker are required (on macOS, Colima works).
 ./gradlew build            # compile (-Werror), module-boundary and architecture checks, all tests
 ./gradlew bootTestRun      # run against a throwaway PostgreSQL + PostGIS container: API :8080, management :8081
 docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the app in containers, with JSON logs
+./scripts/demo.sh          # with either running: one ride end to end, told step by step (FR-S1)
 ```
+
+- The demo has a random seeded rider add a mock card and book a trip from Indiranagar to Koramangala, which a random
+  seeded driver accepts, starts with the rider's PIN and completes. It then waits for the card to be charged, prints
+  the receipt, has both sides rate each other, shows the ride in the rider's history and in the driver's trips with
+  its earnings, and prints the ride's timeline as operations see it. It needs `curl` and `python3`.
 
 - `RIDE_ROLES` chooses what a process runs: any of `api`, `realtime`, `dispatch` and `worker` (default: all four).
 - Both local runs use the `local` profile: the sign-in code is always `123456`, and seeds load Bengaluru (service
@@ -38,7 +44,10 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434) and the ap
   `tok_timeout_failed`, `tok_timeout_succeeded` and `tok_webhook_only`; other tokens draw from its decline and timeout
   rates. It posts signed webhooks to the application, late, duplicated or ahead of its answer.
 - Notifications go to a log-only push provider: each sent push logs its kind and recipient, never its payload.
-- The concurrency races repeat 200 times each (LLD §17.2); `./gradlew test -PraceRepetitions=20` runs them quicker.
+- The concurrency races repeat 200 times each (LLD §17.2); `./gradlew test -PraceRepetitions=20` runs them quicker,
+  and `./gradlew test -Ptags=race -PraceRepetitions=1000` runs only the race suite, longer.
+- A full test run also checks contract coverage (LLD §17.1): every V1 endpoint has answered a success and every event
+  type has been produced, each checked against `openapi.yaml` or its schema. Runs with `--tests` or `-Ptags` skip it.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.

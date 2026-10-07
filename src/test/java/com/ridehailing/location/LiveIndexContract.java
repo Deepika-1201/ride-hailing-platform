@@ -26,6 +26,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.LongStream;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -281,6 +282,7 @@ public abstract class LiveIndexContract {
     }
 
     @Test
+    @Tag("race")
     void concurrentUpdatesKeepTheHighestSequenceNumber() throws Exception {
         UUID driver = available(MINI, 1);
         List<Long> seqs = new ArrayList<>(LongStream.rangeClosed(1, 2_000).boxed().toList());
@@ -295,6 +297,7 @@ public abstract class LiveIndexContract {
     }
 
     @Test
+    @Tag("race")
     void concurrentMirrorWritesKeepTheHighestVersion() throws Exception {
         UUID driver = Ids.newId();
         List<Long> versions = new ArrayList<>(LongStream.rangeClosed(1, 400).boxed().toList());

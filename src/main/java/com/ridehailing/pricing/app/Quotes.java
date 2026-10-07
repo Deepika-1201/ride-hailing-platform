@@ -94,7 +94,7 @@ class Quotes implements PricingApi {
         });
         return new ConsumedQuote(quote.id(), quote.cityId(), quote.category(), quote.pickup(), quote.dropoff(),
                 quote.pickupZone(), quote.distanceM(), quote.durationS(), money(quote.fare().total(), quote),
-                money(quote.fare().commission(), quote), quote.feeRuleId());
+                money(quote.fare().commission(), quote), quote.feeRuleId(), breakdown(quote));
     }
 
     @Override
@@ -107,14 +107,17 @@ class Quotes implements PricingApi {
     }
 
     private static QuoteView view(QuoteRow quote) {
+        return new QuoteView(quote.id(), quote.cityId(), quote.category(), quote.pickup(), quote.dropoff(),
+                quote.distanceM(), quote.durationS(), breakdown(quote), quote.surgeMultiplier(), quote.pickupEtaS(),
+                quote.createdAt(), quote.expiresAt());
+    }
+
+    private static FareBreakdown breakdown(QuoteRow quote) {
         Fare fare = quote.fare();
-        FareBreakdown breakdown = new FareBreakdown(money(fare.base(), quote), money(fare.distance(), quote),
+        return new FareBreakdown(money(fare.base(), quote), money(fare.distance(), quote),
                 money(fare.time(), quote), money(fare.surge(), quote), money(fare.minimumTopup(), quote),
                 money(fare.bookingFee(), quote), money(fare.tax(), quote), money(fare.rounding(), quote),
                 money(fare.total(), quote));
-        return new QuoteView(quote.id(), quote.cityId(), quote.category(), quote.pickup(), quote.dropoff(),
-                quote.distanceM(), quote.durationS(), breakdown, quote.surgeMultiplier(), quote.pickupEtaS(),
-                quote.createdAt(), quote.expiresAt());
     }
 
     private static Money money(long paise, QuoteRow quote) {

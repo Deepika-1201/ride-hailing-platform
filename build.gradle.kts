@@ -65,9 +65,17 @@ tasks.named<Jar>("jar") {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // LLD §17.2: -Ptags=race runs the race suite alone.
+    val tags = providers.gradleProperty("tags").orNull
+    if (tags != null) {
+        useJUnitPlatform { includeTags(*tags.split(",").toTypedArray()) }
+    }
     systemProperty("user.timezone", "UTC")
     // LLD §17.2: each race repeats this often; -PraceRepetitions=20 for quick runs.
     systemProperty("ride.races.repetitions", providers.gradleProperty("raceRepetitions").getOrElse("200"))
+    // LLD §17.1: the contract coverage check needs the whole suite, which --tests and -Ptags leave out.
+    systemProperty("ride.contract-coverage", tags == null
+            && gradle.startParameter.taskRequests.none { request -> request.args.any { it.startsWith("--tests") } })
     jvmArgs("-XX:+EnableDynamicAgentLoading", "--enable-native-access=ALL-UNNAMED")
     // Testcontainers' cleanup container mounts the socket from inside the Docker VM (Colima) or host (Linux CI).
     environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")

@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -29,6 +30,7 @@ import tools.jackson.databind.json.JsonMapper;
  * Race 9 and the suspension's race with a search attempt (LLD §17.2), each repeated in a city of its own and followed
  * by the invariant checks, I3 and I8 among them.
  */
+@Tag("race")
 class SuspensionRaceTests extends IntegrationTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();

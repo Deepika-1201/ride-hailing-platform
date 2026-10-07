@@ -71,6 +71,8 @@ jobs:
         run: ./scripts/rating-smoke.sh
       - name: Suspend and reinstate a seeded driver, list rides and read a ride's timeline as operations, then cancel it
         run: ./scripts/ops-smoke.sh
+      - name: The V1 demo, one ride end to end from quote to receipt, ratings, earnings and timeline
+        run: ./scripts/demo.sh
       - name: Show logs
         if: failure()
         run: docker compose logs

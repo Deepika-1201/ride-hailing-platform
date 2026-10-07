@@ -64,6 +64,7 @@ class QuoteConsumptionTests extends IntegrationTest {
         ConsumedQuote consumed = consume(quote.id(), rider, ride);
 
         assertThat(consumed.fare()).isEqualTo(quote.fare().total());
+        assertThat(consumed.breakdown()).isEqualTo(quote.fare());
         assertThat(consumed.distanceM()).isEqualTo(quote.distanceM());
         assertThat(usedBy(quote.id())).isEqualTo(ride);
         assertConflict(() -> consume(quote.id(), rider, Ids.newId()), "QUOTE_ALREADY_USED");

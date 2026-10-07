@@ -29,7 +29,8 @@ public class RideRepository {
             driver_id, vehicle_id, offer_id, rider_snapshot::text AS rider_snapshot,
             driver_snapshot::text AS driver_snapshot, pin, promised_pickup_eta_s, requested_at, assigned_at,
             arrived_at, started_at, completed_at, ended_at, cancelled_by, cancel_reason, reassign_count,
-            commission_paise, fee_rule_id, pin_attempts, fee_purpose, fee_paise
+            commission_paise, fee_rule_id, pin_attempts, fee_purpose, fee_paise, distance_m, duration_s,
+            fare_breakdown::text AS fare_breakdown
             """;
     private static final String COLUMNS = "SELECT " + RETURNED + " FROM ride.rides ";
     private static final List<String> ACTIVE = List.of("SEARCHING", "DRIVER_ASSIGNED", "DRIVER_ARRIVED", "IN_TRIP");
@@ -55,13 +56,13 @@ public class RideRepository {
         return jdbc.sql("""
                         INSERT INTO ride.rides (id, rider_id, city_id, category, quote_id, pickup_lat, pickup_lon,
                                                 dropoff_lat, dropoff_lon, pickup_zone, distance_m, duration_s,
-                                                fare_paise, commission_paise, currency, fee_rule_id,
+                                                fare_paise, commission_paise, fare_breakdown, currency, fee_rule_id,
                                                 payment_method_id, payment_method_type, status, rider_snapshot,
                                                 requested_at)
                         VALUES (:id, :riderId, :cityId, :category, :quoteId, :pickupLat, :pickupLon, :dropoffLat,
                                 :dropoffLon, :pickupZone, :distanceM, :durationS, :farePaise, :commissionPaise,
-                                :currency, :feeRuleId, :paymentMethodId, :paymentMethodType, 'SEARCHING',
-                                CAST(:riderSnapshot AS jsonb), now())
+                                CAST(:fareBreakdown AS jsonb), :currency, :feeRuleId, :paymentMethodId,
+                                :paymentMethodType, 'SEARCHING', CAST(:riderSnapshot AS jsonb), now())
                         RETURNING
                         """ + RETURNED)
                 .param("id", ride.id())
@@ -78,6 +79,7 @@ public class RideRepository {
                 .param("durationS", ride.durationS())
                 .param("farePaise", ride.farePaise())
                 .param("commissionPaise", ride.commissionPaise())
+                .param("fareBreakdown", ride.fareBreakdown())
                 .param("currency", ride.currency())
                 .param("feeRuleId", ride.feeRuleId())
                 .param("paymentMethodId", ride.paymentMethodId())
@@ -261,6 +263,50 @@ public class RideRepository {
         return query.query(RideRepository::ride).list();
     }
 
+    /** The rider's rides, newest first after the cursor (LLD §13.6), by {@code rides_rider_history}. */
+    public List<RideRow> ofRider(UUID riderId, Instant afterRequestedAt, UUID afterId, int limit) {
+        return history("rider_id", riderId, afterRequestedAt, afterId, limit);
+    }
+
+    /** The rides the driver drives or ended with, newest first after the cursor, by {@code rides_driver_history}. */
+    public List<RideRow> ofDriver(UUID driverId, Instant afterRequestedAt, UUID afterId, int limit) {
+        return history("driver_id", driverId, afterRequestedAt, afterId, limit);
+    }
+
+    /** By {@code one_active_ride_per_rider}, whose predicate this repeats. */
+    public Optional<RideRow> activeOfRider(UUID riderId) {
+        return jdbc.sql(COLUMNS + """
+                        WHERE rider_id = :riderId
+                          AND status IN ('SEARCHING', 'DRIVER_ASSIGNED', 'DRIVER_ARRIVED', 'IN_TRIP')
+                        """)
+                .param("riderId", riderId)
+                .query(RideRepository::ride)
+                .optional();
+    }
+
+    /** By {@code one_active_ride_per_driver}, whose predicate this repeats. */
+    public Optional<RideRow> activeOfDriver(UUID driverId) {
+        return jdbc.sql(COLUMNS + """
+                        WHERE driver_id = :driverId AND status IN ('DRIVER_ASSIGNED', 'DRIVER_ARRIVED', 'IN_TRIP')
+                        """)
+                .param("driverId", driverId)
+                .query(RideRepository::ride)
+                .optional();
+    }
+
+    /** Only with a cursor is its bound in the query, so the first page reads the index from its start. */
+    private List<RideRow> history(String party, UUID userId, Instant afterRequestedAt, UUID afterId, int limit) {
+        String after = afterRequestedAt == null ? "" : " AND (requested_at, id) < (:afterRequestedAt, :afterId)";
+        JdbcClient.StatementSpec query = jdbc.sql(COLUMNS + "WHERE " + party + " = :userId" + after
+                        + " ORDER BY requested_at DESC, id DESC LIMIT :limit")
+                .param("userId", userId)
+                .param("limit", limit);
+        if (afterRequestedAt != null) {
+            query = query.param("afterRequestedAt", afterRequestedAt.atOffset(ZoneOffset.UTC)).param("afterId", afterId);
+        }
+        return query.query(RideRepository::ride).list();
+    }
+
     public Map<UUID, RideStatus> statuses(Collection<UUID> ids) {
         Map<UUID, RideStatus> statuses = new HashMap<>();
         jdbc.sql("SELECT id, status FROM ride.rides WHERE id = ANY(:ids)")
@@ -355,7 +401,8 @@ public class RideRepository {
                 instant(row, "arrived_at"), instant(row, "started_at"), instant(row, "completed_at"),
                 instant(row, "ended_at"), row.getString("cancelled_by"), row.getString("cancel_reason"),
                 row.getInt("reassign_count"), row.getLong("commission_paise"), row.getObject("fee_rule_id", UUID.class),
-                row.getInt("pin_attempts"), row.getString("fee_purpose"), row.getObject("fee_paise", Long.class));
+                row.getInt("pin_attempts"), row.getString("fee_purpose"), row.getObject("fee_paise", Long.class),
+                row.getInt("distance_m"), row.getInt("duration_s"), row.getString("fare_breakdown"));
     }
 
     private static Instant instant(ResultSet row, String column) throws SQLException {
@@ -363,19 +410,22 @@ public class RideRepository {
         return value == null ? null : value.toInstant();
     }
 
+    /** {@code fareBreakdown} is the quote's, as JSON. */
     public record NewRide(UUID id, UUID riderId, String cityId, String category, UUID quoteId, GeoPoint pickup,
             GeoPoint dropoff, String pickupZone, int distanceM, int durationS, long farePaise, long commissionPaise,
-            String currency, UUID feeRuleId, UUID paymentMethodId, String paymentMethodType, String riderSnapshot) {
+            String currency, UUID feeRuleId, UUID paymentMethodId, String paymentMethodType, String riderSnapshot,
+            String fareBreakdown) {
     }
 
-    /** Snapshots are JSON text; nullable columns are null until their transition. */
+    /** Snapshots and the fare breakdown are JSON text; nullable columns are null until their transition. */
     public record RideRow(UUID id, UUID riderId, String cityId, String category, UUID quoteId, GeoPoint pickup,
             GeoPoint dropoff, String pickupZone, long farePaise, String currency, UUID paymentMethodId,
             String paymentMethodType, RideStatus status, int version, int searchGeneration, UUID driverId,
             UUID vehicleId, UUID offerId, String riderSnapshot, String driverSnapshot, String pin,
             Integer promisedPickupEtaS, Instant requestedAt, Instant assignedAt, Instant arrivedAt, Instant startedAt,
             Instant completedAt, Instant endedAt, String cancelledBy, String cancelReason, int reassignCount,
-            long commissionPaise, UUID feeRuleId, int pinAttempts, String feePurpose, Long feePaise) {
+            long commissionPaise, UUID feeRuleId, int pinAttempts, String feePurpose, Long feePaise, int distanceM,
+            int durationS, String fareBreakdown) {
     }
 
     public record OverdueRide(UUID rideId, RideStatus status, Instant since) {
