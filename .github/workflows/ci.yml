@@ -33,12 +33,54 @@ jobs:
           name: test-reports
           path: build/reports/tests
 
-  container:
-    needs: build
+  # V2 (LLD §18): the Go simulator and the React web app.
+  simulator:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: simulator
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: simulator/go.mod
+          cache-dependency-path: simulator/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  container:
+    needs: [build, simulator, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Use the compact offline basemap for browser tests
+        run: |
+          mkdir -p .maps
+          cp web/testdata/bengaluru.pmtiles .maps/bengaluru.pmtiles
       - name: Start PostgreSQL and the app
         run: docker compose up --build --detach
       - name: Wait for readiness
@@ -77,6 +119,38 @@ jobs:
         run: ./scripts/ops-smoke.sh
       - name: The V1 demo, one ride end to end from quote to receipt, ratings, earnings and timeline
         run: ./scripts/demo.sh
+      - name: The web app behind nginx, on the platform's origin
+        run: |
+          docker compose --profile simulator up --build --detach web
+          for attempt in $(seq 1 30); do
+            if curl -fsS localhost:8088/ | grep -q 'id="root"'; then break; fi
+            sleep 2
+          done
+          curl -fsS localhost:8088/ | grep -q 'id="root"'
+          curl -sS localhost:8088/v1/nothing-here | grep -q '"code":"NOT_FOUND"'
+      - name: A recorded simulator run without OSRM, ending with a clean invariant check
+        run: docker compose --profile simulator run --build --rm simulator
+      - name: Collect the simulator report
+        if: always()
+        run: docker compose --profile simulator run --rm --no-deps --entrypoint cat simulator state/report.json > simulator-report.json
+      - name: Install the browser test runner
+        working-directory: web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Ride lifecycle, live operations map and mobile layout in the browser
+        working-directory: web
+        env:
+          WEB_BASE_URL: http://127.0.0.1:8088
+        run: npm run test:e2e
+      - name: Upload simulator and browser reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase-15-reports
+          path: |
+            simulator-report.json
+            web/test-results
       - name: Show logs
         if: failure()
         run: docker compose logs

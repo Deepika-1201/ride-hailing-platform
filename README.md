@@ -55,6 +55,63 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434), Valkey (6
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.
 
+## Simulator and web app
+
+Phase 15 adds the Go simulator, an operations map, and Rider and Driver screens. The host toolchains are Go 1.27
+and Node.js 22 or later; container builds provide their own toolchains.
+
+```bash
+./scripts/setup-maps.sh
+docker compose up --build --detach
+docker compose --profile simulator up --build --detach web
+docker compose --profile simulator run --build --rm simulator
+```
+
+Open <http://localhost:8088>. The default manual accounts are rider 9001 and MINI driver 1993; open their screens
+in separate tabs. Set the rider's pickup and drop-off on the map, take the driver online, then accept the offer,
+arrive, enter the rider's PIN, start and complete the trip. The CI simulator uses driver and rider numbers
+101-140; avoid sharing an identity with a running scenario.
+
+The default simulator command replays the committed routes without OSRM. To run road-following agents and record
+new routes, prepare the maps once and start the optional routing service:
+
+```bash
+docker compose --profile routing up --detach osrm
+docker compose --profile simulator run --rm simulator run \
+  -api http://app:8080 -ws ws://app:8080/ws \
+  -scenario scenarios/ci.yaml -osrm http://osrm:5000 \
+  -record state/routes.json -tokens state/tokens.json -report state/report.json
+docker compose --profile simulator run --rm --no-deps --entrypoint cat simulator state/report.json
+```
+
+Runs report percentiles, rates, faults, retries and all eight invariant checks. Missing recorded routes use
+straight lines and are counted as `route_misses`; replay is a functional smoke test, not a capacity result.
+The `ci` scenario allows four minutes of demand plus seven minutes to finish rides. Other supplied scenarios are
+weekday peak, airport wave, stadium exit and chaos. Cached tokens and reports stay in a named volume; tokens are
+credentials and must not be committed.
+
+For web development against the API on port 8080, run these commands from `web/`:
+
+```bash
+npm ci
+npm run dev
+npm test
+npm run build
+npx playwright install chromium
+npm run test:e2e
+```
+
+The dev server is <http://localhost:5173>. Set `WEB_BASE_URL=http://localhost:8088` to run the browser test against
+nginx instead. Map files, fonts and sprites are served locally; no map keys or external requests are needed at
+runtime. The setup script downloads the full map into ignored `.maps/`; `web/testdata/bengaluru.pmtiles` is only
+a compact zoom-12 CI fixture. CI runs the simulator without OSRM and uploads its report and browser screenshots.
+
+Map data is derived from [OpenStreetMap](https://www.openstreetmap.org/copyright), distributed under the
+[ODbL](https://opendatacommons.org/licenses/odbl/), via Geofabrik and Protomaps. The committed route recording and
+map fixture were produced from the 2026-10-09 extracts. Sprites come from
+[Protomaps basemaps-assets](https://github.com/protomaps/basemaps-assets), derived from MIT-licensed Mapzen icons;
+the web app includes the required sprite and IBM Plex font notices in its static assets.
+
 ## Documentation
 
 | Document | Contents |

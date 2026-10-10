@@ -65,3 +65,11 @@ Which map library, which map tiles, and which front-end stack?
 ## Revisit when
 
 - Operations needs more than a demo console, for example access control per city or historical replay; that would be a separate operations app.
+
+## Amendment 2026-10-10: offline delivery and browser verification
+
+- The web toolchain requires Node 22. MapLibre 6's worker is bundled through Vite; its default relative worker URL does not survive dependency bundling.
+- PMTiles, map sprites and font files are served locally. Map labels use the bundled IBM Plex Sans files through MapLibre's `font-faces` property. The complete extract remains untracked; a 1.6 MB central Bengaluru zoom-12 fixture is committed solely for browser CI. OpenStreetMap and Protomaps attribution remain visible, with sprite and font licenses included in the static assets.
+- Refresh tokens are cached per account in tab-scoped storage; access tokens remain in memory. Reloads rotate the cached token rather than requesting another OTP. Rating submission has a bounded same-key retry for the documented asynchronous `RATING_NOT_OPEN` response.
+- The driver demo simulates straight-line movement at 30 km/h; it does not request real device geolocation. The Go simulator provides road-following movement. Default demo driver 1993 and rider 9001 are outside the CI simulator's 101-140 pools.
+- Playwright exercises quote, book, offer acceptance, arrival, PIN start, completion, rating and the operations timeline against the real API. It checks map pixels and layout on desktop and mobile while blocking external HTTP requests. The same test passes against Vite and the nginx production image.

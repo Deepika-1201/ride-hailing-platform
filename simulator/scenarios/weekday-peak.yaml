@@ -1,0 +1,31 @@
+# The laptop tier (requirements §7, phase 16): 2,000 drivers through the evening peak for 30 minutes. Riders past
+# the 500 seeded ones sign up on their first run.
+name: weekday-peak
+seed: 1
+city: blr
+duration: 30m
+drivers:
+  count: 2000
+  shift: {start_spread: 5m}
+  acceptance: {base: 0.85, per_km_penalty: 0.08}
+  response_time: {median: 4s, p95: 11s}
+  cancel_after_accept: 0.02
+riders:
+  count: 1200
+  patience: {median: 4m, p95: 9m}
+  cancel_after_assign: 0.05
+  no_show: 0.01
+demand:
+  base_per_hour: 1200
+  start_hour: 18
+  zone_weights: zones/blr-weekday.csv
+  destinations: zones/blr-od.csv
+faults:
+  disconnect: {rate_per_hour: 0.2, duration: {median: 20s}}
+  duplicate_updates: 0.01
+  reorder_updates: 0.01
+  offline_replay: {rate_per_hour: 0.05, duration: {median: 90s}}
+  clock_skew: {share: 0.1, max: 3m}
+expect:
+  rates.match: {min: 0.85}
+  position_latency_ms.p95: {max: 1000}

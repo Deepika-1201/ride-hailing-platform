@@ -1,0 +1,35 @@
+# The stadium empties after a match (LLD §18.2's example, requirements §7): ten times the area's normal demand for 15
+# minutes at Chinnaswamy Stadium.
+name: stadium-exit
+seed: 42
+city: blr
+duration: 45m
+drivers:
+  count: 2000
+  shift: {start_spread: 10m}
+  acceptance: {base: 0.85, per_km_penalty: 0.08}
+  response_time: {median: 4s, p95: 11s}
+  cancel_after_accept: 0.02
+riders:
+  count: 1500
+  patience: {median: 4m, p95: 9m}
+  cancel_after_assign: 0.05
+  no_show: 0.01
+demand:
+  base_per_hour: 1500
+  start_hour: 21
+  zone_weights: zones/blr-weekday.csv
+  destinations: zones/blr-od.csv
+  areas:
+    BLR-STADIUM: {lat: 12.9788, lon: 77.5996, radius_m: 600}
+  events:
+    - {zone: area:BLR-STADIUM, start: 20m, duration: 15m, multiplier: 10}
+faults:
+  disconnect: {rate_per_hour: 0.2, duration: {median: 20s}}
+  duplicate_updates: 0.01
+  reorder_updates: 0.01
+  offline_replay: {rate_per_hour: 0.05, duration: {median: 90s}}
+  clock_skew: {share: 0.1, max: 3m}
+expect:
+  rates.match: {min: 0.7}
+  position_latency_ms.p95: {max: 1000}

@@ -1,0 +1,33 @@
+# A wave of arrivals at the airport (requirements §7's hotspot test): ten times the area's normal demand for 15
+# minutes, while the city carries on.
+name: airport-wave
+seed: 7
+city: blr
+duration: 40m
+drivers:
+  count: 1000
+  shift: {start_spread: 5m}
+  acceptance: {base: 0.85, per_km_penalty: 0.08}
+  response_time: {median: 4s, p95: 11s}
+  cancel_after_accept: 0.02
+riders:
+  count: 900
+  patience: {median: 5m, p95: 10m}
+  cancel_after_assign: 0.04
+  no_show: 0.01
+demand:
+  base_per_hour: 700
+  start_hour: 6
+  zone_weights: zones/blr-weekday.csv
+  destinations: zones/blr-od.csv
+  areas:
+    BLR-AIRPORT: {lat: 13.1986, lon: 77.7066, radius_m: 1200}
+  events:
+    - {zone: area:BLR-AIRPORT, start: 10m, duration: 15m, multiplier: 10}
+faults:
+  disconnect: {rate_per_hour: 0.2, duration: {median: 20s}}
+  duplicate_updates: 0.01
+  reorder_updates: 0.01
+expect:
+  rates.match: {min: 0.7}
+  position_latency_ms.p95: {max: 1000}

@@ -71,3 +71,10 @@
 
 - Simulations need to run faster than real time, which would need simulated time on the server as well.
 - Agent counts outgrow one machine (cloud tier, V6): run several simulator processes, each owning a slice of the agents.
+
+## Amendment 2026-10-10: recorded smoke runs
+
+- The CLI is `sim run|verify`; scenario expectations and invariant violations determine the exit code. Refresh-token caching avoids requesting thousands of codes on each rerun.
+- A recording is keyed by endpoints rounded to five decimal places. Matching and idle movement still depend on server responses, so missing routes fall back to straight lines and are counted in the report. Replay validates client/server behavior without OSRM; it does not certify realistic routing or capacity.
+- The CI scenario uses 40 drivers and 40 riders, four minutes of demand and a seven-minute drain. Larger scenarios retain their own workloads. The 2026-10-10 live and recorded runs each completed 17 rides with all eight invariants clean; the recorded run had 88 fallback routes. Phase 16 remains the laptop-tier performance gate.
+- Osmium preprocessing renumbers local node IDs before clipping complete ways, avoiding a bitmap sized by the largest global OSM ID. The preprocessing and routing service use the same verified multi-platform OSRM image digest.

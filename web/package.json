@@ -1,0 +1,35 @@
+{
+  "name": "ride-hailing-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Demo web app: the operations map, a rider and a driver (ADR-022, LLD §18.4)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@protomaps/basemaps": "^5.7.2",
+    "maplibre-gl": "^6.13.0",
+    "pmtiles": "^4.5.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "~5.9.3",
+    "vite": "^6.4.4",
+    "vitest": "^4.1.11"
+  }
+}

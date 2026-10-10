@@ -32,7 +32,9 @@ import tools.jackson.databind.json.JsonMapper;
  * loops are stopped, so tests drive them step by step, and consumer retries are quick.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
+    "server.address=127.0.0.1",
     "management.server.port=0",
+    "management.server.address=127.0.0.1",
     "ride.workers.autostart=false",
     "ride.outbox.retry-delays=10ms,10ms,10ms"
 })

@@ -8,3 +8,11 @@ bin/
 .gradle/
 build/
 !gradle/wrapper/gradle-wrapper.jar
+node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+# Map data from scripts/setup-maps.sh, and simulator outputs: reports and cached refresh tokens.
+.maps/
+sim-report.json
+sim-tokens.json

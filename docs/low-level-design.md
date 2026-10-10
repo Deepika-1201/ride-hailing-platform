@@ -2964,13 +2964,15 @@ Decisions in [ADR-021](decisions/ADR-021-simulator.md) and [ADR-022](decisions/A
 ```text
 simulator/
   cmd/sim/            run, verify
+  cmd/zones/          regenerate the seeded Bengaluru zone and destination CSVs
   internal/api/       REST and WebSocket client: retries with the same idempotency key, resync on reconnect
   internal/agent/     driver and rider state machines
   internal/router/    osrm, recorded, straight
+  internal/geo/       distance, bearing and movement along a polyline
   internal/scenario/  scenario files and the demand model
   internal/faults/    disconnects, restarts, delays, duplicates, reordering, offline replays, clock skew
   internal/report/    percentiles, rates, the JSON report
-  scenarios/          weekday-peak.yaml, airport-wave.yaml, stadium-exit.yaml, chaos.yaml
+  scenarios/          ci.yaml, weekday-peak.yaml, airport-wave.yaml, stadium-exit.yaml, chaos.yaml
   testdata/routes/    a small recorded route set, so CI runs without OSRM
 ```
 
@@ -3019,10 +3021,24 @@ web/
   src/screens/   Operations, Rider, Driver
   src/api/       REST client with idempotency keys; WebSocket client with ticket, resync and backoff
   src/map/       MapLibre layers: drivers by status, active rides, route lines
-  public/        style.json (Protomaps basemap), attribution
+  public/        local map sprites and third-party license notices
+  e2e/           the browser ride lifecycle and desktop/mobile map checks
+  testdata/      a compact Bengaluru PMTiles fixture for offline browser CI
 ```
 
 The `simulator` Compose profile runs the simulator as a one-off job, and nginx serving the web app, the PMTiles file and the style. A set-up script downloads the PMTiles extract for Bengaluru and builds the OSRM data (ADR-013, ADR-021).
+
+### 18.5 Phase 15 details
+
+- **Run and verify.** `sim run -scenario <file>` waits for `/readyz`, signs in the configured agents and operations user, generates demand for `duration`, then allows `drain` for active rides. It calls the invariant endpoint before writing its report. `sim verify` runs only that final check. Exit codes are 0 for success, 1 for unmet expectations or invariant violations, and 2 when setup cannot run.
+- **Identities.** `drivers.first` and `drivers.count` select seeded drivers; riders use the corresponding seeded phones or sign up if their numbers are beyond the seeded pool. A first profile read creates a new rider's cash payment method. Optional `-tokens` caches refresh tokens with owner-only permissions; the Compose profile keeps these and reports in a named volume, never in Git. The local per-IP OTP allowance is 5,000/hour for one-machine simulation; per-phone and production limits are unchanged.
+- **Demand and motion.** Paths in YAML are relative to the scenario file. Demand uses H3 resolution-7 zones, hourly weights, 15-minute slots, an optional destination matrix and named `demand.areas` for hotspot events. `start_hour` selects the demand weights; it does not change the server clock. The CI scenario uses drivers and riders 101-140, four minutes of demand and a seven-minute drain. Its `speed_factor=4` shortens trips, capped at 120 km/h; larger scenarios use the normal speed factor.
+- **Routes.** `-osrm` uses the local route service; `-record` writes the returned polylines. `-routes` replays a recording keyed by endpoints rounded to five decimals. Different matching and idle movement can request routes absent from the recording: those use straight lines and increment `route_misses`. Reports disclose this limitation; recorded smoke runs are not realistic city-routing or capacity certifications. A fixture test checks that the committed recording contains road geometry and every saved endpoint pair retrieves it without fallback.
+- **Faults and reports.** Per-agent seeded schedules cover disconnects, restarts, offline stretches and clock skew; update decisions cover delays, duplicates and reordering. Reports include nearest-rank percentiles, pickup distance, match/completion/cancellation/not-found rates, offers per ride, wire counters and driver-send-to-rider-receive latency. `expect` sets minimum or maximum bounds on named metrics; missing expected metrics fail the run.
+- **Map preparation.** `scripts/setup-maps.sh` clips Geofabrik's Southern Zone extract to the city bounds. It first renumbers local node IDs to keep Osmium's complete-way extraction within laptop memory, then builds MLD data with the same pinned OSRM image used by Compose. The full PMTiles extract stays in ignored `.maps/`. The committed browser fixture contains only zoom-12 central Bengaluru tiles; it is not a replacement for the full map.
+- **Browser behavior.** Node 22 builds React, TypeScript and Vite; MapLibre's worker is bundled explicitly. Fonts, sprites and PMTiles are served locally. The browser stores only refresh tokens in tab-scoped storage, coalesces duplicate sign-ins and resumes after reload without another OTP. Commands retry with the same key; rating submission also briefly retries `RATING_NOT_OPEN` while the completed-trip projection catches up. The driver screen advances a simulated position at 30 km/h; road-following agents remain the Go simulator's responsibility.
+- **Serving and tests.** Vite proxies `/v1` and `/ws`; nginx uses the same-origin arrangement with a configurable `PLATFORM_URL`, defaulting to the Compose app. Mobile layouts put the map above the controls. Playwright waits for the map's loaded state, drives a complete rider/driver trip, reads the operations timeline, checks nonblank map pixels and captures desktop/mobile screenshots. External HTTP requests are rejected in the test. CI builds Java, Go and the web app, runs the recorded simulator without OSRM, then tests the nginx-served browser workflow and uploads reports.
+- **Measured smoke results, 2026-10-10.** The 40-driver recording run and replay each completed all 17 requested rides with eight invariant checks clean. With OSRM stopped, replay measured 31.6 s assignment p95 and 10.9 ms position p95, with no network errors or retries and 88 route misses. The recording run had transient infrastructure stalls and a 19 s position p99. These are functional smoke results; phase 16 still owns the 2,000-driver, 30-minute laptop-tier measurement.
 
 ## 19. Later versions
 

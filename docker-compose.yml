@@ -50,5 +50,40 @@ services:
       - "8080:8080"
       - "8081:8081"
 
+  # V2, the simulator profile (LLD §18): one simulator run against app, and the demo web app on
+  # http://localhost:8088. SCENARIO picks the scenario file; reports and cached sign-ins stay in sim-state.
+  simulator:
+    profiles: [simulator]
+    build: simulator
+    depends_on:
+      app:
+        condition: service_started
+    command: [run, -api, "http://app:8080", -ws, "ws://app:8080/ws", -scenario, "scenarios/${SCENARIO:-ci}.yaml",
+              -routes, testdata/routes/ci.json, -tokens, state/tokens.json, -report, state/report.json]
+    volumes:
+      - sim-state:/sim/state
+
+  web:
+    profiles: [simulator]
+    build: web
+    depends_on:
+      app:
+        condition: service_started
+    ports:
+      - "8088:80"
+    volumes:
+      - ./.maps:/usr/share/nginx/maps:ro
+
+  # The routing profile (ADR-013): OSRM on the data scripts/setup-maps.sh builds.
+  osrm:
+    profiles: [routing]
+    image: ghcr.io/project-osrm/osrm-backend@sha256:55dbfd47d984c2cacd64e32901b4321c86b5ec761438e69aa053dc78698a786f
+    command: [osrm-routed, --algorithm, mld, /data/bengaluru.osrm]
+    volumes:
+      - ./.maps:/data:ro
+    ports:
+      - "5000:5000"
+
 volumes:
   postgres-data:
+  sim-state:

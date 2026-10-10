@@ -1,0 +1,42 @@
+# CI and smoke runs (phase 15 exit): a few minutes in the centre with short trips and fast drivers, so rides finish
+# within the drain. Replays testdata/routes/ci.json, so it needs no OSRM. Every fault is on, at low rates.
+name: ci
+seed: 42
+city: blr
+duration: 4m
+drain: 7m
+drivers:
+  # Clear of the seeded users the smoke scripts drive, which CI runs first.
+  first: 101
+  count: 40
+  shift: {start_spread: 20s}
+  acceptance: {base: 0.9, per_km_penalty: 0.05}
+  response_time: {median: 3s, p95: 6s}
+  cancel_after_accept: 0.03
+  speed_factor: 4
+riders:
+  first: 101
+  count: 40
+  patience: {median: 2m, p95: 4m}
+  cancel_after_assign: 0.03
+  no_show: 0
+demand:
+  base_per_hour: 300
+  start_hour: 9
+  zone_weights: zones/blr-central.csv
+  min_trip_m: 1200
+  max_trip_m: 3500
+faults:
+  disconnect: {rate_per_hour: 2, duration: {median: 8s}}
+  restart: {rate_per_hour: 1}
+  delayed_updates: {share: 0.02, delay: {median: 1500ms, p95: 2500ms}}
+  duplicate_updates: 0.02
+  reorder_updates: 0.02
+  offline_replay: {rate_per_hour: 0.5, duration: {median: 30s}}
+  clock_skew: {share: 0.1, max: 2m}
+expect:
+  rides.booked: {min: 8}
+  rides.completed: {min: 5}
+  rates.match: {min: 0.8}
+  wait_to_assign_s.p95: {max: 60}
+  position_latency_ms.p95: {max: 1000}

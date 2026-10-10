@@ -1,0 +1,32 @@
+# Every fault at a high rate (FR-S4): apps disconnect, restart and go offline for minutes, some long enough to be
+# taken offline and have rides reassigned; updates arrive late, twice and out of order; a third of clocks are wrong.
+# What matters is that nothing breaks: the invariant check is clean afterwards.
+name: chaos
+seed: 13
+city: blr
+duration: 20m
+drivers:
+  count: 300
+  shift: {start_spread: 2m}
+  acceptance: {base: 0.85, per_km_penalty: 0.08}
+  response_time: {median: 4s, p95: 11s}
+  cancel_after_accept: 0.05
+riders:
+  count: 300
+  patience: {median: 4m, p95: 9m}
+  cancel_after_assign: 0.08
+  no_show: 0.03
+demand:
+  base_per_hour: 400
+  start_hour: 9
+  zone_weights: zones/blr-central.csv
+faults:
+  disconnect: {rate_per_hour: 3, duration: {median: 20s, p95: 60s}}
+  restart: {rate_per_hour: 1}
+  delayed_updates: {share: 0.05, delay: {median: 1500ms, p95: 2500ms}}
+  duplicate_updates: 0.05
+  reorder_updates: 0.05
+  offline_replay: {rate_per_hour: 1, duration: {median: 90s, p95: 4m}}
+  clock_skew: {share: 0.3, max: 5m}
+expect:
+  rates.match: {min: 0.5}
