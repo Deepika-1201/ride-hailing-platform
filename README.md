@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 has begun: phase 13 (Valkey) is done, and phase 14 (realtime) is next. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-024.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey) and 14 (realtime) are done, and phase 15 (simulator and web app) is next. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-024.
 
 ## Quick start
 
@@ -48,8 +48,9 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434), Valkey (6
 - Notifications go to a log-only push provider: each sent push logs its kind and recipient, never its payload.
 - The concurrency races repeat 200 times each (LLD §17.2); `./gradlew test -PraceRepetitions=20` runs them quicker,
   and `./gradlew test -Ptags=race -PraceRepetitions=1000` runs only the race suite, longer.
-- A full test run also checks contract coverage (LLD §17.1): every V1 endpoint has answered a success and every event
-  type has been produced, each checked against `openapi.yaml` or its schema. Runs with `--tests` or `-Ptags` skip it.
+- A full test run also checks contract coverage (LLD §17.1): every implemented endpoint has answered a success,
+  every event type has been produced, and all eight WebSocket server message types have been checked against
+  `openapi.yaml` or their schemas. Runs with `--tests` or `-Ptags` skip it.
 - Tests use Testcontainers. With Colima, point it at Colima's socket once:
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.
