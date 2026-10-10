@@ -2943,6 +2943,13 @@ Phase 8 details:
 
 Phase 9 details: I7's four checks, including "no double charge", are listed in §11.10.
 
+Phase 15 details:
+
+- `GET /v1/ops/invariants` is restricted to operations and admins. It runs every registered check over all cities (`cityId=null`), in invariant-number order, and timestamps the start of the report.
+- A violation retains its invariant ID and detail, with distinct UUIDs found in that detail included as optional `ids`. Checks keep their own transaction and snapshot boundaries; the report does not wrap every module in one long transaction.
+- A check that throws is included as a violation with the exception type, without exposing its exception message; the remaining checks still run. A failed check therefore cannot make a simulator run look clean.
+- HTTP tests check access control, the OpenAPI response contract and a deliberately inconsistent suspended driver. Service tests check ordering, all-city calls, ID extraction and continuation after a check fails.
+
 ### 17.4 Time in tests
 
 - The application clock is a mutable test clock.
