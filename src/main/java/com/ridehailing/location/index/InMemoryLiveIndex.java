@@ -31,12 +31,14 @@ public class InMemoryLiveIndex implements LiveIndex {
     private final Clock clock;
     private final Duration freshness;
     private final Duration tombstoneTtl;
+    private final Quality quality;
     private final Instant epoch;
 
-    public InMemoryLiveIndex(Clock clock, Duration freshness, Duration tombstoneTtl) {
+    public InMemoryLiveIndex(Clock clock, Duration freshness, Duration tombstoneTtl, Quality quality) {
         this.clock = clock;
         this.freshness = freshness;
         this.tombstoneTtl = tombstoneTtl;
+        this.quality = quality;
         this.epoch = clock.instant();
     }
 
@@ -54,13 +56,34 @@ public class InMemoryLiveIndex implements LiveIndex {
             } else if (entry.seq() != null && update.seq() <= entry.seq()) {
                 result[0] = new UpdateResult(UpdateResult.Outcome.STALE, entry.status(), null, entry.rideId());
             } else {
-                result[0] = new UpdateResult(UpdateResult.Outcome.APPLIED, entry.status(), null, entry.rideId());
+                int flags = flags(entry, update, now);
+                result[0] = new UpdateResult(UpdateResult.Outcome.APPLIED, entry.status(), null, entry.rideId(), flags);
+                if (flags != 0) {
+                    // A sign of life only: the position, and with it matching, stays where it was.
+                    return new Entry(entry.status(), entry.version(), entry.category(), entry.rideId(), update.seq(),
+                            now, entry.position(), entry.positionAt(),
+                            flags == UpdateResult.IMPLAUSIBLE ? entry.implausible() + 1 : entry.implausible(),
+                            entry.matchable(), null);
+                }
                 return new Entry(entry.status(), entry.version(), entry.category(), entry.rideId(), update.seq(), now,
-                        update.position(), entry.status() == Status.AVAILABLE, null);
+                        update.position(), now, 0, entry.status() == Status.AVAILABLE, null);
             }
             return entry;
         });
         return result[0];
+    }
+
+    /** §9.5: speed is measured from the last usable position, over a second at least. */
+    private int flags(Entry entry, LocationUpdate update, Instant now) {
+        if (update.accuracyM() > quality.maxAccuracyM()) {
+            return UpdateResult.POOR_ACCURACY;
+        }
+        if (entry.position() == null) {
+            return 0;
+        }
+        double seconds = Math.max(Duration.between(entry.positionAt(), now).toMillis() / 1000.0, 1);
+        boolean tooFast = entry.position().metresTo(update.position()) / seconds > quality.maxSpeedMps();
+        return tooFast && entry.implausible() + 1 < quality.reanchorAfter() ? UpdateResult.IMPLAUSIBLE : 0;
     }
 
     @Override
@@ -85,7 +108,7 @@ public class InMemoryLiveIndex implements LiveIndex {
         if (entry == null || entry.position() == null) {
             return Optional.empty();
         }
-        return Optional.of(new LivePosition(entry.position(), entry.seenAt(), entry.seq()));
+        return Optional.of(new LivePosition(entry.position(), entry.positionAt(), entry.seq()));
     }
 
     @Override
@@ -100,14 +123,14 @@ public class InMemoryLiveIndex implements LiveIndex {
             applied[0] = true;
             if (state.status() == Status.OFFLINE) {
                 // The tombstone keeps only the version, so a restarted app's sequence numbers count again.
-                return new Entry(Status.OFFLINE, state.version(), null, null, null, null, null, false,
+                return new Entry(Status.OFFLINE, state.version(), null, null, null, null, null, null, 0, false,
                         now.plus(tombstoneTtl));
             }
             // A tombstone has no position or sequence to keep.
             Entry kept = entry != null ? entry : Entry.EMPTY;
             return new Entry(state.status(), state.version(), state.category(), state.rideId(), kept.seq(),
-                    kept.seenAt(), kept.position(), state.status() == Status.AVAILABLE && kept.position() != null,
-                    null);
+                    kept.seenAt(), kept.position(), kept.positionAt(), kept.implausible(),
+                    state.status() == Status.AVAILABLE && kept.position() != null, null);
         });
         return applied[0];
     }
@@ -127,7 +150,8 @@ public class InMemoryLiveIndex implements LiveIndex {
                 }
                 swept.add(id);
                 return new Entry(entry.status(), entry.version(), entry.category(), entry.rideId(), entry.seq(),
-                        entry.seenAt(), entry.position(), false, entry.expiresAt());
+                        entry.seenAt(), entry.position(), entry.positionAt(), entry.implausible(), false,
+                        entry.expiresAt());
             });
         }
         return swept;
@@ -204,14 +228,15 @@ public class InMemoryLiveIndex implements LiveIndex {
     }
 
     /**
-     * {@code seq}, {@code seenAt} and {@code position} are null until the first update after going online;
-     * {@code matchable} is membership of the category's GEO set, so only {@code AVAILABLE} entries have it;
-     * {@code expiresAt} is set on tombstones only.
+     * {@code seq}, {@code seenAt}, {@code position} and {@code positionAt} are null until the first update after going
+     * online; {@code seenAt} is the last applied update, {@code position} the last usable one, and
+     * {@code implausible} counts implausible updates since; {@code matchable} is membership of the category's GEO
+     * set, so only {@code AVAILABLE} entries have it; {@code expiresAt} is set on tombstones only.
      */
     private record Entry(Status status, long version, String category, UUID rideId, Long seq, Instant seenAt,
-            GeoPoint position, boolean matchable, Instant expiresAt) {
+            GeoPoint position, Instant positionAt, int implausible, boolean matchable, Instant expiresAt) {
 
-        static final Entry EMPTY = new Entry(Status.OFFLINE, 0, null, null, null, null, null, false, null);
+        static final Entry EMPTY = new Entry(Status.OFFLINE, 0, null, null, null, null, null, null, 0, false, null);
 
         boolean matchableIn(String wanted, Instant oldest) {
             return matchable && wanted.equals(category) && !seenAt.isBefore(oldest);

@@ -102,6 +102,11 @@ class Offers {
         }));
     }
 
+    /** The app displayed the offer (§8.5); someone else's offer, or one that ended, stays as it is. */
+    void seen(UUID driverId, UUID offerId) {
+        offers.markSeen(offerId, driverId);
+    }
+
     /**
      * The ETA and the driver's snapshot are worked out first, without locks; then the ride, the offer and the
      * availability row are locked in that order (§6.1). A late offer rolls the whole transaction back.

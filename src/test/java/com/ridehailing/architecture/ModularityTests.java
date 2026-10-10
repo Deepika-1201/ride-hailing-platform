@@ -21,7 +21,7 @@ class ModularityTests {
         assertThat(MODULES.stream().map(module -> module.getIdentifier().toString()))
                 .containsExactlyInAnyOrder(
                         "shared", "platform", "audit", "notification", "identity", "rider", "driver", "geography",
-                        "rating", "location", "pricing", "payment", "ride", "dispatch", "operations");
+                        "rating", "location", "pricing", "payment", "ride", "dispatch", "operations", "realtime");
     }
 
     @Test

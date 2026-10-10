@@ -49,6 +49,9 @@ class OfferTests extends IntegrationTest {
     private TestRides rides;
 
     @Autowired
+    private DispatchApi dispatch;
+
+    @Autowired
     private LiveIndex index;
 
     @Autowired
@@ -88,6 +91,18 @@ class OfferTests extends IntegrationTest {
         assertThat(seenAt()).isEqualTo(seenAt);
         TestDriver other = rides.onlineAt(city, "MINI", north(5_000));
         assertAnswered("GET", CURRENT_OFFER, call("GET", other.authorization(), CURRENT_OFFER, null), 204);
+    }
+
+    /** The WebSocket's offer_seen (LLD §14.7) marks an offer as reading it over HTTPS does, and nothing else. */
+    @Test
+    void offerSeenMarksOnlyTheDriversOwnPendingOffer() {
+        dispatch.offerSeen(rides.onlineAt(city, "MINI", north(5_000)).id(), offerId);
+        assertThat(seenAt()).as("another driver's").isEmpty();
+
+        rides.fire("OFFER_EXPIRY", offerId);
+        dispatch.offerSeen(driver.id(), offerId);
+
+        assertThat(seenAt()).as("ended unseen").isEmpty();
     }
 
     @Test

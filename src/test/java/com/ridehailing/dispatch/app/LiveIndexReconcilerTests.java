@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ridehailing.dispatch.DispatchApi;
 import com.ridehailing.dispatch.db.AvailabilityRepository;
+import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LiveIndex.MirrorState;
 import com.ridehailing.location.LiveIndex.Status;
 import com.ridehailing.location.LocationProperties;
@@ -52,7 +53,8 @@ class LiveIndexReconcilerTests extends IntegrationTest {
 
     @BeforeEach
     void setUp() {
-        index = new InMemoryLiveIndex(Clock.systemUTC(), Duration.ofSeconds(30), Duration.ofMinutes(10));
+        index = new InMemoryLiveIndex(Clock.systemUTC(), Duration.ofSeconds(30), Duration.ofMinutes(10),
+                LiveIndex.Quality.DEFAULT);
         reconciler = new LiveIndexReconciler(availability, index, new LiveIndexMirror(index, meters), location,
                 Clock.systemUTC());
         city = cities.create("MINI");

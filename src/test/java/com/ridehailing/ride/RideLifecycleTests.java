@@ -103,7 +103,7 @@ class RideLifecycleTests extends IntegrationTest {
 
     @Test
     void arrivingFarFromThePickupIsFlaggedButStillCounts() {
-        rides.report(driver, 2, north(301));
+        rides.relocate(driver, 2, north(301));
 
         assertAnswered("POST", ARRIVE, command(driver, "arrive"), 200);
 
@@ -112,7 +112,7 @@ class RideLifecycleTests extends IntegrationTest {
 
     @Test
     void arrivingThreeHundredMetresAwayIsNearEnough() {
-        rides.report(driver, 2, north(300));
+        rides.relocate(driver, 2, north(300));
 
         assertAnswered("POST", ARRIVE, command(driver, "arrive"), 200);
 
@@ -219,6 +219,27 @@ class RideLifecycleTests extends IntegrationTest {
         assertThat(availability(driver)).isEqualTo("AVAILABLE");
         assertThat(assertAnswered("POST", NO_SHOW, command(driver, "no-show"), 200).get("version").asInt())
                 .isEqualTo(ended.get("version").asInt());
+    }
+
+    @Test
+    void anOfflineAppsStartAndCompletionKeepTheirDeviceTimes() {
+        assertAnswered("POST", ARRIVE, command(driver, "arrive"), 200);
+
+        assertAnswered("POST", START, postJson(path("/start"), headers(driver.authorization(),
+                UUID.randomUUID().toString()), """
+                {"pin": "%s", "device_time": "2026-10-07T09:30:00.123Z"}""".formatted(ride.pin())), 200);
+        assertAnswered("POST", COMPLETE, postJson(path("/complete"), headers(driver.authorization(),
+                UUID.randomUUID().toString()), "{\"device_time\": \"2026-10-07T09:50:00Z\"}"), 200);
+
+        assertThat(jdbc.sql("""
+                        SELECT start_device_time::text || ' ' || complete_device_time::text FROM ride.rides WHERE id = :id
+                        """).param("id", ride.id()).query(String.class).single())
+                .isEqualTo("2026-10-07 09:30:00.123+00 2026-10-07 09:50:00+00");
+        assertThat(jdbc.sql("""
+                        SELECT command || ' ' || coalesce(device_time::text, '-') FROM ride.transitions
+                        WHERE ride_id = :id ORDER BY version
+                        """).param("id", ride.id()).query(String.class).list())
+                .endsWith("ARRIVE -", "START 2026-10-07 09:30:00.123+00", "COMPLETE 2026-10-07 09:50:00+00");
     }
 
     @Test

@@ -138,10 +138,12 @@ Decisions in [ADR-019](decisions/ADR-019-module-layout-and-boundaries.md).
 | `ride` | `pricing`, `payment`, `rider`, `rating`, `location`, `audit`, `platform`, `shared` | Consume quote, check dues, payment method, rider snapshot, arrival distance |
 | `dispatch` | `ride`, `driver`, `rating`, `location`, `geography`, `audit`, `platform`, `shared` | Assignment, eligibility, driver snapshot, candidates, policies |
 | `operations` | `ride`, `dispatch`, `driver`, `payment`, `notification`, `rating`, `location`, `audit`, `platform`, `shared` | Read models and orchestrated operations commands; the driver's rating in suspension answers (added in phase 11) |
+| `realtime` | `identity`, `dispatch`, `ride`, `location`, `geography`, `notification`, `platform`, `shared` | WebSocket sessions (§14, added in phase 14): tickets from identity, live updates into location's ingestion, `offer_seen` to dispatch, a rider's active ride and a ride's pickup and drop-off from ride, the ETA from geography's routing provider, the "driver arriving" notification |
 
 The graph is acyclic. Two runtime calls go against it, both by design (ADR-019):
 - **Events** travel as JSON (§15), so payment, notification and rating consume ride events without depending on `ride`.
 - **`RideDispatchParticipant`** is declared in `ride` and implemented in `dispatch` (§2.3).
+- **Pushes** (phase 14) go through `PushBus` in `platform`, so the modules that publish them, `dispatch` and `ride`, don't depend on `realtime`, which only subscribes ([ADR-020](decisions/ADR-020-valkey-access.md) amendment).
 
 ```mermaid
 flowchart BT
@@ -165,6 +167,8 @@ flowchart BT
     dispatch --> driver
     operations["operations"] --> dispatch
     operations --> notification
+    realtime["realtime"] --> dispatch
+    realtime --> notification
 ```
 
 The diagram shows the main edges; the table is complete.
@@ -304,6 +308,32 @@ public interface Transactions { <T> T execute(Supplier<T> work); void afterCommi
 public interface RateLimiter { RateDecision tryAcquire(String limit, String key); }          // §5.8
 public interface AccessTokens { AccessToken issue(UUID userId, Set<UserRole> roles); }      // §12.2
 public record Caller(UUID userId, Set<UserRole> roles) { }   // a controller parameter (§12.4)
+```
+
+Phase 14 additions:
+
+```java
+// platform: pushes over subject channels (§14.3); in memory with the memory store, else Valkey pub/sub
+public interface PushBus {
+    void publish(String channel, Object message);                 // as JSON, at once; publishers call it after commit
+    Subscription subscribe(String channel, Consumer<String> receiver);
+}
+// identity: WebSocket tickets (§14.1)
+RealtimeTicket IdentityApi.issueTicket(UUID userId, Set<UserRole> roles, String cityId);
+Optional<TicketClaims> IdentityApi.redeemTicket(String ticket);  // once
+// dispatch
+void DispatchApi.offerSeen(UUID driverId, UUID offerId);          // the offer_seen message (§8.5)
+// ride
+Optional<RideView> RideQueries.activeRideOfRider(UUID riderId);  // a rider's channels at connect (§14.3)
+Optional<UUID> RideQueries.rideOfDriverAt(UUID driverId, Instant at);  // the ride a replayed update belongs to (§9.6)
+// location
+BatchResult LocationIngestion.accept(String cityId, String category, UUID driverId, List<Incoming> updates,
+        Function<Instant, Optional<UUID>> replayedRide);         // Incoming = update + replay flag (§9.6)
+Optional<UpdateResult> LocationIngestion.live(String cityId, String category, UUID driverId, LocationUpdate update);
+                                                                  // one socket update; empty if invalid (§9.6)
+TripRoute TripRoutes.route(UUID rideId, int maxPoints);           // §9.8
+// notification
+void NotificationApi.driverArriving(UUID rideId, UUID riderId);  // once per ride (§9.7)
 ```
 
 ### 2.3 The dispatch participant
@@ -1065,6 +1095,7 @@ CREATE TABLE rating.summaries (
 
 ```sql
 -- V2: trip routes (ADR-016). The writer sets received_day; generated columns can't be partition keys.
+-- The key starts with the ride (phase 14), so reading a route probes each partition's key.
 CREATE TABLE location.trip_points (
   received_day date NOT NULL,
   ride_id      uuid NOT NULL,
@@ -1075,7 +1106,7 @@ CREATE TABLE location.trip_points (
   lat double precision NOT NULL, lon double precision NOT NULL,
   accuracy_m real, speed_mps real, heading_deg real,
   flags        smallint NOT NULL DEFAULT 0,            -- 1 poor accuracy, 2 implausible, 4 replayed
-  PRIMARY KEY (received_day, ride_id, seq)
+  PRIMARY KEY (ride_id, seq, received_day)
 ) PARTITION BY RANGE (received_day);
 
 -- V3: dead letters mirrored from Kafka for listing and re-driving (§19.1)
@@ -1458,6 +1489,7 @@ Phase 8 details: the transition is `UNREACHABLE` by `SYSTEM` (`sweeper`). The sw
 - A late command for a ride that was reassigned away from the driver gets `409 RIDE_REASSIGNED`. In the same committed transaction, the ride gets the flag `OFFLINE_CONFLICT`, with both drivers and the device time, because a physical trip may be under way ([ride lifecycle §7](ride-lifecycle.md#7-offline-driver-commands-fr-rd8)).
 - Idempotency keys live 24 h. A command replayed later still can't apply twice, because the state machine recognizes it (§7.1).
 - Phase 8 details: V1 accepts `device_time` on `start` and `complete`, as the OpenAPI document allows, and ignores it until V2. A late command gets `409 RIDE_REASSIGNED` without the `OFFLINE_CONFLICT` flag, which needs the device time.
+- Phase 14 details: `device_time` is stored on the ride and on the transition row. A late `start` or `complete` that carries a device time, from a driver the ride was reassigned away from, commits the flag `OFFLINE_CONFLICT` and then answers `409 RIDE_REASSIGNED`. The flag's details name the command, the device time, the late driver and the ride's driver now. Without a device time the command came from an app that was online, so no trip can be under way, and the answer stays `409` without a flag.
 
 ### 7.11 Flags and stuck rides
 
@@ -1922,6 +1954,13 @@ Phase 13 details:
 
 In V1 the in-memory index applies the sequence and rate rules; the quality rules arrive with V2 in both implementations.
 
+Phase 14 details:
+
+- Both implementations apply the rules, with the thresholds `ride.location.max-accuracy-m` (100), `max-speed-kmh` (150) and `implausible-reanchor` (3). `UpdateResult` carries the flags.
+- A flagged update still counts: its sequence number is taken and it is a sign of life (`lastSeen`). It doesn't move the position, so `position` and `nearby` use the last usable one, and `position` reports when that arrived.
+- A usable update resets the implausible streak. The first position after going online has nothing to jump from. The update that re-anchors after a streak is logged at INFO for spoofing review.
+- Flagged updates count in `location_update_flags_total{flag}` (`poor_accuracy`, `implausible`), besides `location_updates_total{result="applied"}`.
+
 ### 9.6 Ingestion
 
 1. The driver comes from the access token (V1) or the WebSocket session (V2), never from the message.
@@ -1936,11 +1975,23 @@ V1's `POST /v1/drivers/me/location` answers `200` with counts of applied, stale 
 
 Phase 6 details: the V1 endpoint is served by `dispatch`, which knows the driver's city and category from the availability row, and calls `LocationIngestion.accept(city, category, driver, updates)`; a driver who isn't online has every update ignored without touching the index. The bounding box is the envelope of the city's `bounds`, cached in the process, since no endpoint changes bounds. The limit is `location-per-driver`, 1 request per second. V1 counts `location_updates_total` as `applied`, `stale` (duplicates included: the script can't tell them apart), `offline` and `invalid` (bounds or numbers); a rejected request shows in the HTTP metrics as a 429.
 
+Phase 14 details:
+
+- **Over the WebSocket** a `location` message is one update through the same `LocationIngestion`. The session caches the driver's city and category from dispatch, and reads them again after 30 s or after an `offline` outcome. If an update is applied while the mirror says the driver has a ride, the driver's node publishes `driver_position` on the ride's channel (§9.7).
+- **Trip points** are buffered by the ingestion itself (§9.8). A live update becomes one only when it is applied while the mirror names a ride, with its quality flags.
+- **Replays.** An update marked `replay: true` goes through the index like any other. It also becomes a trip point with flag 4 whatever the index answered, for the ride the driver had at its device time (`RideQueries.rideOfDriverAt`); only an applied one also carries quality flags. The caller resolves that ride, since location can't depend on ride.
+- **Live updates over HTTPS**, from V1 apps, still make trip points but publish no position: rider tracking is V2's and runs on the socket.
+
 ### 9.7 Tracking and ETA (V2)
 
 - A rider's `realtime` node subscribes to `ride:{id}` after checking ownership. The driver's node publishes each applied position there, with `seq` and the latest `eta_s`.
 - **ETA:** recomputed through the routing provider at most every 15 s per ride (location §7): to the pickup before arrival, to the drop-off during the trip. The value is kept in the driver's node; after a reconnect elsewhere it is recomputed sooner, which is harmless.
 - **"Driver arriving" notification** (FR-N1): the first time the pickup ETA drops to 2 min or less **(assumed)**, `SET {city}:arriving:<ride> 1 NX EX 3600` guards against repeats, and the node calls `NotificationApi.notify`.
+
+Phase 14 details:
+
+- **The ETA** is cached per ride in the driver's node and recomputed when it is older than `ride.realtime.eta-every` (15 s). It is measured to the pickup while the mirror says `ASSIGNED` and to the drop-off while it says `ON_TRIP`, by the routing provider at the city's local time. Each node caches a ride's pickup and drop-off, which never change.
+- **"Driver arriving"** is the notification kind `DRIVER_ARRIVING`, sent by `NotificationApi.driverArriving(ride, rider)`. It is once per ride because its notification key is derived from the ride, so the table's uniqueness guards it in both stores and across nodes, instead of the planned Valkey key. A node-local memo saves repeated inserts.
 
 ### 9.8 Trip points (V2, ADR-016)
 
@@ -1948,6 +1999,13 @@ Phase 6 details: the V1 endpoint is served by `dispatch`, which knows the driver
 - Flush every 2 s or 500 points: one multi-row `INSERT … ON CONFLICT DO NOTHING` into `location.trip_points`, with `received_day` = the UTC date of `received_at`.
 - **PostgreSQL unavailable:** keep buffering for up to 30 s or 50,000 points **(assumed)**, then drop the oldest and count `trip_points_dropped_total` (location §11).
 - **Reads:** `GET /v1/rides/{id}/route` returns the points in sequence order, thinned to at most 2,000 for display. Riders and drivers see their own rides; operations reads are audited (FR-A2).
+
+Phase 14 details:
+
+- **The buffer** lives in location and is filled by the ingestion (§9.6). Every process that ingests flushes its own: every 2 s or at 500 points, and on shutdown. The flushing loop isn't a background worker, so `ride.workers.autostart=false` doesn't stop it; tests also flush by hand.
+- **A failed flush** keeps its points. Points older than 30 s, or beyond 50,000, are dropped oldest first and counted.
+- **Partitions.** Migration `location` V2 creates the table with a `DEFAULT` partition and the daily partitions for today and the next two days, so writes find theirs before the job first runs. The recurring job `trip-point-partitions` (`worker`, hourly) creates daily partitions for today and the next two days, under `lock_timeout = '2s'`. PostgreSQL refuses a day its partition while the default partition holds points of that day, so the job leaves such a day in the default partition and logs a warning. It drops daily partitions older than 90 days and deletes rows of that age from the default partition.
+- **The route endpoint** is served by `ride`, which checks the caller: the rider, the ride's driver, or operations, whose reads are audited as `route.read`. It reads `TripRoutes.route`, which keeps each sequence number's first arrival: a replay sent again on a later day lands in that day's partition. Thinning keeps 2,000 points at evenly spaced positions in the sequence, the first and the last among them; `thinned` says whether points were left out.
 
 ## 10. Pricing
 
@@ -2576,6 +2634,36 @@ The ECS deregistration delay is 35 s (ADR-018).
 
 An operations session sends `ops_viewport`. Every 2 s the node runs the snapshot script (§9.4) for that box, up to 5,000 drivers, and sends `ops_snapshot`. Drivers silent for more than 30 s are marked stale, not hidden.
 
+### 14.7 Phase 14 details
+
+- **The module.** `realtime` holds the sessions (§2.1). The ticket endpoint runs on the `api` role, the socket `/ws` on the `realtime` role.
+- **Tickets.** `POST /v1/realtime/tickets` is open to riders, drivers and operations, and limited by `tickets-per-user` (10 a minute). It answers `201` with the ticket, its expiry and `ride.realtime.url`. A driver's ticket carries their city from dispatch; nobody else's carries one.
+- **Handshake.** `GET /ws?ticket=…` redeems the ticket before the upgrade. A missing, unknown, used or expired ticket gets `401`; a draining node answers `503`, as does one that can't reach the ticket store.
+- **Channels.** The names are `drv:<driverId>`, `rdr:<riderId>` and `ride:<rideId>`. A driver's session subscribes `drv:`, a rider's `rdr:` and the active ride's `ride:` from `RideQueries.activeRideOfRider`.
+  - `PushBus` keeps one subscription per channel and node, shared by its sessions and dropped with the last of them.
+  - With the memory store it delivers inside the process. With Valkey it uses `PUBLISH` and `SUBSCRIBE` on a single node, and `SPUBLISH` and `SSUBSCRIBE` in a cluster.
+- **Who publishes**, always after commit, through `Transactions.afterCommit`. `PushBus.publish` itself sends at once and never waits for Valkey, because an after-commit action that registered another would lose it.
+  - `dispatch` publishes `offer` when a search attempt makes an offer. Its `expires_in_ms` is the offer's time to live less the time since it was made, measured when the push goes by the process's monotonic clock, so it doesn't depend on the application and database clocks agreeing.
+  - It publishes `offer_withdrawn` when an offer expires or is withdrawn: `EXPIRED`, `RIDER_CANCELLED`, `SEARCH_TIMEOUT`, `OPS_CANCELLED` or `SUSPENDED`.
+  - It publishes `driver_status` when the server changes a driver's availability: `SUSPENDED`, `SILENT` (idle), `UNREACHABLE` or `UNRESPONSIVE` (offers left to expire).
+  - `ride` publishes `ride_status` on every transition, to the rider and to the driver concerned, including a driver just released.
+  - Payloads hold the schema's required fields plus what the publisher already has; nothing is read after commit to fill them.
+- **Messages in.** JSON is read leniently: unknown fields are ignored, as over HTTP.
+  - A malformed message or one breaking the schema's rules gets `error INVALID_MESSAGE`; a message the session's roles don't allow gets `error FORBIDDEN`.
+  - A `location` over the 1 per second limit gets `error RATE_LIMITED` and counts as `rate_limited`.
+  - Frames over 1 KB close the session with 1009; binary frames close it with 1003.
+- **Sending.** Each session has an outbox drained by one virtual thread, so one session never waits for another.
+  - `driver_position` is coalesced per ride. Pings go through the same outbox, since a socket takes one send at a time.
+  - An outbox holding more than `buffer-limit` (16 KB), or a send blocked longer than `send-time-limit` (2 s), closes the session as not reliable (4500). The client reconnects and resyncs.
+- **Heartbeats.** A node loop runs every 5 s. It sends a ping once `ping-every` (25 s) has passed since the last one, and closes a session that sent nothing, not even a pong, for `idle-timeout` (60 s). Like the trip-point flusher, these node loops aren't background workers.
+- **Draining** is a lifecycle bean that stops before the web server.
+  - It opts out of temporary context pauses (`isPauseable=false`): pausing Spring's cached test contexts must not drain a live node or leave its readiness down after restart. Actual context closure still drains it; both paths have regression tests.
+  - It sets readiness to `REFUSING_TRAFFIC` and answers new handshakes `503`.
+  - It sends every session `reconnect` with `after_ms` drawn evenly from 0 to `drain-spread` (25 s), then waits up to `drain-timeout` (30 s) for the sessions to leave.
+  - It closes the rest with 1001. `spring.lifecycle.timeout-per-shutdown-phase` is 40 s, so the wait isn't cut short.
+- **Operations map.** `ops_snapshot` lists drivers from `LiveIndex.snapshot`, up to 5,000, with `truncated` set when the limit was reached; `stale` means last heard more than 30 s ago. Only operations sessions may send `ops_viewport`.
+- **Metrics.** `websocket_connections{kind}` (`driver`, `rider`, `ops`) and `websocket_closes_total{reason}` (`client`, `slow`, `idle`, `drain`).
+
 ## 15. Events
 
 Envelope and rules: [ADR-008](decisions/ADR-008-outbox-and-events.md), [HLD §9](architecture.md#9-events-and-messaging). Schemas: [schemas/events/](schemas/events/).
@@ -2747,6 +2835,14 @@ Phase 13 details:
   - The test drives the job itself, as other integration tests drive the loops (§1.3).
   - The application runs on a database of its own in the test container. After a total loss the watch repairs every city with online drivers, one after another, and the shared database holds every city that other classes left online.
 - **Wiring tests.** Contexts started with `ride.location.store=valkey` check which implementations are wired and that a process with a single role starts.
+
+Phase 14 details:
+
+- **WebSocket contract.** Tests connect through the real handshake with the JDK's WebSocket client. Every server message they receive is checked against `server-messages.v1.json`, and every type is recorded. After the whole suite, `ContractCoverageTests` also requires each server message type to have been checked.
+- **HTTP coverage** now requires a checked success from every operation that has a handler, whatever its version, instead of from V1's only, so the V2 operations of this phase count.
+- **The drain test** runs two nodes on Valkey with short drain settings. Riders and drivers on rides are connected to the first; the test drains it. While it drains, its readiness probe on the API port (`/readyz`) answers `503`, and so do its handshakes. Every client gets `reconnect`, takes a new ticket and connects to the second, and every ride then runs to completion with its pushes arriving there.
+- **Replays.** A driver's live updates and then a replay of overlapping and new updates, sent twice, leave each sequence number once in the route; the replayed points carry flag 4.
+- **Quality rules** join the live-index contract suite, so all three runs check them.
 
 ### 17.2 Concurrency harness
 
@@ -2994,6 +3090,14 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |
 | `ride.location.offline-after` | `10m` | Available driver silence before going offline |
 | `ride.location.max-accuracy-m`, `max-speed-kmh` | `100`, `150` | Quality rules (V2) |
+| `ride.location.implausible-reanchor` | `3` | The implausible update that is taken as the new position (§9.5, phase 14) |
+| `ride.realtime.url` | `ws://localhost:8080/ws` | Where tickets send clients (§14.7) |
+| `ride.realtime.ping-every`, `idle-timeout` | `25s`, `60s` | Heartbeats (§14.4) |
+| `ride.realtime.heartbeat-every` | `5s` | How often the node's heartbeat loop runs (§14.7) |
+| `ride.realtime.send-time-limit`, `buffer-limit` | `2s`, `16KB` | A session too slow to keep is closed (§14.4) |
+| `ride.realtime.drain-spread`, `drain-timeout` | `25s`, `30s` | Draining (§14.5) |
+| `ride.realtime.ops-every`, `ops-max-drivers` | `2s`, `5000` | Operations map (§14.6) |
+| `ride.realtime.eta-every`, `arriving-within` | `15s`, `2m` | Tracking (§9.7) |
 | `ride.dispatch.poll-interval`, `workers` | `250ms`, `4` | Search-task poller |
 | `ride.dispatch.candidates`, `max-reservation-tries` | `20`, `5` | Search attempt |
 | `ride.dispatch.retry-after`, `contention-retry-after` | `5s`, `1s` | When nothing was reserved |

@@ -71,3 +71,7 @@
 
 - Valkey Functions gain something scripts can't provide, for example per-function access control that operations needs.
 - GLIDE becomes the common choice on ElastiCache and its Java client matures.
+
+## Amendments
+
+- **2026-10-07, phase 14** ([LLD §2.1](../low-level-design.md#21-allowed-dependencies), [§14.7](../low-level-design.md#147-phase-14-details)): `PushBus` is declared in `platform`, not in a realtime module. `dispatch` and `ride` publish pushes, and the new `realtime` module depends on both of them, so a port of its own would close a cycle. The port's two implementations follow the store: in memory, or Valkey pub/sub, sharded in a cluster.

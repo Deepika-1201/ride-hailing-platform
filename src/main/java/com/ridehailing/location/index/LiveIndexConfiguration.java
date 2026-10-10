@@ -24,14 +24,15 @@ class LiveIndexConfiguration {
             requireApiAndDispatch(Binder.get(environment).bind("ride.roles", Bindable.setOf(Role.class))
                     .orElseGet(() -> EnumSet.allOf(Role.class)));
         }
-        return new InMemoryLiveIndex(clock, properties.freshness(), properties.tombstoneTtl());
+        return new InMemoryLiveIndex(clock, properties.freshness(), properties.tombstoneTtl(), properties.quality());
     }
 
     /** Shared by every process, so any split of roles is correct (LLD §1.3). */
     @Bean
     @ConditionalOnProperty(name = "ride.location.store", havingValue = "valkey")
     LiveIndex valkeyLiveIndex(Valkey valkey, LocationProperties properties, Clock clock) {
-        return new ValkeyLiveIndex(valkey, clock, properties.freshness(), properties.tombstoneTtl());
+        return new ValkeyLiveIndex(valkey, clock, properties.freshness(), properties.tombstoneTtl(),
+                properties.quality());
     }
 
     /** The in-memory index is only right when the API and dispatch share it (LLD §1.3). */

@@ -68,8 +68,9 @@ class DriverLocationTests extends IntegrationTest {
         goOnline(driver);
         GeoPoint last = city.at(0.2, 0.2);
 
+        // A few metres apart, so no step is an implausible jump (§9.5).
         JsonNode result = assertAnswered("POST", LOCATION, send(driver,
-                update(3, last), update(1, city.at(0.1, 0.1)), update(2, city.at(0.15, 0.15))), 200);
+                update(3, last), update(1, city.at(0.1999, 0.1999)), update(2, city.at(0.19995, 0.19995))), 200);
 
         assertThat(result.get("applied").asInt()).isEqualTo(3);
         assertThat(result.get("stale").asInt()).isZero();

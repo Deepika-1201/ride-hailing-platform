@@ -96,6 +96,16 @@ public class TestRides {
                 new LocationUpdate(seq, position, 5, null, null, Instant.now()));
     }
 
+    /**
+     * Moves the driver at once: a jump the quality rules take only as the third implausible update in a row (LLD §9.5),
+     * sent as {@code seq} and the two after it.
+     */
+    public void relocate(TestDriver driver, long seq, GeoPoint position) {
+        for (long next = seq; next < seq + 3; next++) {
+            report(driver, next, position);
+        }
+    }
+
     /** Runs search attempts until no task is due; answers how many ran. */
     public int search() {
         Poller poller = searchTaskPoller();

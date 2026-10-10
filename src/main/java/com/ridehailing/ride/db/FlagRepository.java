@@ -100,6 +100,7 @@ public class FlagRepository {
         ARRIVED_FAR,
         DRIVER_CANCELLED_AT_PICKUP,
         PIN_LOCKED,
+        OFFLINE_CONFLICT,
         STUCK
     }
 }

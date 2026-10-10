@@ -53,8 +53,9 @@ class Assignments implements RideAssignment {
     public Optional<SearchingRide> lockIfSearching(UUID rideId) {
         return rides.lockForShare(rideId)
                 .filter(ride -> ride.status() == RideStatus.SEARCHING)
-                .map(ride -> new SearchingRide(ride.id(), ride.cityId(), ride.category(), ride.pickup(),
-                        ride.requestedAt()));
+                .map(views::of)
+                .map(ride -> new SearchingRide(ride.id(), ride.cityId(), ride.category(), ride.pickup(), ride.dropoff(),
+                        ride.fare(), ride.rider(), ride.requestedAt()));
     }
 
     @Override

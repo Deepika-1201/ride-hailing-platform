@@ -24,7 +24,8 @@ class LiveIndexMirrorTests {
 
     @Test
     void aWriteTheIndexTakesIsReported() {
-        LiveIndex index = new InMemoryLiveIndex(Clock.systemUTC(), Duration.ofSeconds(30), Duration.ofMinutes(10));
+        LiveIndex index = new InMemoryLiveIndex(Clock.systemUTC(), Duration.ofSeconds(30), Duration.ofMinutes(10),
+                LiveIndex.Quality.DEFAULT);
         LiveIndexMirror mirror = new LiveIndexMirror(index, meters);
 
         assertThat(mirror.mirror(row)).isTrue();

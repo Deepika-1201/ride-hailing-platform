@@ -168,10 +168,15 @@ public class RideRepository {
 
     /** A transition that stamps its time: to {@code DRIVER_ARRIVED}, {@code IN_TRIP} or {@code COMPLETED}. */
     public Optional<RideRow> advance(UUID id, int version, RideStatus from, RideStatus to) {
+        return advance(id, version, from, to, null);
+    }
+
+    /** A start or completion keeps the device time an offline app sent with it (LLD §7.10); null otherwise. */
+    public Optional<RideRow> advance(UUID id, int version, RideStatus from, RideStatus to, Instant deviceTime) {
         String stamp = switch (to) {
             case DRIVER_ARRIVED -> "arrived_at = now()";
-            case IN_TRIP -> "started_at = now()";
-            case COMPLETED -> "completed_at = now(), ended_at = now()";
+            case IN_TRIP -> "started_at = now(), start_device_time = :deviceTime";
+            case COMPLETED -> "completed_at = now(), ended_at = now(), complete_device_time = :deviceTime";
             default -> throw new IllegalArgumentException("No time to stamp for " + to);
         };
         return jdbc.sql("""
@@ -183,6 +188,7 @@ public class RideRepository {
                 .param("id", id)
                 .param("from", from.name())
                 .param("version", version)
+                .param("deviceTime", deviceTime == null ? null : deviceTime.atOffset(ZoneOffset.UTC))
                 .query(RideRepository::ride)
                 .optional();
     }
@@ -291,6 +297,23 @@ public class RideRepository {
                         """)
                 .param("driverId", driverId)
                 .query(RideRepository::ride)
+                .optional();
+    }
+
+    /**
+     * The ride the driver has, or ended with, that was assigned to them by then and hadn't ended before, by
+     * {@code rides_driver_history}.
+     */
+    public Optional<UUID> ofDriverAt(UUID driverId, Instant at) {
+        return jdbc.sql("""
+                        SELECT id FROM ride.rides
+                        WHERE driver_id = :driverId AND requested_at <= :at AND assigned_at <= :at
+                          AND (ended_at IS NULL OR ended_at >= :at)
+                        ORDER BY requested_at DESC, id DESC LIMIT 1
+                        """)
+                .param("driverId", driverId)
+                .param("at", at.atOffset(ZoneOffset.UTC))
+                .query(UUID.class)
                 .optional();
     }
 

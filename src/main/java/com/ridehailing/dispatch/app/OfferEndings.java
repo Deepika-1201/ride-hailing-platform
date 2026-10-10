@@ -17,7 +17,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * Ends a pending offer that the caller holds locked (LLD §8.6, §8.7, §7.3): the offer row, its timer, the ride's
- * task, the event and the driver's counts. What becomes of the driver's availability is the caller's decision.
+ * task, the event, the driver's counts and, unless the driver declined, the push. What becomes of the driver's
+ * availability is the caller's decision.
  */
 @Component
 class OfferEndings {
@@ -28,16 +29,18 @@ class OfferEndings {
     private final Outbox outbox;
     private final DriverStatsRepository stats;
     private final DispatchMetrics metrics;
+    private final DriverPushes pushes;
     private final Clock clock;
 
     OfferEndings(OfferRepository offers, SearchTaskRepository tasks, Timers timers, Outbox outbox,
-            DriverStatsRepository stats, DispatchMetrics metrics, Clock clock) {
+            DriverStatsRepository stats, DispatchMetrics metrics, DriverPushes pushes, Clock clock) {
         this.offers = offers;
         this.tasks = tasks;
         this.timers = timers;
         this.outbox = outbox;
         this.stats = stats;
         this.metrics = metrics;
+        this.pushes = pushes;
         this.clock = clock;
     }
 
@@ -61,6 +64,7 @@ class OfferEndings {
                 offer.rideId(), offer.driverId(), offer.seenAt() != null, clock.instant())));
         stats.count(offer.driverId(), Stat.EXPIRED);
         metrics.ended(OfferStatus.EXPIRED);
+        pushes.offerWithdrawn(expired, "EXPIRED");
         return expired;
     }
 
@@ -71,6 +75,7 @@ class OfferEndings {
         outbox.append(event(OfferWithdrawn.TYPE, OfferWithdrawn.VERSION, withdrawn, new OfferWithdrawn(offer.id(),
                 offer.rideId(), offer.driverId(), reason, clock.instant())));
         metrics.ended(OfferStatus.WITHDRAWN);
+        pushes.offerWithdrawn(withdrawn, reason);
         return withdrawn;
     }
 

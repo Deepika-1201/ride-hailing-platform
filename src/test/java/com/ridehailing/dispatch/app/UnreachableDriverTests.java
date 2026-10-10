@@ -146,6 +146,29 @@ class UnreachableDriverTests extends IntegrationTest {
         assertProblem("POST", "/v1/rides/{ride_id}/cancel", command(ride, "cancel"), 409, "RIDE_REASSIGNED");
     }
 
+    /** LLD §7.10: a trip the silent driver started or ended offline may really be under way. */
+    @Test
+    void aLateOfflineCommandFromTheSilentDriverOpensACaseForOperations() {
+        AssignedRide ride = assigned(0);
+        sweep(Instant.now().plus(location.unreachableAfter()).plusSeconds(5));
+
+        assertProblem("POST", "/v1/rides/{ride_id}/complete", command(ride, "complete", "{}"), 409,
+                "RIDE_REASSIGNED");
+        assertThat(offlineConflicts(ride)).as("an online app's late tap is no trip").isEmpty();
+
+        assertProblem("POST", "/v1/rides/{ride_id}/start", command(ride, "start", """
+                {"pin": "%s", "device_time": "2026-10-07T09:30:00Z"}""".formatted(ride.pin())), 409,
+                "RIDE_REASSIGNED");
+        assertProblem("POST", "/v1/rides/{ride_id}/complete", command(ride, "complete", """
+                {"device_time": "2026-10-07T09:50:00Z"}"""), 409, "RIDE_REASSIGNED");
+
+        assertThat(offlineConflicts(ride)).as("one open case; the ride is searching, so it has no driver now")
+                .singleElement().isEqualTo("""
+                {"command": "START", "device_time": "2026-10-07T09:30:00Z", "late_driver_id": "%s"}\
+                """.formatted(ride.driver().id()));
+        assertThat(rides.rideStatus(ride.id())).isEqualTo("SEARCHING");
+    }
+
     @Test
     void twoMinutesOfSilenceIsNotYetUnreachable() {
         AssignedRide exactly = assigned(0);
@@ -350,8 +373,17 @@ class UnreachableDriverTests extends IntegrationTest {
     }
 
     private HttpResponse<String> command(AssignedRide ride, String action) {
+        return command(ride, action, "{}");
+    }
+
+    private HttpResponse<String> command(AssignedRide ride, String action, String body) {
         return postJson("/v1/rides/" + ride.id() + "/" + action, Map.of("Authorization",
-                ride.driver().authorization(), Idempotency.HEADER, UUID.randomUUID().toString()), "{}");
+                ride.driver().authorization(), Idempotency.HEADER, UUID.randomUUID().toString()), body);
+    }
+
+    private List<String> offlineConflicts(AssignedRide ride) {
+        return jdbc.sql("SELECT details::text FROM ride.flags WHERE ride_id = :id AND kind = 'OFFLINE_CONFLICT'")
+                .param("id", ride.id()).query(String.class).list();
     }
 
     private String availability(AssignedRide ride) {

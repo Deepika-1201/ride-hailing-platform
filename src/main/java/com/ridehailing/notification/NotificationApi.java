@@ -13,6 +13,9 @@ public interface NotificationApi {
     /** The ride's notifications with their deliveries, oldest first (the timeline, LLD §13.5). */
     List<NotificationView> ofRide(UUID rideId);
 
+    /** Tells the rider their driver is about to arrive, once per ride whoever calls (LLD §9.7). */
+    void driverArriving(UUID rideId, UUID riderId);
+
     record NotificationView(UUID id, UUID recipientId, String kind, Instant createdAt,
             List<DeliveryView> deliveries) {
 

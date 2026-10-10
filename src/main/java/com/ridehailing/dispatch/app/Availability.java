@@ -31,6 +31,7 @@ class Availability {
 
     static final String AGGREGATE = "availability";
     static final String SUSPENDED = "SUSPENDED";
+    private static final String BY_DRIVER = "DRIVER";
 
     private final AvailabilityRepository availability;
     private final SessionRepository sessions;
@@ -41,10 +42,11 @@ class Availability {
     private final AuditLog auditLog;
     private final Transactions transactions;
     private final LiveIndexMirror mirror;
+    private final DriverPushes pushes;
 
     Availability(AvailabilityRepository availability, SessionRepository sessions, OfferRepository offers,
             OfferEndings endings, DriverApi drivers, Outbox outbox, AuditLog auditLog, Transactions transactions,
-            LiveIndexMirror mirror) {
+            LiveIndexMirror mirror, DriverPushes pushes) {
         this.availability = availability;
         this.sessions = sessions;
         this.offers = offers;
@@ -54,6 +56,7 @@ class Availability {
         this.auditLog = auditLog;
         this.transactions = transactions;
         this.mirror = mirror;
+        this.pushes = pushes;
     }
 
     DriverStatusView goOnline(UUID driverId, UUID vehicleId) {
@@ -112,7 +115,7 @@ class Availability {
                 throw new ApiException(HttpStatus.CONFLICT, "INVALID_TRANSITION",
                         "An offer arrived as you went offline; try again.");
             }
-            return view(takeOffline(locked, "DRIVER", driver(driverId)));
+            return view(takeOffline(locked, BY_DRIVER, driver(driverId)));
         });
     }
 
@@ -165,6 +168,9 @@ class Availability {
         auditLog.record(new AuditEntry(actor, "availability.offline", AGGREGATE, locked.driverId().toString(), reason,
                 Map.of("status", locked.status().name()), Map.of("status", AvailabilityStatus.OFFLINE.name())));
         mirror.afterCommit(offline);
+        if (!reason.equals(BY_DRIVER)) {
+            pushes.statusChanged(offline, reason);
+        }
         return offline;
     }
 

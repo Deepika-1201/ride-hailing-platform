@@ -26,6 +26,7 @@ import com.ridehailing.ride.events.TripStarted;
 import com.ridehailing.shared.Actor;
 import com.ridehailing.shared.Money;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -94,10 +95,22 @@ public class DriverCommands {
         });
     }
 
-    /** T9. A wrong PIN is answered rather than thrown, so its count commits (LLD §7.6). */
+    /** T9 from an app that is online. */
     public StartOutcome start(UUID driverId, UUID rideId, String pin) {
+        return start(driverId, rideId, pin, null);
+    }
+
+    /**
+     * T9. A wrong PIN is answered rather than thrown, so its count commits (LLD §7.6); so is a late offline start
+     * on a ride reassigned away, so its flag commits (§7.10). {@code deviceTime} is null from an online app.
+     */
+    public StartOutcome start(UUID driverId, UUID rideId, String pin, Instant deviceTime) {
         return transactions.execute(() -> {
-            RideRow ride = commands.lockForDriver(rideId, driverId);
+            Optional<RideRow> locked = commands.lockForDriver(rideId, driverId, Command.START, deviceTime);
+            if (locked.isEmpty()) {
+                return StartOutcome.REASSIGNED;
+            }
+            RideRow ride = locked.get();
             if (ride.status() == RideStatus.IN_TRIP || ride.status() == RideStatus.COMPLETED) {
                 return new StartOutcome(views.of(ride).forDriver(), null);
             }
@@ -114,8 +127,8 @@ public class DriverCommands {
                 }
                 return new StartOutcome(null, attemptsLeft);
             }
-            RideRow started = rides.advance(ride.id(), ride.version(), ride.status(), to).orElseThrow();
-            log.record(ride, started, Command.START, driver(driverId), null);
+            RideRow started = rides.advance(ride.id(), ride.version(), ride.status(), to, deviceTime).orElseThrow();
+            log.record(ride, started, Command.START, driver(driverId), null, deviceTime);
             participant.tripStarted(ride.id(), driverId);
             outbox.append(DomainEvent.of(TripStarted.TYPE, TripStarted.VERSION, "ride", ride.id(), started.version(),
                     new TripStarted(ride.id(), ride.riderId(), driverId, started.startedAt())));
@@ -149,23 +162,35 @@ public class DriverCommands {
         });
     }
 
-    /** T12: the fare is the quoted fare (FR-RD6). */
+    /** T12 from an app that is online. */
     public RideView complete(UUID driverId, UUID rideId) {
+        return complete(driverId, rideId, null).orElseThrow(RideErrors::reassigned);
+    }
+
+    /**
+     * T12: the fare is the quoted fare (FR-RD6). Empty for a late offline completion on a ride reassigned away, whose
+     * flag then commits, as in {@link #start}.
+     */
+    public Optional<RideView> complete(UUID driverId, UUID rideId, Instant deviceTime) {
         return transactions.execute(() -> {
-            RideRow ride = commands.lockForDriver(rideId, driverId);
+            Optional<RideRow> locked = commands.lockForDriver(rideId, driverId, Command.COMPLETE, deviceTime);
+            if (locked.isEmpty()) {
+                return Optional.empty();
+            }
+            RideRow ride = locked.get();
             if (ride.status() == RideStatus.COMPLETED) {
-                return views.of(ride).forDriver();
+                return Optional.of(views.of(ride).forDriver());
             }
             RideStatus to = RideCommands.target(ride, Command.COMPLETE, Actor.Type.DRIVER);
-            RideRow completed = rides.advance(ride.id(), ride.version(), ride.status(), to).orElseThrow();
-            log.record(ride, completed, Command.COMPLETE, driver(driverId), null);
+            RideRow completed = rides.advance(ride.id(), ride.version(), ride.status(), to, deviceTime).orElseThrow();
+            log.record(ride, completed, Command.COMPLETE, driver(driverId), null, deviceTime);
             participant.driverReleased(ride.id(), driverId, DriverRelease.COMPLETED);
             outbox.append(DomainEvent.of(TripCompleted.TYPE, TripCompleted.VERSION, "ride", ride.id(),
                     completed.version(), new TripCompleted(ride.id(), ride.riderId(), driverId, ride.cityId(),
                             ride.category(), new Money(ride.farePaise(), ride.currency()),
                             new Money(ride.commissionPaise(), ride.currency()), ride.paymentMethodId(),
                             ride.paymentMethodType(), completed.completedAt())));
-            return views.of(completed).forDriver();
+            return Optional.of(views.of(completed).forDriver());
         });
     }
 
@@ -173,7 +198,13 @@ public class DriverCommands {
         return new Actor(Actor.Type.DRIVER, driverId.toString());
     }
 
-    /** Either the started ride, or the attempts left after a wrong PIN. */
+    /** The started ride, the attempts left after a wrong PIN, or neither when a late offline start was flagged. */
     public record StartOutcome(RideView ride, Integer attemptsLeft) {
+
+        static final StartOutcome REASSIGNED = new StartOutcome(null, null);
+
+        public boolean reassigned() {
+            return ride == null && attemptsLeft == null;
+        }
     }
 }

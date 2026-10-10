@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.function.Function;
+import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
@@ -120,22 +121,39 @@ public final class Valkeys {
 
     private static synchronized GenericContainer<?> clusterNodes() {
         if (clusterNodes == null) {
-            clusterNodes = new GenericContainer<>(IMAGE)
+            GenericContainer<?> container = new GenericContainer<>(IMAGE)
                     .withExposedPorts(CLUSTER_PORTS.toArray(Integer[]::new))
                     .withCommand("sh", "-c", """
+                            set -eu
                             for port in 7000 7001 7002; do
                               valkey-server --port $port --cluster-enabled yes --cluster-config-file nodes-$port.conf \
                                 --protected-mode no --save '' --appendonly no --daemonize yes --dir /tmp
                             done
-                            sleep 1
-                            valkey-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
-                              --cluster-replicas 0 --cluster-yes
-                            tail -f /dev/null
+                            exec tail -f /dev/null
                             """)
-                    .waitingFor(Wait.forLogMessage(".*All 16384 slots covered.*", 1)
+                    .waitingFor(Wait.forListeningPort()
                             .withStartupTimeout(Duration.ofMinutes(1)));
-            clusterNodes.start();
-            awaitClusterOk(clusterNodes);
+            try {
+                container.start();
+                ExecResult result = container.execInContainer("valkey-cli", "--cluster", "create",
+                        "127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002", "--cluster-replicas", "0",
+                        "--cluster-yes");
+                if (result.getExitCode() != 0) {
+                    throw new IllegalStateException("Creating the Valkey cluster failed: " + result.getStdout()
+                            + result.getStderr());
+                }
+                awaitClusterOk(container);
+                clusterNodes = container;
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            } finally {
+                if (clusterNodes == null) {
+                    container.stop();
+                }
+            }
         }
         return clusterNodes;
     }

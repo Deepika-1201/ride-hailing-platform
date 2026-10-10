@@ -5,9 +5,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.ridehailing.support.IntegrationTest;
 import java.net.http.HttpResponse;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.availability.ApplicationAvailability;
+import org.springframework.boot.availability.ReadinessState;
 
 /** The default: one process runs all four roles, as locally (ADR-001). */
 class AllRolesTests extends IntegrationTest {
+
+    @Autowired
+    private ApplicationAvailability availability;
 
     @Test
     void infoReportsAllFourRoles() {
@@ -16,9 +22,12 @@ class AllRolesTests extends IntegrationTest {
 
     @Test
     void livenessAndReadinessAreUpOnBothPorts() {
+        assertThat(availability.getReadinessState())
+                .as("last readiness change: %s", availability.getLastChangeEvent(ReadinessState.class))
+                .isEqualTo(ReadinessState.ACCEPTING_TRAFFIC);
         for (String path : new String[] {"/actuator/health/liveness", "/actuator/health/readiness"}) {
             HttpResponse<String> probe = get(managementPort, path);
-            assertThat(probe.statusCode()).as(path).isEqualTo(200);
+            assertThat(probe.statusCode()).as("%s: %s", path, probe.body()).isEqualTo(200);
             assertThat(json(probe).get("status").asString()).as(path).isEqualTo("UP");
         }
         assertThat(get(port, "/livez").statusCode()).isEqualTo(200);

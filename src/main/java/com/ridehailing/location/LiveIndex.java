@@ -15,7 +15,10 @@ import java.util.UUID;
  */
 public interface LiveIndex {
 
-    /** Applies one update if its sequence number is newer, for a driver mirrored online in the category. */
+    /**
+     * Applies one update if its sequence number is newer, for a driver mirrored online in the category; a flagged one
+     * (§9.5) is a sign of life that doesn't move the position.
+     */
     UpdateResult update(String cityId, UUID driverId, String category, LocationUpdate update);
 
     /** Up to {@code k} available drivers of the category within the radius, heard from recently, nearest first. */
@@ -65,7 +68,16 @@ public interface LiveIndex {
     }
 
     /** {@code status} and {@code rideId} are the mirror's; {@code category} is the mirror's on a mismatch only. */
-    record UpdateResult(Outcome outcome, Status status, String category, UUID rideId) {
+    record UpdateResult(Outcome outcome, Status status, String category, UUID rideId, int flags) {
+
+        /** Worse than the accuracy limit: a sign of life, not a position (§9.5). */
+        public static final int POOR_ACCURACY = 1;
+        /** Faster than the speed limit from the last usable position: not used (§9.5). */
+        public static final int IMPLAUSIBLE = 2;
+
+        public UpdateResult(Outcome outcome, Status status, String category, UUID rideId) {
+            this(outcome, status, category, rideId, 0);
+        }
 
         public enum Outcome {
             APPLIED,
@@ -75,13 +87,23 @@ public interface LiveIndex {
         }
     }
 
+    /**
+     * The quality rules (§9.5): accuracy and speed limits, and the implausible update, counted in a row, that is taken
+     * as the new position after all.
+     */
+    record Quality(double maxAccuracyM, double maxSpeedMps, int reanchorAfter) {
+
+        public static final Quality DEFAULT = new Quality(100, 150 / 3.6, 3);
+    }
+
     record Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen) {
     }
 
+    /** The last usable position and when it arrived; {@code seq} is the last applied update's. */
     record LivePosition(GeoPoint position, Instant receivedAt, long seq) {
     }
 
-    /** {@code rideId} may be null; {@code lastSeen} is when the position arrived. */
+    /** {@code rideId} may be null; {@code lastSeen} is when the driver was last heard from. */
     record OnlineDriver(UUID driverId, GeoPoint position, Status status, String category, UUID rideId,
             Instant lastSeen) {
     }

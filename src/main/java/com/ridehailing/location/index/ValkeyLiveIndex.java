@@ -28,7 +28,8 @@ import java.util.stream.Stream;
 
 /**
  * The V2 live index (LLD §9.3, §9.4): one Lua script per update, query, mirror write and sweep, every key of a call
- * under the city's hash tag. Times are the application clock's milliseconds, passed to the scripts.
+ * under the city's hash tag, with the quality rules of §9.5. Times are the application clock's milliseconds, passed to
+ * the scripts.
  */
 public class ValkeyLiveIndex implements LiveIndex {
 
@@ -49,12 +50,14 @@ public class ValkeyLiveIndex implements LiveIndex {
     private final Clock clock;
     private final Duration freshness;
     private final Duration tombstoneTtl;
+    private final Quality quality;
 
-    public ValkeyLiveIndex(Valkey valkey, Clock clock, Duration freshness, Duration tombstoneTtl) {
+    public ValkeyLiveIndex(Valkey valkey, Clock clock, Duration freshness, Duration tombstoneTtl, Quality quality) {
         this.valkey = valkey;
         this.clock = clock;
         this.freshness = freshness;
         this.tombstoneTtl = tombstoneTtl;
+        this.quality = quality;
         valkey.load(UPDATE, QUERY, MIRROR, SWEEP, STATES);
     }
 
@@ -64,12 +67,15 @@ public class ValkeyLiveIndex implements LiveIndex {
                 keys(driver(cityId, driverId), seen(cityId), geo(cityId, category), geo(cityId, "online")),
                 driverId.toString(), Long.toString(update.seq()), Long.toString(clock.millis()),
                 Double.toString(update.position().lat()), Double.toString(update.position().lon()),
-                Double.toString(update.accuracyM()), text(update.headingDeg()), text(update.speedMps()), category);
+                Double.toString(update.accuracyM()), text(update.headingDeg()), text(update.speedMps()), category,
+                Double.toString(quality.maxAccuracyM()), Double.toString(quality.maxSpeedMps()),
+                Integer.toString(quality.reanchorAfter()));
         long code = (Long) reply.get(0);
         Status status = Status.valueOf((String) reply.get(1));
         UUID ride = uuid((String) reply.get(3));
         if (code == 1) {
-            return new UpdateResult(UpdateResult.Outcome.APPLIED, status, null, ride);
+            return new UpdateResult(UpdateResult.Outcome.APPLIED, status, null, ride,
+                    ((Long) reply.get(4)).intValue());
         } else if (code == 0) {
             return new UpdateResult(UpdateResult.Outcome.STALE, status, null, ride);
         } else if (code == -1) {

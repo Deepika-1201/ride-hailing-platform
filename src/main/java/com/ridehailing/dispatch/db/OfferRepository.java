@@ -112,8 +112,12 @@ public class OfferRepository {
         return offers;
     }
 
+    /** Only the driver's pending offer, once (§8.5). */
     public void markSeen(UUID id, UUID driverId) {
-        jdbc.sql("UPDATE dispatch.offers SET seen_at = now() WHERE id = :id AND driver_id = :driverId AND seen_at IS NULL")
+        jdbc.sql("""
+                        UPDATE dispatch.offers SET seen_at = now()
+                        WHERE id = :id AND driver_id = :driverId AND status = 'PENDING' AND seen_at IS NULL
+                        """)
                 .param("id", id)
                 .param("driverId", driverId)
                 .update();

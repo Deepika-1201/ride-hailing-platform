@@ -16,8 +16,9 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 import tools.jackson.databind.JsonNode;
 
 /**
- * LLD §17.1: every handler is a documented operation, and after the whole suite every V1 operation has answered a
- * success and every event type has been produced, each checked against its contract. Ordered after every other class.
+ * LLD §17.1: every handler is a documented operation, and after the whole suite every operation with a handler has
+ * answered a success, every event type has been produced and every server message type received, each checked against
+ * its contract. Ordered after every other class.
  */
 @Order(Integer.MAX_VALUE)
 class ContractCoverageTests extends IntegrationTest {
@@ -33,24 +34,20 @@ class ContractCoverageTests extends IntegrationTest {
 
     @Test
     void everyHandlerIsADocumentedOperationAndEveryV1OperationHasOne() {
-        Set<String> handled = handlers.getHandlerMethods().keySet().stream()
-                .flatMap(mapping -> mapping.getPatternValues().stream().filter(path -> path.startsWith("/v1/"))
-                        .flatMap(path -> mapping.getMethodsCondition().getMethods().stream()
-                                .map(method -> method.name() + " " + VARIABLE.matcher(path).replaceAll("{}"))))
-                .collect(Collectors.toCollection(TreeSet::new));
+        Set<String> handled = handled();
 
         assertThat(missing(handled, operations(true))).as("handlers that openapi.yaml doesn't document").isEmpty();
         assertThat(missing(operations(false), handled)).as("V1 operations without a handler").isEmpty();
     }
 
     @Test
-    void everyV1OperationAnsweredASuccessThatATestChecked() {
+    void everyHandledOperationAnsweredASuccessThatATestChecked() {
         assumeTrue(WHOLE_SUITE, "only after the whole suite");
         Set<String> succeeded = OpenApiContract.checked().stream().filter(checked -> checked.matches(".* 2\\d\\d"))
                 .map(checked -> VARIABLE.matcher(checked.substring(0, checked.lastIndexOf(' '))).replaceAll("{}"))
                 .collect(Collectors.toSet());
 
-        assertThat(missing(operations(false), succeeded)).as("V1 operations no test saw succeed").isEmpty();
+        assertThat(missing(handled(), succeeded)).as("operations no test saw succeed").isEmpty();
     }
 
     @Test
@@ -59,6 +56,24 @@ class ContractCoverageTests extends IntegrationTest {
 
         assertThat(missing(EventContract.documented(), EventContract.checked()))
                 .as("event types no test read from the outbox and checked").isEmpty();
+    }
+
+    @Test
+    void everyServerMessageTypeWasChecked() {
+        assumeTrue(WHOLE_SUITE, "only after the whole suite");
+
+        assertThat(WebSocketContract.documented()).hasSize(8);
+        assertThat(missing(WebSocketContract.documented(), WebSocketContract.checked()))
+                .as("server message types no test received and checked").isEmpty();
+    }
+
+    /** {@code METHOD /path/{}} of the API's handlers. */
+    private Set<String> handled() {
+        return handlers.getHandlerMethods().keySet().stream()
+                .flatMap(mapping -> mapping.getPatternValues().stream().filter(path -> path.startsWith("/v1/"))
+                        .flatMap(path -> mapping.getMethodsCondition().getMethods().stream()
+                                .map(method -> method.name() + " " + VARIABLE.matcher(path).replaceAll("{}"))))
+                .collect(Collectors.toCollection(TreeSet::new));
     }
 
     /** {@code METHOD /path/{}} of the documented operations, of every version or only V1's (no {@code x-since}). */

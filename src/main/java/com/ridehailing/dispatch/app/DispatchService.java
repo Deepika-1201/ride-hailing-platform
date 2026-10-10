@@ -72,6 +72,11 @@ class DispatchService implements DispatchApi {
     }
 
     @Override
+    public void offerSeen(UUID driverId, UUID offerId) {
+        offers.seen(driverId, offerId);
+    }
+
+    @Override
     public RideView accept(UUID offerId, UUID driverId) {
         return offers.accept(offerId, driverId);
     }

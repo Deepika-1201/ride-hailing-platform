@@ -6,7 +6,7 @@ import java.util.Map;
 import org.springframework.http.HttpStatus;
 
 /** The ride commands' errors (LLD §13.2). */
-final class RideErrors {
+public final class RideErrors {
 
     private RideErrors() {
     }
@@ -17,7 +17,7 @@ final class RideErrors {
                 Map.of("current_status", ride.status().name(), "current_version", ride.version()));
     }
 
-    static ApiException reassigned() {
+    public static ApiException reassigned() {
         return new ApiException(HttpStatus.CONFLICT, "RIDE_REASSIGNED",
                 "This ride was given to another driver; refresh your rides.");
     }

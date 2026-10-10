@@ -2,6 +2,7 @@ package com.ridehailing.ride;
 
 import com.ridehailing.rating.RatingApi.RatingSummary;
 import com.ridehailing.shared.GeoPoint;
+import com.ridehailing.shared.Money;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
@@ -24,8 +25,9 @@ public interface RideAssignment {
      */
     boolean unassignUnreachable(UUID rideId, UUID driverId);
 
-    /** {@code requestedAt} is the database's time of booking. */
-    record SearchingRide(UUID rideId, String cityId, String category, GeoPoint pickup, Instant requestedAt) {
+    /** {@code requestedAt} is the database's time of booking; {@code rider} is null without a first name. */
+    record SearchingRide(UUID rideId, String cityId, String category, GeoPoint pickup, GeoPoint dropoff, Money fare,
+            RideView.PersonSummary rider, Instant requestedAt) {
     }
 
     record AssignDriver(UUID rideId, UUID offerId, UUID driverId, int promisedPickupEtaS, AssignedDriver driver) {

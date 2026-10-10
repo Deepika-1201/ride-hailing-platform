@@ -199,11 +199,11 @@ class QuoteTests extends IntegrationTest {
 
     @Test
     void onlyThePickupMustBeInsideAServiceArea() {
-        assertProblem("POST", QUOTES, quote(rider, city.at(-0.05, 0.1), city.at(0.2, 0.2), "MINI"), 422,
+        GeoPoint outside = city.at(TestCities.SIZE + 0.05, 0.2);
+        assertProblem("POST", QUOTES, quote(rider, outside, city.at(0.2, 0.2), "MINI"), 422,
                 "OUTSIDE_SERVICE_AREA");
 
-        assertAnswered("POST", QUOTES, quote(rider, city.at(0.2, 0.2), city.at(TestCities.SIZE + 0.3, 0.2), "MINI"),
-                201);
+        assertAnswered("POST", QUOTES, quote(rider, city.at(0.2, 0.2), outside, "MINI"), 201);
     }
 
     @Test

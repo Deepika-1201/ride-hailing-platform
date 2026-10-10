@@ -55,6 +55,7 @@ class SearchAttempts {
     private final Timers timers;
     private final Outbox outbox;
     private final LiveIndexMirror mirror;
+    private final DriverPushes pushes;
     private final Transactions transactions;
     private final DispatchProperties properties;
     private final DispatchMetrics metrics;
@@ -64,8 +65,8 @@ class SearchAttempts {
     SearchAttempts(SearchTaskRepository tasks, RideAssignment rides, OfferRepository offers,
             AvailabilityRepository availability, DecisionRepository decisions, DriverStatsRepository stats,
             GeographyApi geography, LiveIndex index, Rankers rankers, Timers timers, Outbox outbox,
-            LiveIndexMirror mirror, Transactions transactions, DispatchProperties properties, DispatchMetrics metrics,
-            JsonMapper json, Clock clock) {
+            LiveIndexMirror mirror, DriverPushes pushes, Transactions transactions, DispatchProperties properties,
+            DispatchMetrics metrics, JsonMapper json, Clock clock) {
         this.tasks = tasks;
         this.rides = rides;
         this.offers = offers;
@@ -78,6 +79,7 @@ class SearchAttempts {
         this.timers = timers;
         this.outbox = outbox;
         this.mirror = mirror;
+        this.pushes = pushes;
         this.transactions = transactions;
         this.properties = properties;
         this.metrics = metrics;
@@ -150,6 +152,7 @@ class SearchAttempts {
                 metrics.firstOffer(task.cityId(), Duration.between(ride.requestedAt(), offer.createdAt()));
             }
             mirror.afterCommit(reserved);
+            pushes.offer(offer, ride, Duration.ofSeconds(settings.offerTtlS()));
             return;
         }
         boolean lostRaces = !tries.isEmpty();

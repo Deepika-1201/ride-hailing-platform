@@ -133,6 +133,7 @@ public abstract class LiveIndexContract {
 
         index.mirror(city, driver, new MirrorState(Status.OFFERED, 2, MINI, null));
         assertThat(index.nearby(city, MINI, HERE, 1_000, 5)).isEmpty();
+        clock.advance(Duration.ofSeconds(2));
         assertThat(send(driver, 2, north(150))).isEqualTo(new UpdateResult(Outcome.APPLIED, Status.OFFERED, null,
                 null));
         assertThat(index.nearby(city, MINI, HERE, 1_000, 5)).isEmpty();
@@ -373,6 +374,83 @@ public abstract class LiveIndexContract {
     }
 
     @Test
+    void poorAccuracyIsASignOfLifeButNotAPosition() {
+        UUID driver = at(north(100));
+        Instant placed = clock.instant();
+        clock.advance(Duration.ofSeconds(5));
+
+        UpdateResult result = index.update(city, driver, MINI,
+                new LocationUpdate(2, north(300), 100.5, null, null, clock.instant()));
+
+        assertThat(result).isEqualTo(new UpdateResult(Outcome.APPLIED, Status.AVAILABLE, null, null,
+                UpdateResult.POOR_ACCURACY));
+        assertThat(index.position(city, driver)).contains(new LivePosition(north(100), placed, 2));
+        assertThat(index.lastSeen(city, List.of(driver))).isEqualTo(Map.of(driver, clock.instant()));
+        assertThat(index.nearby(city, MINI, HERE, 1_000, 5))
+                .containsExactly(new Candidate(driver, north(100), 100, clock.instant()));
+        assertThat(index.update(city, driver, MINI, new LocationUpdate(3, north(300), 100, null, null,
+                clock.instant())).flags()).as("the limit itself is usable").isZero();
+    }
+
+    @Test
+    void anImplausibleJumpIsUsedOnlyAsTheThirdInARow() {
+        UUID driver = at(north(100));
+        Instant placed = clock.instant();
+        GeoPoint far = north(10_000);
+
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 2, far).flags()).isEqualTo(UpdateResult.IMPLAUSIBLE);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 3, far).flags()).isEqualTo(UpdateResult.IMPLAUSIBLE);
+        assertThat(index.position(city, driver)).contains(new LivePosition(north(100), placed, 3));
+        assertThat(index.nearby(city, MINI, far, 1_000, 5)).isEmpty();
+
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 4, far).flags()).as("re-anchored, maybe after a tunnel").isZero();
+        assertThat(index.position(city, driver)).contains(new LivePosition(far, clock.instant(), 4));
+        assertThat(index.nearby(city, MINI, far, 1_000, 5)).extracting(Candidate::driverId).containsExactly(driver);
+    }
+
+    @Test
+    void poorAccuracyDoesntCountTowardsAnImplausibleStreak() {
+        UUID driver = at(north(100));
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 2, north(10_000)).flags()).isEqualTo(UpdateResult.IMPLAUSIBLE);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(index.update(city, driver, MINI, new LocationUpdate(3, north(10_000), 500, null, null,
+                clock.instant())).flags()).isEqualTo(UpdateResult.POOR_ACCURACY);
+
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 4, north(10_000)).flags()).as("the second implausible one in a row")
+                .isEqualTo(UpdateResult.IMPLAUSIBLE);
+    }
+
+    @Test
+    void aUsableUpdateEndsAnImplausibleStreak() {
+        UUID driver = at(north(100));
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 2, north(10_000)).flags()).isEqualTo(UpdateResult.IMPLAUSIBLE);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 3, north(120)).flags()).isZero();
+
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 4, north(10_000)).flags()).isEqualTo(UpdateResult.IMPLAUSIBLE);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(send(driver, 5, north(10_000)).flags()).as("the streak started again")
+                .isEqualTo(UpdateResult.IMPLAUSIBLE);
+    }
+
+    @Test
+    void speedIsMeasuredFromTheLastUsablePositionOverASecondAtLeast() {
+        UUID driver = at(north(100));
+
+        assertThat(send(driver, 2, north(140)).flags()).as("40 m at once counts as 40 m/s").isZero();
+        assertThat(send(driver, 3, north(185)).flags()).as("45 m/s").isEqualTo(UpdateResult.IMPLAUSIBLE);
+        clock.advance(Duration.ofSeconds(2));
+        assertThat(send(driver, 4, north(220)).flags()).as("80 m from the last usable position in 2 s").isZero();
+    }
+
+    @Test
     void mirroredHoldsTheStateOfEveryDriverIncludingTombstones() {
         UUID available = available(MINI, 1);
         UUID offline = Ids.newId();
@@ -405,11 +483,11 @@ public abstract class LiveIndexContract {
         List<Long> seqs = new ArrayList<>(LongStream.rangeClosed(1, 2_000).boxed().toList());
         Collections.shuffle(seqs);
 
-        concurrently(seqs, seq -> send(driver, seq, north(seq)));
+        concurrently(seqs, seq -> send(driver, seq, north(seq / 100.0)));
 
         assertThat(index.position(city, driver)).hasValueSatisfying(position -> {
             assertThat(position.seq()).isEqualTo(2_000);
-            assertThat(position.position()).isEqualTo(north(2_000));
+            assertThat(position.position()).isEqualTo(north(20));
         });
     }
 

@@ -32,6 +32,9 @@ public interface DispatchApi {
     /** The driver's pending offer, which this marks as seen (§8.5). */
     Optional<OfferView> currentOffer(UUID driverId);
 
+    /** The {@code offer_seen} message (§8.5): marks the driver's offer seen if it is still pending. */
+    void offerSeen(UUID driverId, UUID offerId);
+
     /** T2 (§8.4): the driver's view of the ride; {@code 409 OFFER_NO_LONGER_AVAILABLE} if too late. */
     RideView accept(UUID offerId, UUID driverId);
 

@@ -70,6 +70,9 @@ class IndexOutageTests extends IntegrationTest {
     private LiveIndexMirror mirror;
 
     @Autowired
+    private DriverPushes pushes;
+
+    @Autowired
     private Transactions transactions;
 
     @Autowired
@@ -137,7 +140,7 @@ class IndexOutageTests extends IntegrationTest {
 
     private SearchAttempts attemptsWith(LiveIndex live) {
         return new SearchAttempts(tasks, assignment, offers, availability, decisions, stats, geography, live, rankers,
-                timers, outbox, mirror, transactions, properties, metrics, json, clock);
+                timers, outbox, mirror, pushes, transactions, properties, metrics, json, clock);
     }
 
     private void makeDue(UUID rideId) {

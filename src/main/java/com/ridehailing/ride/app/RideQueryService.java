@@ -11,6 +11,7 @@ import com.ridehailing.ride.db.RideRepository.RideRow;
 import com.ridehailing.ride.db.TransitionRepository;
 import com.ridehailing.shared.Page;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +43,11 @@ class RideQueryService implements RideQueries, InvariantCheck {
     }
 
     @Override
+    public Optional<RideView> activeRideOfRider(UUID riderId) {
+        return rides.activeOfRider(riderId).map(views::of);
+    }
+
+    @Override
     public Page<RideView> list(RideFilter filter, Cursor after, int limit) {
         List<RideRow> rows = rides.list(filter.statuses(), filter.cityId(), after == null ? null : after.createdAt(),
                 after == null ? null : after.id(), limit + 1);
@@ -54,6 +60,11 @@ class RideQueryService implements RideQueries, InvariantCheck {
     @Override
     public List<TransitionView> transitions(UUID rideId) {
         return transitions.ofRide(rideId);
+    }
+
+    @Override
+    public Optional<UUID> rideOfDriverAt(UUID driverId, Instant at) {
+        return rides.ofDriverAt(driverId, at);
     }
 
     @Override

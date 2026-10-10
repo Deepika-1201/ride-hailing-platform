@@ -1,5 +1,6 @@
 package com.ridehailing.ride.web;
 
+import com.ridehailing.location.TripRoutes.TripRoute;
 import com.ridehailing.platform.AllowedRoles;
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.ApiException;
@@ -14,6 +15,8 @@ import com.ridehailing.ride.app.DriverCommands;
 import com.ridehailing.ride.app.DriverCommands.StartOutcome;
 import com.ridehailing.ride.app.MyRides;
 import com.ridehailing.ride.app.MyRides.Receipt;
+import com.ridehailing.ride.app.RideErrors;
+import com.ridehailing.ride.app.RideRoutes;
 import com.ridehailing.shared.UserRole;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
@@ -44,15 +47,17 @@ class RideController {
     private final DriverCommands drivers;
     private final RideQueries queries;
     private final MyRides myRides;
+    private final RideRoutes routes;
     private final Idempotency idempotency;
 
     RideController(Booking booking, Cancellations cancellations, DriverCommands drivers, RideQueries queries,
-            MyRides myRides, Idempotency idempotency) {
+            MyRides myRides, RideRoutes routes, Idempotency idempotency) {
         this.booking = booking;
         this.cancellations = cancellations;
         this.drivers = drivers;
         this.queries = queries;
         this.myRides = myRides;
+        this.routes = routes;
         this.idempotency = idempotency;
     }
 
@@ -86,6 +91,13 @@ class RideController {
         return myRides.receipt(caller.userId(), rideId);
     }
 
+    /** LLD §9.8: operations' reads are audited. */
+    @GetMapping("/{rideId}/route")
+    @AllowedRoles({UserRole.RIDER, UserRole.DRIVER, UserRole.OPS})
+    TripRoute route(Caller caller, @PathVariable UUID rideId) {
+        return routes.route(caller.userId(), caller.roles(), rideId);
+    }
+
     @PostMapping("/{rideId}/cancel")
     @AllowedRoles({UserRole.RIDER, UserRole.DRIVER})
     ResponseEntity<?> cancel(Caller caller, @RequestHeader(value = Idempotency.HEADER, required = false) String key,
@@ -112,7 +124,10 @@ class RideController {
             @PathVariable UUID rideId, @Valid @RequestBody StartTripBody body) {
         return idempotency.execute(new IdempotentCall(caller.userId().toString(), key,
                 "POST " + RIDES + "/" + rideId + "/start", body), () -> {
-                    StartOutcome outcome = drivers.start(caller.userId(), rideId, body.pin());
+                    StartOutcome outcome = drivers.start(caller.userId(), rideId, body.pin(), body.deviceTime());
+                    if (outcome.reassigned()) {
+                        return RideErrors.reassigned().toResponse();
+                    }
                     if (outcome.ride() != null) {
                         return ResponseEntity.ok(outcome.ride());
                     }
@@ -128,7 +143,9 @@ class RideController {
             @PathVariable UUID rideId, @Valid @RequestBody(required = false) CompleteTripBody body) {
         return idempotency.execute(new IdempotentCall(caller.userId().toString(), key,
                 "POST " + RIDES + "/" + rideId + "/complete", body == null ? Map.of() : body),
-                () -> ResponseEntity.ok(drivers.complete(caller.userId(), rideId)));
+                () -> drivers.complete(caller.userId(), rideId, body == null ? null : body.deviceTime())
+                        .<ResponseEntity<?>>map(ResponseEntity::ok)
+                        .orElseGet(() -> RideErrors.reassigned().toResponse()));
     }
 
     @PostMapping("/{rideId}/no-show")
@@ -146,7 +163,7 @@ class RideController {
     record CancelRideBody(@Size(max = 200) String reason) {
     }
 
-    /** {@code deviceTime} is for offline apps and is kept from V2 (LLD §7.10). */
+    /** {@code deviceTime} comes from offline apps (LLD §7.10). */
     record StartTripBody(@NotNull @Pattern(regexp = "[0-9]{4}") String pin, Instant deviceTime) {
     }
 

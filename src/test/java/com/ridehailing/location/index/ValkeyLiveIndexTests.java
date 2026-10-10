@@ -29,7 +29,7 @@ class ValkeyLiveIndexTests extends LiveIndexContract {
 
     @Override
     protected LiveIndex newIndex(Clock clock, Duration freshness, Duration tombstoneTtl) {
-        return new ValkeyLiveIndex(valkey, clock, freshness, tombstoneTtl);
+        return new ValkeyLiveIndex(valkey, clock, freshness, tombstoneTtl, LiveIndex.Quality.DEFAULT);
     }
 
     @Test
@@ -60,7 +60,7 @@ class ValkeyLiveIndexTests extends LiveIndexContract {
 
     @Test
     void aTombstoneWhoseKeyExpiredLeavesTheDriverSetWhenNextRead() throws InterruptedException {
-        LiveIndex quick = new ValkeyLiveIndex(valkey, clock, FRESHNESS, Duration.ofMillis(50));
+        LiveIndex quick = new ValkeyLiveIndex(valkey, clock, FRESHNESS, Duration.ofMillis(50), LiveIndex.Quality.DEFAULT);
         UUID driver = Ids.newId();
         quick.mirror(city, driver, new MirrorState(Status.OFFLINE, 2, null, null));
         assertThat(isMember(driver)).isTrue();
@@ -99,7 +99,8 @@ class ValkeyLiveIndexTests extends LiveIndexContract {
 
     @Test
     void aDriverBackFromATombstoneIsKeptForGood() throws InterruptedException {
-        LiveIndex quick = new ValkeyLiveIndex(valkey, clock, FRESHNESS, Duration.ofMillis(100));
+        LiveIndex quick = new ValkeyLiveIndex(valkey, clock, FRESHNESS, Duration.ofMillis(100),
+                LiveIndex.Quality.DEFAULT);
         UUID driver = Ids.newId();
         quick.mirror(city, driver, new MirrorState(Status.OFFLINE, 2, null, null));
         quick.mirror(city, driver, new MirrorState(Status.AVAILABLE, 3, MINI, null));
@@ -127,7 +128,7 @@ class ValkeyLiveIndexTests extends LiveIndexContract {
                 }
                 return super.run(script, output, timeout, keys, args);
             }
-        }, clock, FRESHNESS, TOMBSTONE_TTL);
+        }, clock, FRESHNESS, TOMBSTONE_TTL, LiveIndex.Quality.DEFAULT);
 
         assertThat(racing.mirror(city, driver, new MirrorState(Status.OFFLINE, 3, null, null))).isTrue();
 

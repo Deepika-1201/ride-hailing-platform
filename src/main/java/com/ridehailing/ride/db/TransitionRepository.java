@@ -2,7 +2,9 @@ package com.ridehailing.ride.db;
 
 import com.ridehailing.ride.RideQueries.TransitionView;
 import com.ridehailing.ride.RideStatus;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -18,14 +20,14 @@ public class TransitionRepository {
         this.jdbc = jdbc;
     }
 
-    /** {@code from} is null for the booking; {@code actorId} and {@code reason} may be null. */
+    /** {@code from} is null for the booking; {@code actorId}, {@code reason} and {@code deviceTime} may be null. */
     public void insert(UUID id, UUID rideId, int version, RideStatus from, RideStatus to, String command,
-            String actorType, String actorId, String reason, String requestId) {
+            String actorType, String actorId, String reason, String requestId, Instant deviceTime) {
         jdbc.sql("""
                         INSERT INTO ride.transitions (id, ride_id, version, from_status, to_status, command, actor_type,
-                                                      actor_id, reason, occurred_at, request_id)
+                                                      actor_id, reason, occurred_at, request_id, device_time)
                         VALUES (:id, :rideId, :version, :from, :to, :command, :actorType, :actorId, :reason, now(),
-                                :requestId)
+                                :requestId, :deviceTime)
                         """)
                 .param("id", id)
                 .param("rideId", rideId)
@@ -37,6 +39,7 @@ public class TransitionRepository {
                 .param("actorId", actorId)
                 .param("reason", reason)
                 .param("requestId", requestId)
+                .param("deviceTime", deviceTime == null ? null : deviceTime.atOffset(ZoneOffset.UTC))
                 .update();
     }
 

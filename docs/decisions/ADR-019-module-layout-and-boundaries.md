@@ -53,3 +53,7 @@ How is the code laid out, how are module boundaries and dependency directions en
 
 - Several developers work on the code and compile-time boundaries become worth a multi-project build (option B).
 - A module is extracted (V5); its JSON contracts and migrations move with it unchanged.
+
+## Amendments
+
+- **2026-10-07, phase 14** ([LLD §2.1](../low-level-design.md#21-allowed-dependencies), [§14.7](../low-level-design.md#147-phase-14-details)): a sixteenth module, `realtime`, holds the WebSocket sessions. A session needs tickets, live-update ingestion, offers, a rider's active ride, routing and notifications, so the module depends on identity, dispatch, ride, location, geography and notification. Nothing depends on it. Modules publish pushes through `PushBus` in `platform` and never call `realtime`, which keeps the graph acyclic. It is also the V5 extraction candidate, together with location's ingestion.

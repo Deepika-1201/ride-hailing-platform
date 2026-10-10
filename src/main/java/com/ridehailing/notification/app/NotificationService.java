@@ -3,6 +3,8 @@ package com.ridehailing.notification.app;
 import com.ridehailing.notification.NotificationApi;
 import com.ridehailing.notification.db.NotificationRepository;
 import com.ridehailing.notification.sms.SmsProvider;
+import com.ridehailing.platform.Transactions;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -11,11 +13,16 @@ import org.springframework.stereotype.Service;
 class NotificationService implements NotificationApi {
 
     private final SmsProvider sms;
-    private final NotificationRepository notifications;
+    private final NotificationRepository notificationRows;
+    private final Notifications notifications;
+    private final Transactions transactions;
 
-    NotificationService(SmsProvider sms, NotificationRepository notifications) {
+    NotificationService(SmsProvider sms, NotificationRepository notificationRows, Notifications notifications,
+            Transactions transactions) {
         this.sms = sms;
+        this.notificationRows = notificationRows;
         this.notifications = notifications;
+        this.transactions = transactions;
     }
 
     @Override
@@ -25,6 +32,15 @@ class NotificationService implements NotificationApi {
 
     @Override
     public List<NotificationView> ofRide(UUID rideId) {
-        return notifications.ofRide(rideId);
+        return notificationRows.ofRide(rideId);
+    }
+
+    /** Its key comes from the ride, so the table's uniqueness lets one through across nodes (LLD §9.7). */
+    @Override
+    public void driverArriving(UUID rideId, UUID riderId) {
+        UUID key = UUID.nameUUIDFromBytes((NotificationKind.DRIVER_ARRIVING + ":" + rideId)
+                .getBytes(StandardCharsets.UTF_8));
+        transactions.run(() -> notifications.notify(key, riderId, NotificationKind.DRIVER_ARRIVING, rideId,
+                Notifications.payload().put("ride_id", rideId.toString())));
     }
 }

@@ -21,6 +21,7 @@ import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
 import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import io.lettuce.core.cluster.models.partitions.RedisClusterNode;
 import io.lettuce.core.codec.StringCodec;
+import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -120,6 +121,16 @@ public final class LettuceValkey implements Valkey, AutoCloseable {
         return primaries.get();
     }
 
+    public boolean isCluster() {
+        return client instanceof RedisClusterClient;
+    }
+
+    /** A connection of its own for subscriptions, which the command connection can't take; the caller closes it. */
+    public StatefulRedisPubSubConnection<String, String> connectPubSub() {
+        return client instanceof RedisClusterClient cluster ? cluster.connectPubSub(StringCodec.UTF8)
+                : ((RedisClient) client).connectPubSub(StringCodec.UTF8);
+    }
+
     @Override
     public <T> T run(Script script, ScriptOutputType output, Duration timeout, String[] keys, String... args) {
         try {
@@ -156,6 +167,11 @@ public final class LettuceValkey implements Valkey, AutoCloseable {
         client.shutdown();
     }
 
+    /** For a command whose result the caller doesn't wait for, such as a push. */
+    public void countError(String operation) {
+        meters.counter("valkey.errors", "operation", operation).increment();
+    }
+
     private static <T> T get(Duration timeout, RedisFuture<T> future) {
         try {
             return future.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
@@ -170,7 +186,7 @@ public final class LettuceValkey implements Valkey, AutoCloseable {
     }
 
     private RedisException failed(String operation, RedisException e) {
-        meters.counter("valkey.errors", "operation", operation).increment();
+        countError(operation);
         return e;
     }
 }

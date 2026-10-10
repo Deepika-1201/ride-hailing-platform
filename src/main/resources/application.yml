@@ -1,6 +1,9 @@
 spring:
   application:
     name: ride-hailing-platform
+  # LLD §14.7: draining WebSocket sessions waits up to 30 s before the web server stops.
+  lifecycle:
+    timeout-per-shutdown-phase: 40s
   threads:
     virtual:
       enabled: true
@@ -29,6 +32,7 @@ ride:
     otp-per-ip: {capacity: 20, period: 1h, fail-closed: true}
     quotes-per-rider: {capacity: 30, period: 1m}
     location-per-driver: {capacity: 1, period: 1s}
+    tickets-per-user: {capacity: 10, period: 1m}
 
 management:
   server:

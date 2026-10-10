@@ -535,6 +535,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/TripRoute'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
 
   # ------------------------------------------------------------------ Drivers and offers
@@ -724,6 +725,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/RealtimeTicket'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/TooManyRequests'}
 
   # ------------------------------------------------------------------ Operations

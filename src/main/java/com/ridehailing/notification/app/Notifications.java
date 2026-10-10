@@ -26,7 +26,12 @@ class Notifications {
 
     /** Once per event, recipient and kind: a repeated event, even delivered concurrently, adds nothing (race 7). */
     void notify(EventEnvelope event, UUID recipientId, NotificationKind kind, UUID rideId, ObjectNode payload) {
-        notifications.insert(Ids.newId(), recipientId, kind.name(), rideId, event.eventId(), payload.toString())
+        notify(event.eventId(), recipientId, kind, rideId, payload);
+    }
+
+    /** Once per key, recipient and kind; the key is the event's ID, or one derived from what the notice is about. */
+    void notify(UUID key, UUID recipientId, NotificationKind kind, UUID rideId, ObjectNode payload) {
+        notifications.insert(Ids.newId(), recipientId, kind.name(), rideId, key, payload.toString())
                 .ifPresent(id -> deliveries.insert(Ids.newId(), id, PUSH));
     }
 

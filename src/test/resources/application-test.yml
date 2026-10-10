@@ -9,6 +9,10 @@ ride:
   security:
     otp:
       fixed-code: "123456"
+  # A context that closes with sessions left open doesn't wait out the production drain; DrainTests sets its own.
+  realtime:
+    drain-spread: 0s
+    drain-timeout: 1s
   rate-limits:
     # Every test request comes from 127.0.0.1; SignInRateLimitTests checks the real per-IP limit in its own context.
     otp-per-ip: {capacity: 100000, period: 1h}

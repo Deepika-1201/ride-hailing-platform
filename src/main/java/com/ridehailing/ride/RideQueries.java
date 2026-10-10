@@ -16,6 +16,9 @@ public interface RideQueries {
     /** The whole ride; callers show each party its own view. */
     Optional<RideView> find(UUID rideId);
 
+    /** The rider's ride that hasn't ended, if any (LLD §14.3). */
+    Optional<RideView> activeRideOfRider(UUID riderId);
+
     /** Rides with a driver now, in the city or in all when {@code cityId} is null (I4). */
     List<DrivenRide> drivenRides(String cityId);
 
@@ -30,6 +33,12 @@ public interface RideQueries {
 
     /** The ride's transitions, oldest first; empty for a ride that doesn't exist. */
     List<TransitionView> transitions(UUID rideId);
+
+    /**
+     * The ride the driver had at the time: assigned to them by then and not ended before. A replayed location update
+     * belongs to it (LLD §9.6).
+     */
+    Optional<UUID> rideOfDriverAt(UUID driverId, Instant at);
 
     record DrivenRide(UUID driverId, UUID rideId, RideStatus status) {
     }

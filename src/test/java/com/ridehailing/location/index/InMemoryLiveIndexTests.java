@@ -12,7 +12,7 @@ class InMemoryLiveIndexTests extends LiveIndexContract {
 
     @Override
     protected LiveIndex newIndex(Clock clock, Duration freshness, Duration tombstoneTtl) {
-        return new InMemoryLiveIndex(clock, freshness, tombstoneTtl);
+        return new InMemoryLiveIndex(clock, freshness, tombstoneTtl, LiveIndex.Quality.DEFAULT);
     }
 
     @Test

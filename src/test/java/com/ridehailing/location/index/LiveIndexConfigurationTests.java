@@ -46,6 +46,12 @@ class LiveIndexConfigurationTests {
     }
 
     @Test
+    void theQualityRulesDefaultToTheDesignsThresholds() {
+        contexts.run(context -> assertThat(context.getBean(LocationProperties.class).quality())
+                .isEqualTo(LiveIndex.Quality.DEFAULT));
+    }
+
+    @Test
     void aSingleRoleProcessFailsToStartUnlessTheCheckIsOff() {
         contexts.withPropertyValues("ride.roles=worker").run(context -> assertThat(context).hasFailed());
         contexts.withPropertyValues("ride.roles=worker", "ride.location.single-process-check=false")

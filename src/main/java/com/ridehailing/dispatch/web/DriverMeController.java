@@ -11,6 +11,7 @@ import com.ridehailing.driver.Verification;
 import com.ridehailing.location.LiveIndex.LocationUpdate;
 import com.ridehailing.location.LocationIngestion;
 import com.ridehailing.location.LocationIngestion.BatchResult;
+import com.ridehailing.location.LocationIngestion.Incoming;
 import com.ridehailing.platform.AllowedRoles;
 import com.ridehailing.platform.ApiController;
 import com.ridehailing.platform.ApiException;
@@ -21,6 +22,7 @@ import com.ridehailing.platform.RateLimiter;
 import com.ridehailing.rating.RatingApi;
 import com.ridehailing.rating.RatingApi.Party;
 import com.ridehailing.rating.RatingApi.RatingSummary;
+import com.ridehailing.ride.RideQueries;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.UserRole;
 import jakarta.validation.Valid;
@@ -53,15 +55,17 @@ class DriverMeController {
     private final DispatchApi dispatch;
     private final RatingApi ratings;
     private final LocationIngestion ingestion;
+    private final RideQueries rides;
     private final Idempotency idempotency;
     private final RateLimiter rateLimiter;
 
     DriverMeController(DriverApi drivers, DispatchApi dispatch, RatingApi ratings, LocationIngestion ingestion,
-            Idempotency idempotency, RateLimiter rateLimiter) {
+            RideQueries rides, Idempotency idempotency, RateLimiter rateLimiter) {
         this.drivers = drivers;
         this.dispatch = dispatch;
         this.ratings = ratings;
         this.ingestion = ingestion;
+        this.rides = rides;
         this.idempotency = idempotency;
         this.rateLimiter = rateLimiter;
     }
@@ -103,7 +107,8 @@ class DriverMeController {
             return BatchResult.allIgnored(batch.updates().size());
         }
         return ingestion.accept(status.cityId(), status.category(), caller.userId(),
-                batch.updates().stream().map(LocationUpdateBody::toUpdate).toList());
+                batch.updates().stream().map(LocationUpdateBody::toIncoming).toList(),
+                deviceTime -> rides.rideOfDriverAt(caller.userId(), deviceTime));
     }
 
     record DriverView(UUID id, String firstName, String lastName, String cityId, Verification verification,
@@ -116,7 +121,7 @@ class DriverMeController {
     record LocationBatchBody(@NotNull @Size(min = 1, max = 100) List<@NotNull @Valid LocationUpdateBody> updates) {
     }
 
-    /** {@code replay} marks offline replays from V2; V1 treats every update alike. */
+    /** {@code replay} marks an update the app recorded offline: a trip point of the ride the driver had then (§9.6). */
     record LocationUpdateBody(
             @NotNull @PositiveOrZero Long seq,
             @NotNull @DecimalMin("-90.0") @DecimalMax("90.0") Double lat,
@@ -127,8 +132,9 @@ class DriverMeController {
             @NotNull Instant deviceTime,
             Boolean replay) {
 
-        LocationUpdate toUpdate() {
-            return new LocationUpdate(seq, new GeoPoint(lat, lon), accuracyM, headingDeg, speedMps, deviceTime);
+        Incoming toIncoming() {
+            return new Incoming(new LocationUpdate(seq, new GeoPoint(lat, lon), accuracyM, headingDeg, speedMps,
+                    deviceTime), Boolean.TRUE.equals(replay));
         }
     }
 }

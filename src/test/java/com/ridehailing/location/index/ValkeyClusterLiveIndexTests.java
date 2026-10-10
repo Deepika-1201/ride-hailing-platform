@@ -28,7 +28,7 @@ class ValkeyClusterLiveIndexTests extends LiveIndexContract {
 
     @Override
     protected LiveIndex newIndex(Clock clock, Duration freshness, Duration tombstoneTtl) {
-        return new ValkeyLiveIndex(valkey, clock, freshness, tombstoneTtl);
+        return new ValkeyLiveIndex(valkey, clock, freshness, tombstoneTtl, LiveIndex.Quality.DEFAULT);
     }
 
     @Test
