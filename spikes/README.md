@@ -7,14 +7,14 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
-| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Trace verifier, batch runner and PostgreSQL fencing adapter tested; broker measurements remain pending in phase 17 |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | PostgreSQL/Kafka adapters and trace capture smoke-tested; throughput and broker failover measurements remain pending in phase 17 |
 
 ## What's here
 
 | Path | Contents |
 |---|---|
-| [compose.yaml](compose.yaml) | Valkey 9, PostgreSQL 18 with PostGIS 3.6, and the spike images |
-| [bench/](bench/) | Go load generator: `geo` (S-1), `timers` (S-2) and `wsclient` (S-3) |
+| [compose.yaml](compose.yaml) | Valkey 9, PostgreSQL 18 with PostGIS 3.6, the optional S-4 Kafka 4.3.1 broker, and the spike images |
+| [bench/](bench/) | Go load generator: `geo` (S-1), `timers` (S-2), `wsclient` (S-3), and `outbox-verify` / `outbox-capture` (S-4) |
 | [ws-server/](ws-server/) | Spring Boot 4.1 WebSocket server that runs on either Tomcat or Netty (S-3) |
 | [run.sh](run.sh) | Runs a whole spike and saves raw output to `results/raw/` |
 
@@ -32,7 +32,7 @@ COMPOSE_PROFILES=tools,ws docker compose build
 docker compose down -v
 ```
 
-All load is generated inside the same Colima VM (4 vCPUs) as the servers, so absolute latencies include client contention. Compare approaches with each other, and use the server-side costs (CPU per operation, WAL bytes, time inside the server) for capacity planning.
+The S-1 to S-3 runs generate load inside the same Colima VM (4 vCPUs) as the servers, so absolute latencies include client contention. Compare approaches with each other, and use the server-side costs (CPU per operation, WAL bytes, time inside the server) for capacity planning.
 
 ## S-4 trace verification
 
@@ -58,8 +58,7 @@ proof that the actual Kafka relay is correct; those require the phase 17 failove
 [outbox_relay.go](bench/outbox_relay.go) models the conservative baseline in [LLD §19.1](../docs/low-level-design.md#191-v3-kafka).
 It checks lease ownership before reading and between sends, waits for each acknowledgement in ID order, then
 marks the full batch published. The store must atomically check the holder, fencing token and unexpired lease
-when marking; a publisher must return success only after acknowledgement. The PostgreSQL adapter is implemented;
-the Kafka publisher remains pending.
+when marking; a publisher must return success only after acknowledgement. Both adapters are implemented below.
 Every batch reads pending rows again, so a late commit below a previous batch's IDs is not skipped.
 
 ```sh
@@ -83,7 +82,7 @@ To run the database tests against a disposable PostgreSQL database:
 
 ```sh
 cd bench
-SPIKE_TEST_PG=postgres://spike:spike@localhost:5432/spike?sslmode=disable go test -count=1 -race ./...
+SPIKE_TEST_PG='postgres://spike:spike@localhost:5432/spike?sslmode=disable' go test -count=1 -race -run '^TestPostgresOutbox' ./...
 ```
 
 The test account needs schema-creation privileges. Each test creates a unique schema and drops only that schema
@@ -92,3 +91,46 @@ a mark blocked behind takeover, partial-update rollback, expiry injected during 
 the real store, late commits and rolled-back events. The publisher is still a test double: these do not establish
 Kafka behavior or throughput. CI supplies PostgreSQL 18.6 and requires `SPIKE_TEST_PG`; outside CI, database tests
 explicitly skip when it is unset.
+
+## S-4 Kafka adapter and capture
+
+[outbox_kafka.go](bench/outbox_kafka.go) uses `franz-go` with idempotent production, `acks=all` and zstd.
+The synchronous baseline waits for each acknowledgement and flushes immediately despite the configured 5 ms
+linger. A hard publish deadline closes the producer; an ambiguous send leaves the database batch unpublished,
+and replay must use a new producer. Only `spike-s4-*` topic names are accepted. This is local plaintext spike
+infrastructure, not production Kafka configuration.
+
+The optional broker listens on loopback port 29092, has a 256 MiB heap and a 1 GiB container limit. Start only
+that service, then run the tests with an existing disposable PostgreSQL database:
+
+```sh
+cd spikes
+docker compose -p ride-s4-checkpoint --profile s4 up --detach --wait kafka
+cd bench
+SPIKE_TEST_PG='postgres://spike:spike@localhost:5432/spike?sslmode=disable' \
+	SPIKE_TEST_KAFKA=localhost:29092 go test -count=1 -race ./...
+cd ..
+docker compose -p ride-s4-checkpoint --profile s4 down
+```
+
+Tests create and delete their own three-partition topics. They check an empty capture, exact envelope preservation
+across multiple partitions, and replay by a second producer after the first acknowledges a batch but fails before
+database marking. They also delete a topic's retained prefix and prove capture rejects it. CI supplies both stores
+and requires `SPIKE_TEST_PG` and `SPIKE_TEST_KAFKA`; local broker tests explicitly skip if Kafka is not configured.
+These tests use one broker with replication factor one. Lease expiry and the post-acknowledgement failure are
+injected: this is not a broker-outage, multi-replica durability or throughput result.
+
+After an experiment stops publishing, capture its fresh, noncompacted, nontransactional topic:
+
+```sh
+cd bench
+go run . outbox-capture -brokers localhost:29092 -topic spike-s4-example -output received.jsonl
+go run . outbox-verify -expected expected.jsonl -received received.jsonl
+```
+
+Capture snapshots each partition's end offset and writes the offset-zero prefix as JSON Lines, without joining or
+committing a consumer group. It rejects missing offsets, truncation, malformed envelopes and inconsistent headers,
+and ignores records beyond the snapshot. Do not recreate or repartition the topic during capture. Its JSON summary
+on stdout includes the end offsets and record count. Output files are private and never overwritten; a failed
+capture exits nonzero and leaves its partial trace for diagnosis, not as passing evidence. The verifier checks event
+identity and first-delivery order, not payload schemas; the round-trip test checks full envelope preservation.

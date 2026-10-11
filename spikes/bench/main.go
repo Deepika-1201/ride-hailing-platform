@@ -1,5 +1,5 @@
 // Command bench runs the throwaway design spikes: S-1 (live location index),
-// S-2 (database timers) and the load client for S-3 (WebSocket connections).
+// S-2 (database timers), S-3 (WebSocket connections) and S-4 (outbox delivery).
 // Not product code.
 package main
 
@@ -13,13 +13,14 @@ import (
 
 func main() {
 	commands := map[string]func([]string) error{
-		"geo":           runGeo,
-		"timers":        runTimers,
-		"wsclient":      runWSClient,
-		"outbox-verify": runOutboxVerify,
+		"geo":            runGeo,
+		"timers":         runTimers,
+		"wsclient":       runWSClient,
+		"outbox-verify":  runOutboxVerify,
+		"outbox-capture": runOutboxCapture,
 	}
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: bench geo|timers|wsclient|outbox-verify [flags]")
+		fmt.Fprintln(os.Stderr, "usage: bench geo|timers|wsclient|outbox-verify|outbox-capture [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {
