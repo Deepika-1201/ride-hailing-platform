@@ -121,7 +121,7 @@ jobs:
         run: ./scripts/demo.sh
       - name: The web app behind nginx, on the platform's origin
         run: |
-          docker compose --profile simulator up --build --detach web
+          docker compose --profile simulator up --build --detach --no-deps web
           for attempt in $(seq 1 30); do
             if curl -fsS localhost:8088/ | grep -q 'id="root"'; then break; fi
             sleep 2
@@ -129,9 +129,10 @@ jobs:
           curl -fsS localhost:8088/ | grep -q 'id="root"'
           curl -sS localhost:8088/v1/nothing-here | grep -q '"code":"NOT_FOUND"'
       - name: A recorded simulator run without OSRM, ending with a clean invariant check
-        run: docker compose --profile simulator run --build --rm simulator
+        id: simulation
+        run: docker compose --profile simulator run --build --rm --no-deps simulator
       - name: Collect the simulator report
-        if: always()
+        if: always() && (steps.simulation.outcome == 'success' || steps.simulation.outcome == 'failure')
         run: docker compose --profile simulator run --rm --no-deps --entrypoint cat simulator state/report.json > simulator-report.json
       - name: Install the browser test runner
         working-directory: web
