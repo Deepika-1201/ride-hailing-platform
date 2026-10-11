@@ -100,6 +100,32 @@ jobs:
           go vet ./...
           go test -count=1 -race ./...
 
+  replicated-kafka:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: spikes/bench/go.mod
+          cache-dependency-path: spikes/bench/go.sum
+      - name: Start the isolated three-broker cluster
+        run: docker compose -p ride-s4-replicated -f spikes/compose.yaml --profile s4-replicated up --detach --wait --wait-timeout 150 kafka-r1 kafka-r2 kafka-r3
+      - name: Verify acknowledged data and writes after leader loss
+        working-directory: spikes/bench
+        env:
+          SPIKE_TEST_KAFKA_REPLICATED_BROKERS: localhost:39092,localhost:39093,localhost:39094
+        run: |
+          export SPIKE_TEST_KAFKA_REPLICATED_CONTAINERS="$(docker compose -p ride-s4-replicated -f ../compose.yaml --profile s4-replicated ps -q kafka-r1 kafka-r2 kafka-r3)"
+          go vet -tags replicated ./...
+          go test -tags replicated -count=1 -race -v -run '^TestKafkaOutboxSurvivesReplicatedLeaderLoss$' ./...
+      - name: Show replicated broker logs on failure
+        if: failure()
+        run: docker compose -p ride-s4-replicated -f spikes/compose.yaml --profile s4-replicated logs --no-color --tail 200
+      - name: Stop the replicated brokers and remove test storage
+        if: always()
+        run: docker compose -p ride-s4-replicated -f spikes/compose.yaml --profile s4-replicated down --volumes
+
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -118,7 +144,7 @@ jobs:
       - run: npm run build
 
   container:
-    needs: [build, simulator, web]
+    needs: [build, simulator, web, replicated-kafka]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

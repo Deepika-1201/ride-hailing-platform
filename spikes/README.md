@@ -7,7 +7,7 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
-| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Finite experiment, broker-pause and same-storage restart recovery tested; sustained throughput and replicated failover measurements remain pending in phase 17 |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Finite experiment, pause/restart recovery and three-replica leader failover tested; sustained throughput measurements remain pending in phase 17 |
 
 ## What's here
 
@@ -152,6 +152,40 @@ and ignores records beyond the snapshot. Do not recreate or repartition the topi
 on stdout includes the end offsets and record count. Output files are private and never overwritten; a failed
 capture exits nonzero and leaves its partial trace for diagnosis, not as passing evidence. The verifier checks event
 identity and first-delivery order, not payload schemas; the round-trip test checks full envelope preservation.
+
+## S-4 replicated leader failover
+
+The separate `s4-replicated` profile starts three Kafka 4.3.1 broker/controller nodes on loopback ports
+39092, 39093 and 39094. Each uses a 192 MiB maximum heap, a 16 MiB log-cleaner deduplication buffer and a
+768 MiB container limit. These are small test settings, not production sizing; Kafka's default cleaner buffer
+does not fit this heap reliably. Do not run this profile alongside a capacity measurement.
+
+```sh
+cd spikes
+docker compose -p ride-s4-replicated --profile s4-replicated up --detach --wait --wait-timeout 150 kafka-r1 kafka-r2 kafka-r3
+cd bench
+SPIKE_TEST_KAFKA_REPLICATED_BROKERS=localhost:39092,localhost:39093,localhost:39094 \
+	SPIKE_TEST_KAFKA_REPLICATED_CONTAINERS="$(docker compose -p ride-s4-replicated -f ../compose.yaml --profile s4-replicated ps -q kafka-r1 kafka-r2 kafka-r3)" \
+	go test -tags replicated -count=1 -race -v -run '^TestKafkaOutboxSurvivesReplicatedLeaderLoss$' ./...
+cd ..
+docker compose -p ride-s4-replicated --profile s4-replicated down --volumes
+```
+
+The tagged test creates a one-partition topic with replication factor three, `min.insync.replicas=2` and
+unclean leader election disabled. After all three replicas are in sync, it publishes an acknowledged event,
+stops the leader identified by Kafka metadata, and waits for a different leader with exactly the two remaining
+replicas in sync. While the old leader is still stopped, it verifies the acknowledged prefix and publishes two
+more events through the same idempotent client. The final trace must contain all three events once and in order.
+
+Container IDs must resolve to three distinct, running Kafka containers with the S-4 label, the replicated-cluster
+label and distinct node labels 1..3. Cleanup restarts the stopped node, waits for all three replicas, and deletes
+only the test topic. A required CI job runs this profile separately from the default Go suite. The `replicated`
+tag requires both cluster environment variables and fails if they are missing; it does not silently skip.
+
+This proves a small clean leader-failover case during a controlled process stop on one Docker host. It does not
+simulate losing the host, disks, multiple replicas or network partitions, and it does not certify production
+throughput or the application's eventual Kafka integration. As with other outage tests, a killed test process
+can prevent cleanup; restore the specifically identified test node or remove the dedicated test stack.
 
 ## S-4 finite experiment
 

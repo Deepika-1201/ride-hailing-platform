@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -778,4 +779,124 @@ func testKafkaOutboxRecovery(test *testing.T, restart bool) {
 	}
 	test.Logf("broker recovery (restart=%v): unique=%d duplicates=%d missing=%d order_violations=%d",
 		restart, report.Unique, report.Duplicates, report.Missing, report.OrderViolations)
+}
+
+func outboxReplicaTargets(containers []outboxKafkaContainerInfo) (map[int32]outboxKafkaContainerInfo, error) {
+	if len(containers) != 3 {
+		return nil, errors.New("replicated failover requires exactly three dedicated containers")
+	}
+	targets := map[int32]outboxKafkaContainerInfo{}
+	ids := map[string]bool{}
+	for _, container := range containers {
+		if err := container.validateOutageTarget(); err != nil {
+			return nil, err
+		}
+		if container.Labels["com.ridehailing.kafka-cluster"] != "s4-replicated" {
+			return nil, errors.New("container is not labelled for the s4-replicated cluster")
+		}
+		node, err := strconv.ParseInt(container.Labels["com.ridehailing.kafka-node"], 10, 32)
+		if err != nil || node < 1 || node > 3 || ids[container.ID] {
+			return nil, errors.New("invalid or duplicate replicated broker identity")
+		}
+		if _, exists := targets[int32(node)]; exists {
+			return nil, errors.New("replicated broker node IDs must be distinct")
+		}
+		ids[container.ID] = true
+		targets[int32(node)] = container
+	}
+	return targets, nil
+}
+
+func outboxReplicaPartitionReady(partition kadm.PartitionDetail, expectedISR int, unavailable int32) bool {
+	if partition.Err != nil || partition.Partition != 0 || len(partition.Replicas) != 3 || len(partition.ISR) != expectedISR ||
+		partition.Leader == unavailable {
+		return false
+	}
+	replicas := map[int32]bool{}
+	for _, node := range partition.Replicas {
+		if node < 1 || node > 3 || replicas[node] {
+			return false
+		}
+		replicas[node] = true
+	}
+	inSync := map[int32]bool{}
+	for _, node := range partition.ISR {
+		if !replicas[node] || inSync[node] || node == unavailable {
+			return false
+		}
+		inSync[node] = true
+	}
+	return inSync[partition.Leader]
+}
+
+func TestOutboxKafkaReplicatedTargetsRejectUnsafeMappings(test *testing.T) {
+	valid := func() []outboxKafkaContainerInfo {
+		var containers []outboxKafkaContainerInfo
+		for node := 1; node <= 3; node++ {
+			containers = append(containers, outboxKafkaContainerInfo{
+				ID: strings.Repeat(strconv.Itoa(node), 64), Image: "apache/kafka:4.3.1", Running: true, Health: "healthy",
+				Labels: map[string]string{"com.ridehailing.spike": "s4", "com.ridehailing.kafka-cluster": "s4-replicated",
+					"com.ridehailing.kafka-node": strconv.Itoa(node)},
+			})
+		}
+		return containers
+	}
+	if targets, err := outboxReplicaTargets(valid()); err != nil || len(targets) != 3 || targets[2].ID != strings.Repeat("2", 64) {
+		test.Fatalf("valid targets=%+v error=%v", targets, err)
+	}
+	for _, change := range []func([]outboxKafkaContainerInfo) []outboxKafkaContainerInfo{
+		func(containers []outboxKafkaContainerInfo) []outboxKafkaContainerInfo { return containers[:2] },
+		func(containers []outboxKafkaContainerInfo) []outboxKafkaContainerInfo {
+			containers[1].ID = containers[0].ID
+			return containers
+		},
+		func(containers []outboxKafkaContainerInfo) []outboxKafkaContainerInfo {
+			containers[1].Labels["com.ridehailing.kafka-node"] = "1"
+			return containers
+		},
+		func(containers []outboxKafkaContainerInfo) []outboxKafkaContainerInfo {
+			containers[1].Labels["com.ridehailing.kafka-node"] = "4"
+			return containers
+		},
+		func(containers []outboxKafkaContainerInfo) []outboxKafkaContainerInfo {
+			containers[1].Labels["com.ridehailing.kafka-cluster"] = "other"
+			return containers
+		},
+		func(containers []outboxKafkaContainerInfo) []outboxKafkaContainerInfo {
+			containers[1].Running = false
+			return containers
+		},
+	} {
+		if _, err := outboxReplicaTargets(change(valid())); err == nil {
+			test.Error("accepted an unsafe replicated container mapping")
+		}
+	}
+}
+
+func TestOutboxKafkaReplicatedReadinessRequiresCleanElection(test *testing.T) {
+	partition := kadm.PartitionDetail{Partition: 0, Leader: 1, Replicas: []int32{1, 2, 3}, ISR: []int32{1, 2, 3}}
+	if !outboxReplicaPartitionReady(partition, 3, -1) {
+		test.Fatal("rejected a fully replicated partition")
+	}
+	partition.Leader = 2
+	partition.ISR = []int32{2, 3}
+	if !outboxReplicaPartitionReady(partition, 2, 1) {
+		test.Fatal("rejected a clean election with two remaining replicas")
+	}
+	for _, change := range []func(*kadm.PartitionDetail){
+		func(partition *kadm.PartitionDetail) { partition.Leader = 1 },
+		func(partition *kadm.PartitionDetail) { partition.Leader = -1 },
+		func(partition *kadm.PartitionDetail) { partition.ISR = []int32{1, 2} },
+		func(partition *kadm.PartitionDetail) { partition.ISR = []int32{2} },
+		func(partition *kadm.PartitionDetail) { partition.ISR = []int32{2, 2} },
+		func(partition *kadm.PartitionDetail) { partition.Replicas = []int32{1, 2} },
+		func(partition *kadm.PartitionDetail) { partition.Replicas = []int32{1, 2, 4} },
+		func(partition *kadm.PartitionDetail) { partition.Err = errors.New("metadata unavailable") },
+	} {
+		invalid := partition
+		change(&invalid)
+		if outboxReplicaPartitionReady(invalid, 2, 1) {
+			test.Errorf("accepted invalid failover metadata: %+v", invalid)
+		}
+	}
 }
