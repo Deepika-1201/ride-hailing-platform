@@ -13,12 +13,13 @@ import (
 
 func main() {
 	commands := map[string]func([]string) error{
-		"geo":      runGeo,
-		"timers":   runTimers,
-		"wsclient": runWSClient,
+		"geo":           runGeo,
+		"timers":        runTimers,
+		"wsclient":      runWSClient,
+		"outbox-verify": runOutboxVerify,
 	}
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: bench geo|timers|wsclient [flags]")
+		fmt.Fprintln(os.Stderr, "usage: bench geo|timers|wsclient|outbox-verify [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {

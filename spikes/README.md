@@ -7,6 +7,7 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Offline trace verifier prepared; broker measurements remain pending in phase 17 |
 
 ## What's here
 
@@ -32,3 +33,22 @@ docker compose down -v
 ```
 
 All load is generated inside the same Colima VM (4 vCPUs) as the servers, so absolute latencies include client contention. Compare approaches with each other, and use the server-side costs (CPU per operation, WAL bytes, time inside the server) for capacity planning.
+
+## S-4 trace verification
+
+Prepare an expected-event ledger and a received-event trace as JSON Lines. Each record contains `event_id`,
+`aggregate_type`, `aggregate_id` and integer `aggregate_version`; additional envelope fields are ignored.
+
+```sh
+cd bench
+go run . outbox-verify -expected expected.jsonl -received received.jsonl
+go test ./...
+```
+
+The ledger must be nonempty and contain unique event IDs. The verifier reports missing and unexpected IDs,
+identity/version mismatches, duplicate deliveries, and decreasing versions among first deliveries of an aggregate.
+Exact redelivery is allowed, including an older event delivered again after a newer one. Equal aggregate versions
+are allowed because one state change may emit multiple events. Distinct aggregate types do not share ordering state.
+It checks identity and order, not payload schemas, and prints a JSON summary with at most 20 example violations.
+Invalid input or a violated delivery invariant exits nonzero. A passing trace is not a throughput measurement or
+proof that the actual Kafka relay is correct; those require the phase 17 failover experiment.

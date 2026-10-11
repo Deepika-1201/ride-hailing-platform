@@ -45,9 +45,16 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: simulator/go.mod
-          cache-dependency-path: simulator/go.sum
+          cache-dependency-path: |
+            simulator/go.sum
+            spikes/bench/go.sum
       - run: go vet ./...
       - run: go test -race ./...
+      - name: Verify offline outbox traces for spike S-4
+        working-directory: spikes/bench
+        run: |
+          go vet ./...
+          go test -race ./...
 
   web:
     runs-on: ubuntu-latest
