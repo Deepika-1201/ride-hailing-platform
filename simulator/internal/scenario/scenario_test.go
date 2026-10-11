@@ -240,3 +240,23 @@ func TestTheShippedScenariosLoad(t *testing.T) {
 		}
 	}
 }
+
+func TestLaptopBaselineKeepsThirtyMinutesAfterTheDriverRamp(t *testing.T) {
+	baseline, err := Load("../../scenarios/laptop-baseline.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Drivers.Count != 2000 {
+		t.Fatalf("baseline drivers = %d, want 2000", baseline.Drivers.Count)
+	}
+	if sustained := baseline.Duration - baseline.Drivers.Shift.StartSpread; sustained < 30*time.Minute {
+		t.Fatalf("post-ramp demand = %s, want at least 30 minutes", sustained)
+	}
+	if baseline.Drivers.SpeedFactor != 1 || baseline.Faults != (Faults{}) {
+		t.Fatal("the baseline must use normal speeds without injected faults")
+	}
+	latency, exists := baseline.Expect["position_latency_ms.p95"]
+	if !exists || latency.Max == nil || *latency.Max > 1000 {
+		t.Fatal("the baseline must enforce position latency p95 at or below one second")
+	}
+}

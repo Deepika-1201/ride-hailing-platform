@@ -1,0 +1,27 @@
+name: laptop-baseline
+seed: 1
+city: blr
+duration: 35m
+drain: 15m
+drivers:
+  count: 2000
+  shift: {start_spread: 5m}
+  acceptance: {base: 0.85, per_km_penalty: 0.08}
+  response_time: {median: 4s, p95: 11s}
+  cancel_after_accept: 0.02
+riders:
+  count: 1200
+  patience: {median: 4m, p95: 9m}
+  cancel_after_assign: 0.05
+  no_show: 0.01
+demand:
+  base_per_hour: 1200
+  start_hour: 18
+  zone_weights: zones/blr-weekday.csv
+  destinations: zones/blr-od.csv
+expect:
+  rides.booked: {min: 500}
+  rides.unfinished: {max: 0}
+  rates.match: {min: 0.85}
+  position_latency_ms.p95: {max: 1000}
+  errors: {max: 0}
