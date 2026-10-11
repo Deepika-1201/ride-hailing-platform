@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Phase | 5 — Implementation plan |
-| Status | Approved 2026-10-02, with the [LLD](low-level-design.md) and the [architecture review](architecture-review.md). Current phase: 15 (Simulator and web app); V1 and phases 13 (Valkey) and 14 (Realtime) are complete |
+| Status | Approved 2026-10-02, with the [LLD](low-level-design.md) and the [architecture review](architecture-review.md). Current phase: 16 (Laptop tier); V1 and phases 13 (Valkey), 14 (Realtime) and 15 (Simulator and web app) are complete |
 | Builds | [Requirements](requirements.md) §8 (V1–V8), designed in the [HLD](architecture.md) and [LLD](low-level-design.md) |
 
 ## Working agreement
@@ -46,7 +46,7 @@
 |---|---|---|---|
 | 13 | Valkey | Lettuce client, script loading, the Valkey live index with all five scripts, Valkey rate limiter and tickets, epoch, reconciler against Valkey (§9.3–§9.4, ADR-020) | The live-index contract suite passes on both implementations; a 3-shard cluster test passes; total loss of Valkey recovers matching within 10 s (NFR-7): **done 2026-10-07** (818 tests; the live-index contract suite of 27 cases passes on the in-memory index, one Valkey node and a 3-shard cluster in one container whose cities land on every shard; after `FLUSHALL`, with drivers sending every 4 s and the 2 s watch running, every driver was a candidate again after 5.7 s; the rate-limiter and ticket-store contracts pass on both implementations, and a paused container shows the limits failing open, sign-in's failing closed and every wait bounded; Compose runs the app on Valkey, so CI's container job ran every smoke script and the demo on it; 70 of 70 mutations caught; 10 repeated runs of the new and changed tests without a failure; CI build and container jobs green) |
 | 14 | Realtime | WebSocket endpoint, tickets, channels including `rdr:`, pushes, coalescing, heartbeats, draining; quality rules; tracking and ETA; trip points; offline replays over REST; offline ride commands (§9.5–§9.8, §14, §7.10) | WebSocket message contract tests; a node drain moves every client without losing a ride; replays land in the trip route exactly once: **done 2026-10-10** (909 tests; all 8 server message types and every implemented endpoint checked against their contracts; a two-node Valkey test moves six clients during draining and completes their three rides on the second node; duplicate replays leave each sequence number once in the route; live-index and push-bus contracts pass in memory, on one Valkey node and on a 3-shard cluster; 92 phase-14 mutations caught; ten clean repeated runs of 235 targeted tests, replacing two sleep-interrupted attempts; the separate race suite at 20 repetitions and the full build at the default 200; a regression proves temporary Spring context pauses do not trigger shutdown draining; CI build and container jobs green for `d0cfe27`, including every smoke script and the end-to-end demo) |
-| 15 | Simulator and web app | Go simulator with scenarios, faults and reports; OSRM routing data and recorded routes; `GET /v1/ops/invariants`; React web app with the operations map, rider and driver screens (§17.3, §18, ADR-021, ADR-022) | A recorded scenario runs in CI without OSRM; the operations map shows a live run |
+| 15 | Simulator and web app | Go simulator with scenarios, faults and reports; OSRM routing data and recorded routes; `GET /v1/ops/invariants`; React web app with the operations map, rider and driver screens (§17.3, §18, ADR-021, ADR-022) | A recorded scenario runs in CI without OSRM; the operations map shows a live run: **done 2026-10-11** (914 Java tests; Go unit and race-detector tests; 26 web unit tests and a production build with no reported npm advisories; live and recorded local scenarios each completed 17 rides with all eight invariants clean; Playwright exercises quote, booking, acceptance, arrival, PIN start, completion, rating and the operations timeline, checks map pixels and captures desktop/mobile layouts with external HTTP requests blocked; local maps, fonts and sprites include attribution and license notices; CI run `38111231401` for `9451513` passed the Java, Go, web and container jobs, including recorded simulation without OSRM and the nginx-served browser workflow. Route misses remain explicit and capacity certification is deferred to phase 16) |
 | 16 | Laptop tier | 2,000 drivers with rider demand for 30 min on the laptop; tuning | **V2 done:** NFR-5 met (location to rider's screen within 1 s p95); invariant checks clean after the run |
 
 ### V3 to V8
@@ -75,7 +75,7 @@
 
 - JDK 25 (installed under `~/.jdks`), Gradle through the wrapper.
 - Docker through Colima for Testcontainers and Compose; phase 1 records the Testcontainers settings Colima needs.
-- From V2: Go (as for the spikes) and Node.js 20 or later for the web app.
+- From V2: Go (as for the spikes) and Node.js 22 or later for the web app.
 
 ## Documents still to come
 
