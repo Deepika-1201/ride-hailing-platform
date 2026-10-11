@@ -7,7 +7,7 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
-| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Offline trace verifier and fault-tested batch runner prepared; broker measurements remain pending in phase 17 |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Trace verifier, batch runner and PostgreSQL fencing adapter tested; broker measurements remain pending in phase 17 |
 
 ## What's here
 
@@ -58,7 +58,8 @@ proof that the actual Kafka relay is correct; those require the phase 17 failove
 [outbox_relay.go](bench/outbox_relay.go) models the conservative baseline in [LLD §19.1](../docs/low-level-design.md#191-v3-kafka).
 It checks lease ownership before reading and between sends, waits for each acknowledgement in ID order, then
 marks the full batch published. The store must atomically check the holder, fencing token and unexpired lease
-when marking; a publisher must return success only after acknowledgement. Neither adapter is implemented here yet.
+when marking; a publisher must return success only after acknowledgement. The PostgreSQL adapter is implemented;
+the Kafka publisher remains pending.
 Every batch reads pending rows again, so a late commit below a previous batch's IDs is not skipped.
 
 ```sh
@@ -70,4 +71,24 @@ Deterministic tests inject send and acknowledgement failures, lease takeover bet
 a new token for the same holder, failed database marking and cancellation. A successor replays the unpublished
 batch, and the trace verifier checks that the duplicates introduce neither loss nor first-delivery reordering.
 These are control-flow tests with an in-memory store and publisher, not PostgreSQL fencing tests, Kafka failover
-evidence or throughput results. The product's V2 runtime is unchanged; real adapters and measurements remain pending.
+evidence or throughput results. The product's V2 runtime is unchanged.
+
+## S-4 PostgreSQL adapter
+
+[outbox_postgres.go](bench/outbox_postgres.go) implements the store against PostgreSQL, using only a separate
+`spike_s4_*` schema. Lease operations serialize on the lease row. Marking checks holder, token and database-clock
+expiry in the update, then rechecks expiry and the affected row count before committing. A partial batch rolls back.
+
+To run the database tests against a disposable PostgreSQL database:
+
+```sh
+cd bench
+SPIKE_TEST_PG=postgres://spike:spike@localhost:5432/spike?sslmode=disable go test -count=1 -race ./...
+```
+
+The test account needs schema-creation privileges. Each test creates a unique schema and drops only that schema
+on cleanup; it never uses product tables. Tests cover expired and superseded leases, same-holder token changes,
+a mark blocked behind takeover, partial-update rollback, expiry injected during marking, lost-ack replay through
+the real store, late commits and rolled-back events. The publisher is still a test double: these do not establish
+Kafka behavior or throughput. CI supplies PostgreSQL 18.6 and requires `SPIKE_TEST_PG`; outside CI, database tests
+explicitly skip when it is unset.
