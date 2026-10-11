@@ -18,9 +18,10 @@ func main() {
 		"wsclient":       runWSClient,
 		"outbox-verify":  runOutboxVerify,
 		"outbox-capture": runOutboxCapture,
+		"outbox-run":     runOutboxExperiment,
 	}
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: bench geo|timers|wsclient|outbox-verify|outbox-capture [flags]")
+		fmt.Fprintln(os.Stderr, "usage: bench geo|timers|wsclient|outbox-verify|outbox-capture|outbox-run [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {

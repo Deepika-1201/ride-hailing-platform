@@ -7,14 +7,14 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
-| S-4 | Outbox relay throughput and per-aggregate ordering through failover | PostgreSQL/Kafka adapters and trace capture smoke-tested; throughput and broker failover measurements remain pending in phase 17 |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Finite experiment command, PostgreSQL/Kafka adapters and trace capture tested; sustained throughput and broker failover measurements remain pending in phase 17 |
 
 ## What's here
 
 | Path | Contents |
 |---|---|
 | [compose.yaml](compose.yaml) | Valkey 9, PostgreSQL 18 with PostGIS 3.6, the optional S-4 Kafka 4.3.1 broker, and the spike images |
-| [bench/](bench/) | Go load generator: `geo` (S-1), `timers` (S-2), `wsclient` (S-3), and `outbox-verify` / `outbox-capture` (S-4) |
+| [bench/](bench/) | Go load generator: `geo` (S-1), `timers` (S-2), `wsclient` (S-3), and `outbox-run`, `outbox-verify`, `outbox-capture` (S-4) |
 | [ws-server/](ws-server/) | Spring Boot 4.1 WebSocket server that runs on either Tomcat or Netty (S-3) |
 | [run.sh](run.sh) | Runs a whole spike and saves raw output to `results/raw/` |
 
@@ -134,3 +134,46 @@ and ignores records beyond the snapshot. Do not recreate or repartition the topi
 on stdout includes the end offsets and record count. Output files are private and never overwritten; a failed
 capture exits nonzero and leaves its partial trace for diagnosis, not as passing evidence. The verifier checks event
 identity and first-delivery order, not payload schemas; the round-trip test checks full envelope preservation.
+
+## S-4 finite experiment
+
+[outbox_experiment.go](bench/outbox_experiment.go) connects the adapters into a finite, preloaded-backlog run.
+It creates its own schema and three-partition, replication-one topic, commits synthetic events, exports the
+expected ledger from those committed rows, drains through one leased relay, captures Kafka's output and verifies it.
+Only the schema and topic created by the run are cleaned up. Database and broker failures stop the run rather
+than being silently retried by the experiment driver.
+
+With Kafka and a disposable PostgreSQL database running:
+
+```sh
+cd spikes/bench
+SPIKE_PG='postgres://spike:spike@localhost:5432/spike?sslmode=disable' \
+	go run -buildvcs=true . outbox-run -brokers localhost:29092 \
+	-events 1000 -aggregates 100 -batch 500 -payload-bytes 256 \
+	-output "../../build/spikes/s4-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+For the workspace's existing local PostgreSQL service, `SPIKE_PG` can point to
+`postgres://ridehailing:ridehailing@localhost:5434/postgres?sslmode=disable`. The experiment uses only its fresh
+`spike_s4_*` schema in that database, never the application's tables.
+
+The command requires a new output directory and creates it with mode 0700. Artifacts use mode 0600:
+
+| Artifact | Contents |
+|---|---|
+| `expected.jsonl` | Ledger exported after all synthetic events commit |
+| `received.jsonl` | Kafka trace captured after the relay finishes |
+| `report.json` | Configuration, run IDs, available build revision, stages, counts, timings and verification |
+
+On failure, the command exits nonzero and retains the report and any artifacts already produced. Connection URLs
+and credentials are not written to the report. Cleanup failures also fail the command. A process kill or machine
+shutdown can prevent cleanup or report writing; the private artifacts are not a substitute for a successful exit.
+Build with `-buildvcs=true` from the repository to include the source revision and dirty-worktree flag in the report.
+
+The default overall timeout is two minutes, excluding bounded cleanup; `-publish-timeout` defaults to five seconds.
+The rate uses wall-clock time for the drain only, while the report also records its monotonic duration. The drain
+includes the producer's first connection and metadata work. This is a cold, synchronous backlog-drain result,
+not a sustained ingestion rate, a broker-outage experiment, a replica-durability test or a product capacity claim.
+Use AC power and an open lid for larger measurements, and retain the hardware/service context alongside the artifacts.
+CI runs a small end-to-end experiment and checks retained evidence after a publish deadline; no load threshold is
+inferred from those smoke tests.
