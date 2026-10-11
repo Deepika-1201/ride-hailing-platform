@@ -122,6 +122,9 @@ func TestOutboxKafkaPublishDeadlineClosesProducer(test *testing.T) {
 	if time.Since(started) > 2*time.Second {
 		test.Fatal("broker silence outlived the bounded publish deadline")
 	}
+	if !publisher.closed.Load() || publisher.client.Context().Err() == nil {
+		test.Fatal("publish returned its deadline before closing the producer")
+	}
 	if err := publisher.publish(test.Context(), row); !errors.Is(err, kgo.ErrClientClosed) {
 		test.Fatalf("timed-out producer was reused: %v", err)
 	}

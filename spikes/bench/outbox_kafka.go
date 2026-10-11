@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -22,9 +24,11 @@ import (
 var outboxKafkaTopic = regexp.MustCompile(`^spike-s4-[a-zA-Z0-9._-]+$`)
 
 type kafkaOutboxPublisher struct {
-	client  *kgo.Client
-	topic   string
-	timeout time.Duration
+	client    *kgo.Client
+	topic     string
+	timeout   time.Duration
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 func validateOutboxKafkaTopic(topic string) error {
@@ -95,23 +99,28 @@ func (publisher *kafkaOutboxPublisher) publish(ctx context.Context, row outboxRe
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if publisher.closed.Load() {
+		return kgo.ErrClientClosed
+	}
 	record, err := outboxKafkaRecord(publisher.topic, row)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, publisher.timeout)
 	defer cancel()
-	stop := context.AfterFunc(ctx, publisher.client.Close)
+	stop := context.AfterFunc(ctx, publisher.close)
 	defer stop()
 	err = publisher.client.ProduceSync(ctx, record).FirstErr()
 	if ctx.Err() != nil {
+		publisher.close()
 		return ctx.Err()
 	}
 	return err
 }
 
 func (publisher *kafkaOutboxPublisher) close() {
-	publisher.client.Close()
+	publisher.closed.Store(true)
+	publisher.closeOnce.Do(publisher.client.Close)
 }
 
 type outboxKafkaCapture struct {
