@@ -1,9 +1,11 @@
 package scenario
 
 import (
+	"context"
 	"math"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -258,5 +260,74 @@ func TestLaptopBaselineKeepsThirtyMinutesAfterTheDriverRamp(t *testing.T) {
 	latency, exists := baseline.Expect["position_latency_ms.p95"]
 	if !exists || latency.Max == nil || *latency.Max > 1000 {
 		t.Fatal("the baseline must enforce position latency p95 at or below one second")
+	}
+}
+
+func TestLaptopCollectorChecksCaptureCompleteness(t *testing.T) {
+	script, err := filepath.Abs("../../../scripts/laptop-tier.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name       string
+		gap        time.Duration
+		recorded   string
+		interval   string
+		single     bool
+		empty      bool
+		badName    bool
+		failed     bool
+		expectExit int
+	}{
+		{name: "consecutive", gap: 5 * time.Second, interval: "5"},
+		{name: "gap boundary", gap: 20 * time.Second, interval: "5"},
+		{name: "gap exceeds boundary", gap: 21 * time.Second, interval: "5", expectExit: 1},
+		{name: "recorded interval prevents weaker recheck", gap: 21 * time.Second, recorded: "5", interval: "15", expectExit: 1},
+		{name: "recorded interval prevents stricter recheck", gap: 30 * time.Second, recorded: "15", interval: "5"},
+		{name: "invalid recorded interval", gap: 5 * time.Second, recorded: "invalid", interval: "5", expectExit: 1},
+		{name: "single sample", single: true, interval: "5", expectExit: 1},
+		{name: "empty sample", gap: 5 * time.Second, empty: true, interval: "5", expectExit: 1},
+		{name: "invalid filename", gap: 5 * time.Second, badName: true, interval: "5", expectExit: 1},
+		{name: "failed scrape", gap: 5 * time.Second, failed: true, interval: "5", expectExit: 1},
+		{name: "invalid interval argument", gap: 5 * time.Second, interval: "0", expectExit: 2},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			directory := t.TempDir()
+			metrics := filepath.Join(directory, "metrics")
+			if err := os.Mkdir(metrics, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Date(2026, time.October, 11, 8, 0, 0, 0, time.UTC)
+			write(t, metrics, start.Format("20060102T150405Z")+".prom", "up 1\n")
+			if !testCase.single {
+				name := start.Add(testCase.gap).Format("20060102T150405Z") + ".prom"
+				if testCase.badName {
+					name = "invalid.prom"
+				}
+				content := "up 1\n"
+				if testCase.empty {
+					content = ""
+				}
+				write(t, metrics, name, content)
+			}
+			if testCase.recorded != "" {
+				write(t, directory, "sample-interval-seconds.txt", testCase.recorded+"\n")
+			}
+			if testCase.failed {
+				write(t, directory, "metrics-failures.txt", "20261011T080005Z\n")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, "bash", script, "--check-samples", directory)
+			command.Env = append(os.Environ(), "SAMPLE_INTERVAL="+testCase.interval)
+			output, runErr := command.CombinedOutput()
+			if command.ProcessState == nil {
+				t.Fatalf("starting collector check: %v", runErr)
+			}
+			if got := command.ProcessState.ExitCode(); got != testCase.expectExit {
+				t.Fatalf("exit %d, want %d: %v\n%s", got, testCase.expectExit, runErr, output)
+			}
+		})
 	}
 }

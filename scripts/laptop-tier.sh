@@ -3,6 +3,12 @@ set -euo pipefail
 
 check_samples() {
   local output=$1 interval=$2 previous=0 current sample stamp failed=0
+  if [[ -f "$output/sample-interval-seconds.txt" ]]; then
+    if ! IFS= read -r interval < "$output/sample-interval-seconds.txt" || [[ ! "$interval" =~ ^[1-9][0-9]*$ ]]; then
+      printf '%s\n' 'Invalid recorded sampling interval.' >&2
+      return 1
+    fi
+  fi
   local maximum_gap=$((interval * 2 + 10))
   local samples=()
   shopt -s nullglob
@@ -57,6 +63,7 @@ if [[ ${1:-} == --help ]]; then
     'API_URL, MANAGEMENT_URL, OSRM_URL and WS_URL override local defaults.' \
     'SCENARIO selects a rehearsal scenario; SAMPLE_INTERVAL defaults to 15 seconds.' \
     '--check-samples output-directory validates existing metrics without running load.' \
+    'Rechecks use the recorded sampling interval when present.' \
     'macOS runs require AC power and an open lid.' \
     'Output contains private refresh tokens; keep it outside version control.'
   exit 0
@@ -82,6 +89,7 @@ if [[ -e "$OUTPUT/environment.txt" || -e "$OUTPUT/report.json" ]]; then
 fi
 mkdir -p "$OUTPUT/metrics"
 cp "$SCENARIO" "$OUTPUT/scenario.yaml"
+printf '%s\n' "$SAMPLE_INTERVAL" > "$OUTPUT/sample-interval-seconds.txt"
 
 curl --fail --silent --show-error --max-time 10 "$API_URL/readyz" > "$OUTPUT/readiness.json"
 curl --fail --silent --show-error --max-time 10 \
