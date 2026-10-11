@@ -7,7 +7,7 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
-| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Finite experiment and broker-pause recovery tested; sustained throughput, restart and replicated failover measurements remain pending in phase 17 |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Finite experiment, broker-pause and same-storage restart recovery tested; sustained throughput and replicated failover measurements remain pending in phase 17 |
 
 ## What's here
 
@@ -119,19 +119,24 @@ Tests create and delete their own three-partition topics. They check an empty ca
 across multiple partitions, and replay by a second producer after the first acknowledges a batch but fails before
 database marking. They also delete a topic's retained prefix and prove capture rejects it. CI supplies both stores
 and requires `SPIKE_TEST_PG`, `SPIKE_TEST_KAFKA` and `SPIKE_TEST_KAFKA_CONTAINER`. Local broker tests explicitly
-skip if Kafka is not configured; the pause test also skips when its container target is not supplied.
+skip if Kafka is not configured; the outage tests also skip when their container target is not supplied.
 
-The broker-pause regression requires the Docker CLI and accepts only a running, unpaused Kafka 4.3.1 container
-labelled `com.ridehailing.spike=s4`. It resolves the container's immutable ID before taking action. After one
-event is acknowledged, it pauses Kafka while PostgreSQL remains available. The next send reaches its one-second
-deadline, the test's 250 ms lease expires naturally, and every row remains pending. After resume, a new producer
-and fenced lease replay the batch. All three events must arrive in first-delivery order; one or two duplicates
-are permitted because the unacknowledged send may still have reached Kafka.
+The broker-outage regressions require the Docker CLI and accept only a running, unpaused Kafka 4.3.1 container
+with a health check and label `com.ridehailing.spike=s4`. They resolve the immutable ID before taking action.
+After one event is acknowledged, they pause or stop Kafka while PostgreSQL remains available. The next send
+reaches its one-second deadline, the test's 250 ms lease expires naturally, and every row remains pending.
+After recovery, a new producer and fenced lease replay the batch. All three events must arrive in first-delivery
+order. The pause case permits one or two duplicates because the unacknowledged send may still have reached Kafka.
 
-Cleanup resumes the broker before deleting test resources, including after assertion failures. Killing the test
-process can bypass cleanup; unpause the dedicated test broker before further testing or removing the stack.
-These tests use one broker with replication factor one. The pause case does not establish broker-restart,
-disk-loss, leader-election, multi-replica durability or throughput guarantees.
+The restart case uses Docker stop/start on the same container and storage, with a five-second stop grace period.
+It verifies the container really stopped and its start timestamp changed, waits for broker health and topic
+readiness, then captures the acknowledged prefix before replay. That prefix must already contain the first event
+exactly once; replay cannot conceal lost broker data. Final recovery has exactly one duplicate.
+
+Cleanup resumes or starts the broker and waits for readiness before deleting test resources, including after
+assertion failures. Killing the test process can bypass cleanup; restore the dedicated test broker before further
+testing or removing the stack. These tests use one broker with replication factor one. They do not establish
+host-power-loss, disk-loss, leader-election, multi-replica durability or throughput guarantees.
 
 After an experiment stops publishing, capture its fresh, noncompacted, nontransactional topic:
 

@@ -488,26 +488,28 @@ func TestKafkaOutboxCaptureCommandAndTruncatedPrefix(test *testing.T) {
 }
 
 type outboxKafkaContainerInfo struct {
-	ID      string            `json:"id"`
-	Image   string            `json:"image"`
-	Labels  map[string]string `json:"labels"`
-	Running bool              `json:"running"`
-	Paused  bool              `json:"paused"`
+	ID        string            `json:"id"`
+	Image     string            `json:"image"`
+	Labels    map[string]string `json:"labels"`
+	Running   bool              `json:"running"`
+	Paused    bool              `json:"paused"`
+	StartedAt string            `json:"started_at"`
+	Health    string            `json:"health"`
 }
 
 var outboxKafkaContainerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-func (container outboxKafkaContainerInfo) validatePauseTarget() error {
+func (container outboxKafkaContainerInfo) validateOutageTarget() error {
 	if !outboxKafkaContainerID.MatchString(container.ID) || container.Image != "apache/kafka:4.3.1" ||
-		container.Labels["com.ridehailing.spike"] != "s4" || !container.Running || container.Paused {
-		return errors.New("pause target must be a running, unpaused Kafka 4.3.1 container labelled com.ridehailing.spike=s4")
+		container.Labels["com.ridehailing.spike"] != "s4" || !container.Running || container.Paused || container.Health == "" {
+		return errors.New("outage target must be a running, unpaused Kafka 4.3.1 container with a health check and label com.ridehailing.spike=s4")
 	}
 	return nil
 }
 
 func inspectOutboxKafkaContainer(ctx context.Context, identifier string) (outboxKafkaContainerInfo, error) {
 	var container outboxKafkaContainerInfo
-	format := `{"id":{{json .Id}},"image":{{json .Config.Image}},"labels":{{json .Config.Labels}},"running":{{json .State.Running}},"paused":{{json .State.Paused}}}`
+	format := `{"id":{{json .Id}},"image":{{json .Config.Image}},"labels":{{json .Config.Labels}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"started_at":{{json .State.StartedAt}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
 	output, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", format, identifier).CombinedOutput()
 	if err != nil {
 		return container, fmt.Errorf("inspect Kafka test container: %w: %s", err, bytes.TrimSpace(output))
@@ -517,17 +519,29 @@ func inspectOutboxKafkaContainer(ctx context.Context, identifier string) (outbox
 }
 
 func controlOutboxKafkaContainer(ctx context.Context, action, identifier string) error {
-	output, err := exec.CommandContext(ctx, "docker", action, identifier).CombinedOutput()
+	if !outboxKafkaContainerID.MatchString(identifier) {
+		return errors.New("container control requires a resolved immutable ID")
+	}
+	arguments := []string{action}
+	switch action {
+	case "pause", "unpause", "start":
+	case "stop":
+		arguments = append(arguments, "--time", "5")
+	default:
+		return errors.New("unsupported Kafka test container action")
+	}
+	arguments = append(arguments, identifier)
+	output, err := exec.CommandContext(ctx, "docker", arguments...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker %s: %w: %s", action, err, bytes.TrimSpace(output))
 	}
 	return nil
 }
 
-func TestOutboxKafkaPauseTargetRequiresDedicatedContainer(test *testing.T) {
+func TestOutboxKafkaOutageTargetRequiresDedicatedContainer(test *testing.T) {
 	valid := outboxKafkaContainerInfo{ID: strings.Repeat("a", 64), Image: "apache/kafka:4.3.1",
-		Labels: map[string]string{"com.ridehailing.spike": "s4"}, Running: true}
-	if err := valid.validatePauseTarget(); err != nil {
+		Labels: map[string]string{"com.ridehailing.spike": "s4"}, Running: true, Health: "healthy"}
+	if err := valid.validateOutageTarget(); err != nil {
 		test.Fatal(err)
 	}
 	for _, change := range []func(*outboxKafkaContainerInfo){
@@ -539,22 +553,38 @@ func TestOutboxKafkaPauseTargetRequiresDedicatedContainer(test *testing.T) {
 		},
 		func(container *outboxKafkaContainerInfo) { container.Running = false },
 		func(container *outboxKafkaContainerInfo) { container.Paused = true },
+		func(container *outboxKafkaContainerInfo) { container.Health = "" },
 	} {
 		invalid := valid
 		change(&invalid)
-		if err := invalid.validatePauseTarget(); err == nil {
-			test.Errorf("accepted unsafe pause target: %+v", invalid)
+		if err := invalid.validateOutageTarget(); err == nil {
+			test.Errorf("accepted unsafe outage target: %+v", invalid)
 		}
+	}
+	if err := controlOutboxKafkaContainer(test.Context(), "remove", valid.ID); err == nil {
+		test.Fatal("accepted an unsupported container action")
+	}
+	if err := controlOutboxKafkaContainer(test.Context(), "stop", "--all"); err == nil {
+		test.Fatal("accepted a container control option as an ID")
 	}
 }
 
 func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
+	testKafkaOutboxRecovery(test, false)
+}
+
+func TestKafkaOutboxRecoversFromBrokerRestart(test *testing.T) {
+	testKafkaOutboxRecovery(test, true)
+}
+
+func testKafkaOutboxRecovery(test *testing.T, restart bool) {
+	test.Helper()
 	identifier := os.Getenv("SPIKE_TEST_KAFKA_CONTAINER")
 	if identifier == "" {
 		if os.Getenv("CI") == "true" {
 			test.Fatal("SPIKE_TEST_KAFKA_CONTAINER is required in CI")
 		}
-		test.Skip("set SPIKE_TEST_KAFKA_CONTAINER to run the isolated broker-pause test")
+		test.Skip("set SPIKE_TEST_KAFKA_CONTAINER to run the isolated broker-outage tests")
 	}
 	inspection, cancel := context.WithTimeout(test.Context(), 5*time.Second)
 	container, err := inspectOutboxKafkaContainer(inspection, identifier)
@@ -562,14 +592,16 @@ func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	if err := container.validatePauseTarget(); err != nil {
+	if err := container.validateOutageTarget(); err != nil {
 		test.Fatal(err)
 	}
-	brokers, topic, ctx := kafkaOutboxTestTopic(test)
+	brokers, topic, _ := kafkaOutboxTestTopic(test)
 	store, _ := postgresOutboxTestStore(test)
+	ctx, cancel := context.WithTimeout(test.Context(), time.Minute)
+	defer cancel()
 	resumeNeeded := false
 	resume := func() error {
-		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		current, err := inspectOutboxKafkaContainer(cleanup, container.ID)
 		if err != nil {
@@ -579,6 +611,40 @@ func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
 			if err := controlOutboxKafkaContainer(cleanup, "unpause", container.ID); err != nil {
 				return err
 			}
+		}
+		if !current.Running {
+			if !restart {
+				return errors.New("paused broker stopped unexpectedly")
+			}
+			if err := controlOutboxKafkaContainer(cleanup, "start", container.ID); err != nil {
+				return err
+			}
+		}
+		if restart {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				state, err := inspectOutboxKafkaContainer(cleanup, container.ID)
+				if err != nil {
+					return err
+				}
+				if state.Running && !state.Paused && state.Health == "healthy" {
+					break
+				}
+				select {
+				case <-cleanup.Done():
+					return cleanup.Err()
+				case <-ticker.C:
+				}
+			}
+		}
+		recoveryClient, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+		if err != nil {
+			return err
+		}
+		defer recoveryClient.Close()
+		if err := waitForOutboxExperimentTopic(cleanup, kadm.NewClient(recoveryClient), topic); err != nil {
+			return err
 		}
 		resumeNeeded = false
 		return nil
@@ -616,7 +682,7 @@ func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
 		test.Fatal(err)
 	}
 	defer firstPublisher.close()
-	paused := false
+	interrupted := false
 	relay := outboxRelay{store: store, lease: first, batchSize: 3,
 		publish: func(ctx context.Context, row outboxRelayRow) error {
 			if err := firstPublisher.publish(ctx, row); err != nil {
@@ -626,16 +692,27 @@ func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
 				firstPublisher.timeout = time.Second
 				store.ttl = 250 * time.Millisecond
 				resumeNeeded = true
-				if err := controlOutboxKafkaContainer(ctx, "pause", container.ID); err != nil {
+				action := "pause"
+				if restart {
+					action = "stop"
+				}
+				if err := controlOutboxKafkaContainer(ctx, action, container.ID); err != nil {
 					return err
 				}
-				paused = true
+				state, err := inspectOutboxKafkaContainer(ctx, container.ID)
+				if err != nil {
+					return err
+				}
+				if (restart && state.Running) || (!restart && !state.Paused) {
+					return errors.New("broker did not enter the requested outage state")
+				}
+				interrupted = true
 			}
 			return nil
 		},
 	}
-	if count, err := relay.relayBatch(ctx); count != 0 || !errors.Is(err, context.DeadlineExceeded) || !paused {
-		test.Fatalf("outage batch count=%d paused=%v error=%v", count, paused, err)
+	if count, err := relay.relayBatch(ctx); count != 0 || !errors.Is(err, context.DeadlineExceeded) || !interrupted {
+		test.Fatalf("outage batch count=%d interrupted=%v error=%v", count, interrupted, err)
 	}
 	if pending, err := store.pending(ctx, 3); err != nil || len(pending) != 3 {
 		test.Fatalf("outage lost pending rows: pending=%+v error=%v", pending, err)
@@ -648,6 +725,20 @@ func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
 	}
 	if err := resume(); err != nil {
 		test.Fatal(err)
+	}
+	if restart {
+		state, err := inspectOutboxKafkaContainer(ctx, container.ID)
+		if err != nil || !state.Running || state.Paused || state.ID != container.ID || state.StartedAt == container.StartedAt {
+			test.Fatalf("broker was not restarted on the same container: state=%+v error=%v", state, err)
+		}
+		var prefix bytes.Buffer
+		if _, err := captureOutboxKafkaTrace(ctx, brokers, topic, &prefix); err != nil {
+			test.Fatal(err)
+		}
+		report, err := verifyOutboxTrace(bytes.NewReader(rows[0].envelope), &prefix)
+		if err != nil || !report.ok() || report.Unique != 1 || report.Duplicates != 0 {
+			test.Fatalf("restart did not preserve the acknowledged prefix before replay: report=%+v error=%v", report, err)
+		}
 	}
 	store.ttl = 10 * time.Second
 	secondPublisher, err := newKafkaOutboxPublisher(brokers, topic, 5*time.Second)
@@ -678,9 +769,13 @@ func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
 		test.Fatal(err)
 	}
 	report, err := verifyOutboxTrace(&expected, &received)
-	if err != nil || !report.ok() || report.Unique != 3 || report.Duplicates < 1 || report.Duplicates > 2 {
+	maximumDuplicates := 2
+	if restart {
+		maximumDuplicates = 1
+	}
+	if err != nil || !report.ok() || report.Unique != 3 || report.Duplicates < 1 || report.Duplicates > maximumDuplicates {
 		test.Fatalf("broker recovery report=%+v error=%v", report, err)
 	}
-	test.Logf("broker pause recovery: unique=%d duplicates=%d missing=%d order_violations=%d",
-		report.Unique, report.Duplicates, report.Missing, report.OrderViolations)
+	test.Logf("broker recovery (restart=%v): unique=%d duplicates=%d missing=%d order_violations=%d",
+		restart, report.Unique, report.Duplicates, report.Missing, report.OrderViolations)
 }
