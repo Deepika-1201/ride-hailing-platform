@@ -55,6 +55,36 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434), Valkey (6
   `printf 'docker.host=unix://%s/.colima/default/docker.sock\n' "$HOME" > ~/.testcontainers.properties`
 - The test run also writes module diagrams (PlantUML) to `build/spring-modulith-docs`.
 
+## Kafka development
+
+Domain-event publication and inbox-backed consumers can run through Kafka. This is opt-in development work;
+phase 17 is not complete. Dead-letter mirroring, operations replay, the location stream and the remaining phase
+gates are still pending. Normal startup and the V2 capacity baseline retain in-process delivery.
+
+Stop all workers before changing transport mode, and configure every worker consistently. To run the local
+single-broker stack:
+
+```bash
+export RIDE_KAFKA_ENABLED=true
+export RIDE_KAFKA_MANAGE_TOPICS=true
+docker compose --profile kafka up --build --detach
+```
+
+The broker has its own named volume and is available to containers at `kafka:9092` and to host tools at
+`localhost:19092`. Set `KAFKA_PORT` to change the host port. A host-run JVM uses `RIDE_KAFKA_BROKERS=localhost:19092`
+with its existing database settings. The application waits for the local broker's health check when that profile
+is active; API-only processes do not start Kafka consumers.
+
+Topic management creates missing event and per-consumer dead-letter topics, then validates the existing topology.
+It does not silently alter partitions, replication or retention. Outside this local setup, provision the declared
+topics first and leave `RIDE_KAFKA_MANAGE_TOPICS=false`. Local defaults are three event partitions, one dead-letter
+partition, replication factor one and minimum ISR one; they are not a durability or capacity certification.
+
+Rows already marked published by in-process delivery are not automatically backfilled into Kafka. A broker outage
+leaves new outbox rows pending; it never switches delivery back to in-process. Keep the transport setting consistent
+when recreating application containers. The separate S-4 spike infrastructure remains throwaway and should not
+carry application traffic.
+
 ## Simulator and web app
 
 Phase 15 adds the Go simulator, an operations map, and Rider and Driver screens. The host toolchains are Go 1.27

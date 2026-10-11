@@ -174,8 +174,12 @@ docker compose -p ride-s4-replicated --profile s4-replicated down --volumes
 The tagged test creates a one-partition topic with replication factor three, `min.insync.replicas=2` and
 unclean leader election disabled. After all three replicas are in sync, it publishes an acknowledged event,
 stops the leader identified by Kafka metadata, and waits for a different leader with exactly the two remaining
-replicas in sync. While the old leader is still stopped, it verifies the acknowledged prefix and publishes two
-more events through the same idempotent client. The final trace must contain all three events once and in order.
+replicas in sync. While the old leader is still stopped, it verifies the acknowledged prefix, temporarily raises
+only the test topic's minimum in-sync replicas to three, and requires a zero-retry probe using the publisher's
+settings to return `NOT_ENOUGH_REPLICAS`. The acknowledged trace must remain unchanged. Restoring the minimum
+to two must allow two more events through the original idempotent client. The final trace must contain all three
+events once and in order. Adjusting this topic's threshold isolates replication safety without stopping a second
+combined broker/controller node and losing the controller quorum as well.
 
 Container IDs must resolve to three distinct, running Kafka containers with the S-4 label, the replicated-cluster
 label and distinct node labels 1..3. Cleanup restarts the stopped node, waits for all three replicas, and deletes

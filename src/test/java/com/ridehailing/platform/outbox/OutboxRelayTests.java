@@ -16,6 +16,7 @@ import com.ridehailing.support.IntegrationTest;
 import com.ridehailing.support.PlatformTables;
 import com.ridehailing.support.ScriptedConsumer;
 import com.ridehailing.support.TestHandlers;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -51,10 +52,7 @@ class OutboxRelayTests extends IntegrationTest {
     private OutboxRows rows;
 
     @Autowired
-    private EventConsumers consumers;
-
-    @Autowired
-    private ConsumerDelivery delivery;
+    private OutboxTransport transport;
 
     @Autowired
     private Leases leases;
@@ -246,7 +244,7 @@ class OutboxRelayTests extends IntegrationTest {
         append("a");
         append("b");
         append("c");
-        OutboxRelay relay = new OutboxRelay(rows, consumers, delivery, leases, new InstanceId("node-a"),
+        OutboxRelay relay = new OutboxRelay(rows, transport, leases, new InstanceId("node-a"),
                 new OutboxProperties(properties.idlePoll(), 2, properties.retryDelays()), leaseProperties,
                 new WorkerProperties(false));
 
@@ -255,8 +253,42 @@ class OutboxRelayTests extends IntegrationTest {
         assertThat(unpublished()).isZero();
     }
 
+    @Test
+    void aTransportFailureLeavesTheWholeBatchUnpublishedWithoutInProcessFallback() {
+        UUID first = UUID.fromString(append("a"));
+        UUID second = UUID.fromString(append("b"));
+        List<UUID> attempted = new ArrayList<>();
+        OutboxTransport failing = row -> {
+            attempted.add(row.envelope().eventId());
+            if (row.envelope().eventId().equals(second)) {
+                throw new IllegalStateException("transport acknowledgement failed");
+            }
+        };
+        OutboxRelay failed = new OutboxRelay(rows, failing, leases, new InstanceId("node-a"), properties,
+                leaseProperties, new WorkerProperties(false));
+
+        assertThatThrownBy(failed::relayBatch).isInstanceOf(IllegalStateException.class)
+                .hasMessage("transport acknowledgement failed");
+
+        assertThat(attempted).containsExactly(first, second);
+        assertThat(unpublished()).isEqualTo(2);
+        assertThat(Effects.refs(jdbc, FIRST)).isEmpty();
+        assertThat(Effects.refs(jdbc, SECOND)).isEmpty();
+        expireLease();
+        List<UUID> replayed = new ArrayList<>();
+        OutboxRelay recovered = new OutboxRelay(rows, row -> replayed.add(row.envelope().eventId()), leases,
+                new InstanceId("node-b"), properties, leaseProperties, new WorkerProperties(false));
+
+        recovered.relayBatch();
+
+        assertThat(replayed).containsExactly(first, second);
+        assertThat(unpublished()).isZero();
+        assertThat(Effects.refs(jdbc, FIRST)).isEmpty();
+        assertThat(Effects.refs(jdbc, SECOND)).isEmpty();
+    }
+
     private OutboxRelay relay(String holder) {
-        return new OutboxRelay(rows, consumers, delivery, leases, new InstanceId(holder), properties, leaseProperties,
+        return new OutboxRelay(rows, transport, leases, new InstanceId(holder), properties, leaseProperties,
                 new WorkerProperties(false));
     }
 

@@ -33,4 +33,8 @@ class EventConsumers {
     Optional<EventConsumer> named(String name) {
         return Optional.ofNullable(byName.get(name));
     }
+
+    List<EventConsumer> all() {
+        return byName.values().stream().sorted(Comparator.comparing(EventConsumer::name)).toList();
+    }
 }

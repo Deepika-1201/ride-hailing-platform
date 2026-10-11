@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -38,6 +39,19 @@ func waitForOutboxReplicaPartition(ctx context.Context, admin *kadm.Client, topi
 		case <-ticker.C:
 		}
 	}
+}
+
+func setOutboxMinimumReplicas(ctx context.Context, admin *kadm.Client, topic, minimum string) error {
+	responses, err := admin.AlterTopicConfigs(ctx, []kadm.AlterConfig{
+		{Op: kadm.SetConfig, Name: "min.insync.replicas", Value: &minimum},
+	}, topic)
+	if err != nil {
+		return err
+	}
+	if len(responses) != 1 || responses[0].Name != topic {
+		return errors.New("minimum replica update did not return the requested topic")
+	}
+	return responses[0].Err
 }
 
 func TestKafkaOutboxSurvivesReplicatedLeaderLoss(test *testing.T) {
@@ -155,6 +169,32 @@ func TestKafkaOutboxSurvivesReplicatedLeaderLoss(test *testing.T) {
 	verification, err := verifyOutboxTrace(bytes.NewReader(rows[0].envelope), &prefix)
 	if err != nil || !verification.ok() || verification.Unique != 1 || verification.Duplicates != 0 {
 		test.Fatalf("acknowledged prefix lost during election: verification=%+v error=%v", verification, err)
+	}
+	if err := setOutboxMinimumReplicas(ctx, admin, topic, "3"); err != nil {
+		test.Fatal(err)
+	}
+	probe, err := kgo.NewClient(append(publisher.client.Opts(), kgo.RecordRetries(0))...)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer probe.Close()
+	rejected, err := outboxKafkaRecord(topic, rows[1])
+	if err != nil {
+		test.Fatal(err)
+	}
+	if err := probe.ProduceSync(ctx, rejected).FirstErr(); !errors.Is(err, kerr.NotEnoughReplicas) {
+		test.Fatalf("write below minimum replicas was not explicitly rejected: %v", err)
+	}
+	var afterRejection bytes.Buffer
+	if _, err := captureOutboxKafkaTrace(ctx, brokers, topic, &afterRejection); err != nil {
+		test.Fatal(err)
+	}
+	verification, err = verifyOutboxTrace(bytes.NewReader(rows[0].envelope), &afterRejection)
+	if err != nil || !verification.ok() || verification.Received != 1 {
+		test.Fatalf("rejected write changed the acknowledged trace: verification=%+v error=%v", verification, err)
+	}
+	if err := setOutboxMinimumReplicas(ctx, admin, topic, "2"); err != nil {
+		test.Fatal(err)
 	}
 	for _, row := range rows[1:] {
 		if err := publisher.publish(ctx, row); err != nil {

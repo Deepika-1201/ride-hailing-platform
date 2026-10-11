@@ -59,3 +59,10 @@ Which broker carries events and the location stream from V3?
 
 - The location stream turns out not to be needed beyond trip routes and counters. SNS + SQS would then be cheaper for domain events alone.
 - Windowed stream processing grows beyond simple counters; that is the point to consider Kafka Streams or Flink.
+
+## Implementation amendment (2026-10-12)
+
+- Local development and Testcontainers use `apache/kafka:4.3.1`, the JVM image already exercised by the single-broker and replicated S-4 checks. This replaces the native-image choice in decision 1 so the product tests and local stack use the same tested broker distribution. The local heap is bounded; neither the heap setting nor the image choice is a production-sizing result.
+- Consumer groups are per stable `EventConsumer.name()`, as detailed in LLD section 19.1, rather than shared by every handler in a module. In particular, `payment.charges` and `payment.earnings` must receive independently.
+- Kafka remains explicitly opt-in. Enabling it selects the publisher and worker consumer lifecycle together; the default in-process stack does not start or require a broker. Topic creation is separately opt-in and creates only missing topics. Existing topics are validated for partitions, replication, minimum ISR, retention and non-compacting, clean-election settings, not silently changed.
+- Stop all workers before changing transport mode and configure every worker consistently. Published in-process rows are not automatically backfilled into Kafka; an outage in Kafka mode never falls back to in-process publication. The local single-node profile is for functional development, not replica durability or capacity certification. Dead-letter mirroring, operations replay and the location stream remain separate V3 work.

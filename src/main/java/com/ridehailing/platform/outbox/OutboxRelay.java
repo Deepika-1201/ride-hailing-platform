@@ -1,6 +1,5 @@
 package com.ridehailing.platform.outbox;
 
-import com.ridehailing.platform.EventConsumer;
 import com.ridehailing.platform.InstanceId;
 import com.ridehailing.platform.Leases;
 import com.ridehailing.platform.Role;
@@ -14,7 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Delivers committed events to in-process consumers in ID order, under the cluster-wide lease {@code outbox-relay}
+ * Delivers committed events through the configured transport in ID order, under the cluster-wide lease {@code outbox-relay}
  * (LLD §5.2). A batch is marked published only while the lease is still ours, so a stale relay can't mark rows the new
  * holder is delivering; consumers' inboxes make a repeated delivery harmless.
  */
@@ -26,8 +25,7 @@ class OutboxRelay extends BackgroundWorker {
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
 
     private final OutboxRows rows;
-    private final EventConsumers consumers;
-    private final ConsumerDelivery delivery;
+    private final OutboxTransport transport;
     private final Leases leases;
     private final String holder;
     private final OutboxProperties properties;
@@ -35,12 +33,11 @@ class OutboxRelay extends BackgroundWorker {
     private long token;
     private long renewedAt;
 
-    OutboxRelay(OutboxRows rows, EventConsumers consumers, ConsumerDelivery delivery, Leases leases, InstanceId instance,
+    OutboxRelay(OutboxRows rows, OutboxTransport transport, Leases leases, InstanceId instance,
             OutboxProperties properties, LeaseProperties leaseProperties, WorkerProperties workers) {
         super("outbox-relay", Role.WORKER, 1, properties.idlePoll(), workers);
         this.rows = rows;
-        this.consumers = consumers;
-        this.delivery = delivery;
+        this.transport = transport;
         this.leases = leases;
         this.holder = instance.value();
         this.properties = properties;
@@ -65,9 +62,7 @@ class OutboxRelay extends BackgroundWorker {
             if (!holdLease()) {
                 return false;
             }
-            for (EventConsumer consumer : consumers.subscribedTo(row.envelope().eventType())) {
-                delivery.deliverWithRetries(consumer, row.envelope(), row.id());
-            }
+            transport.publish(row);
         }
         int marked = rows.markPublished(batch.stream().map(OutboxRows.Row::id).toList(), LEASE, holder, token);
         if (marked < batch.size()) {
