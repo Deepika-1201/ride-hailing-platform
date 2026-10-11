@@ -63,8 +63,8 @@ and Node.js 22 or later; container builds provide their own toolchains.
 ```bash
 ./scripts/setup-maps.sh
 docker compose up --build --detach
-docker compose --profile simulator up --build --detach web
-docker compose --profile simulator run --build --rm simulator
+docker compose --profile simulator up --build --detach --no-deps web
+docker compose --profile simulator run --build --rm --no-deps simulator
 ```
 
 Open <http://localhost:8088>. The default manual accounts are rider 9001 and MINI driver 1993; open their screens
