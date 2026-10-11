@@ -10,8 +10,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -483,4 +485,202 @@ func TestKafkaOutboxCaptureCommandAndTruncatedPrefix(test *testing.T) {
 	if capture, err := captureOutboxKafkaTrace(ctx, brokers, topic, io.Discard); err == nil || capture.Records != 0 {
 		test.Fatalf("truncated prefix accepted: capture=%+v error=%v", capture, err)
 	}
+}
+
+type outboxKafkaContainerInfo struct {
+	ID      string            `json:"id"`
+	Image   string            `json:"image"`
+	Labels  map[string]string `json:"labels"`
+	Running bool              `json:"running"`
+	Paused  bool              `json:"paused"`
+}
+
+var outboxKafkaContainerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+func (container outboxKafkaContainerInfo) validatePauseTarget() error {
+	if !outboxKafkaContainerID.MatchString(container.ID) || container.Image != "apache/kafka:4.3.1" ||
+		container.Labels["com.ridehailing.spike"] != "s4" || !container.Running || container.Paused {
+		return errors.New("pause target must be a running, unpaused Kafka 4.3.1 container labelled com.ridehailing.spike=s4")
+	}
+	return nil
+}
+
+func inspectOutboxKafkaContainer(ctx context.Context, identifier string) (outboxKafkaContainerInfo, error) {
+	var container outboxKafkaContainerInfo
+	format := `{"id":{{json .Id}},"image":{{json .Config.Image}},"labels":{{json .Config.Labels}},"running":{{json .State.Running}},"paused":{{json .State.Paused}}}`
+	output, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", format, identifier).CombinedOutput()
+	if err != nil {
+		return container, fmt.Errorf("inspect Kafka test container: %w: %s", err, bytes.TrimSpace(output))
+	}
+	err = json.Unmarshal(output, &container)
+	return container, err
+}
+
+func controlOutboxKafkaContainer(ctx context.Context, action, identifier string) error {
+	output, err := exec.CommandContext(ctx, "docker", action, identifier).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker %s: %w: %s", action, err, bytes.TrimSpace(output))
+	}
+	return nil
+}
+
+func TestOutboxKafkaPauseTargetRequiresDedicatedContainer(test *testing.T) {
+	valid := outboxKafkaContainerInfo{ID: strings.Repeat("a", 64), Image: "apache/kafka:4.3.1",
+		Labels: map[string]string{"com.ridehailing.spike": "s4"}, Running: true}
+	if err := valid.validatePauseTarget(); err != nil {
+		test.Fatal(err)
+	}
+	for _, change := range []func(*outboxKafkaContainerInfo){
+		func(container *outboxKafkaContainerInfo) { container.ID = "--all" },
+		func(container *outboxKafkaContainerInfo) { container.Image = "postgres:18.6" },
+		func(container *outboxKafkaContainerInfo) { container.Labels = nil },
+		func(container *outboxKafkaContainerInfo) {
+			container.Labels = map[string]string{"com.ridehailing.spike": "other"}
+		},
+		func(container *outboxKafkaContainerInfo) { container.Running = false },
+		func(container *outboxKafkaContainerInfo) { container.Paused = true },
+	} {
+		invalid := valid
+		change(&invalid)
+		if err := invalid.validatePauseTarget(); err == nil {
+			test.Errorf("accepted unsafe pause target: %+v", invalid)
+		}
+	}
+}
+
+func TestKafkaOutboxRecoversFromBrokerPause(test *testing.T) {
+	identifier := os.Getenv("SPIKE_TEST_KAFKA_CONTAINER")
+	if identifier == "" {
+		if os.Getenv("CI") == "true" {
+			test.Fatal("SPIKE_TEST_KAFKA_CONTAINER is required in CI")
+		}
+		test.Skip("set SPIKE_TEST_KAFKA_CONTAINER to run the isolated broker-pause test")
+	}
+	inspection, cancel := context.WithTimeout(test.Context(), 5*time.Second)
+	container, err := inspectOutboxKafkaContainer(inspection, identifier)
+	cancel()
+	if err != nil {
+		test.Fatal(err)
+	}
+	if err := container.validatePauseTarget(); err != nil {
+		test.Fatal(err)
+	}
+	brokers, topic, ctx := kafkaOutboxTestTopic(test)
+	store, _ := postgresOutboxTestStore(test)
+	resumeNeeded := false
+	resume := func() error {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		current, err := inspectOutboxKafkaContainer(cleanup, container.ID)
+		if err != nil {
+			return err
+		}
+		if current.Paused {
+			if err := controlOutboxKafkaContainer(cleanup, "unpause", container.ID); err != nil {
+				return err
+			}
+		}
+		resumeNeeded = false
+		return nil
+	}
+	test.Cleanup(func() {
+		if resumeNeeded {
+			if err := resume(); err != nil {
+				test.Error(err)
+			}
+		}
+	})
+	rows := []outboxRelayRow{
+		kafkaOutboxTestRow(test, "before-outage", "ride-1", 0),
+		kafkaOutboxTestRow(test, "during-outage", "ride-1", 1),
+		kafkaOutboxTestRow(test, "after-outage", "ride-1", 2),
+	}
+	var expected bytes.Buffer
+	var ids []int64
+	for index := range rows {
+		row := &rows[index]
+		if err := store.pool.QueryRow(ctx, fmt.Sprintf("INSERT INTO %s (partition_key, envelope) VALUES ($1, $2) RETURNING id", store.outbox),
+			row.partitionKey, row.envelope).Scan(&row.id); err != nil {
+			test.Fatal(err)
+		}
+		ids = append(ids, row.id)
+		expected.Write(row.envelope)
+		expected.WriteByte('\n')
+	}
+	first, acquired, err := store.acquireLease(ctx, "before-outage")
+	if err != nil || !acquired {
+		test.Fatalf("acquired=%v error=%v", acquired, err)
+	}
+	firstPublisher, err := newKafkaOutboxPublisher(brokers, topic, 5*time.Second)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer firstPublisher.close()
+	paused := false
+	relay := outboxRelay{store: store, lease: first, batchSize: 3,
+		publish: func(ctx context.Context, row outboxRelayRow) error {
+			if err := firstPublisher.publish(ctx, row); err != nil {
+				return err
+			}
+			if row.id == rows[0].id {
+				firstPublisher.timeout = time.Second
+				store.ttl = 250 * time.Millisecond
+				resumeNeeded = true
+				if err := controlOutboxKafkaContainer(ctx, "pause", container.ID); err != nil {
+					return err
+				}
+				paused = true
+			}
+			return nil
+		},
+	}
+	if count, err := relay.relayBatch(ctx); count != 0 || !errors.Is(err, context.DeadlineExceeded) || !paused {
+		test.Fatalf("outage batch count=%d paused=%v error=%v", count, paused, err)
+	}
+	if pending, err := store.pending(ctx, 3); err != nil || len(pending) != 3 {
+		test.Fatalf("outage lost pending rows: pending=%+v error=%v", pending, err)
+	}
+	if renewed, err := store.maintainLease(ctx, first); err != nil || renewed {
+		test.Fatalf("lease did not expire during the stalled send: renewed=%v error=%v", renewed, err)
+	}
+	if err := firstPublisher.publish(ctx, rows[2]); !errors.Is(err, kgo.ErrClientClosed) {
+		test.Fatalf("timed-out producer remained usable: %v", err)
+	}
+	if err := resume(); err != nil {
+		test.Fatal(err)
+	}
+	store.ttl = 10 * time.Second
+	secondPublisher, err := newKafkaOutboxPublisher(brokers, topic, 5*time.Second)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer secondPublisher.close()
+	if err := waitForOutboxExperimentTopic(ctx, kadm.NewClient(secondPublisher.client), topic); err != nil {
+		test.Fatal(err)
+	}
+	second, acquired, err := store.acquireLease(ctx, "after-outage")
+	if err != nil || !acquired || second.token != first.token+1 {
+		test.Fatalf("successor=%+v acquired=%v error=%v", second, acquired, err)
+	}
+	if marked, err := store.markPublished(ctx, first, ids); err != nil || marked {
+		test.Fatalf("expired holder marked after takeover: marked=%v error=%v", marked, err)
+	}
+	relay.lease = second
+	relay.publish = secondPublisher.publish
+	if count, err := relay.relayBatch(ctx); err != nil || count != 3 {
+		test.Fatalf("recovery batch count=%d error=%v", count, err)
+	}
+	if pending, err := store.pending(ctx, 3); err != nil || len(pending) != 0 {
+		test.Fatalf("recovered events were not marked: pending=%+v error=%v", pending, err)
+	}
+	var received bytes.Buffer
+	if _, err := captureOutboxKafkaTrace(ctx, brokers, topic, &received); err != nil {
+		test.Fatal(err)
+	}
+	report, err := verifyOutboxTrace(&expected, &received)
+	if err != nil || !report.ok() || report.Unique != 3 || report.Duplicates < 1 || report.Duplicates > 2 {
+		test.Fatalf("broker recovery report=%+v error=%v", report, err)
+	}
+	test.Logf("broker pause recovery: unique=%d duplicates=%d missing=%d order_violations=%d",
+		report.Unique, report.Duplicates, report.Missing, report.OrderViolations)
 }

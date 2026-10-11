@@ -72,6 +72,7 @@ jobs:
           - 29092:29092
         options: >-
           --memory 1g
+          --label com.ridehailing.spike=s4
           --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"
           --health-interval 5s
           --health-timeout 5s
@@ -94,6 +95,7 @@ jobs:
         env:
           SPIKE_TEST_PG: postgres://spike:spike@localhost:5432/spike?sslmode=disable
           SPIKE_TEST_KAFKA: localhost:29092
+          SPIKE_TEST_KAFKA_CONTAINER: ${{ job.services.kafka.id }}
         run: |
           go vet ./...
           go test -count=1 -race ./...
