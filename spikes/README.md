@@ -7,7 +7,7 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | S-1 | Where should live driver positions live: Valkey GEO, Valkey with H3 cells, or PostGIS? | [results/s1-live-index.md](results/s1-live-index.md) |
 | S-2 | Can a PostgreSQL table fire offer timeouts within ~1 s? | [results/s2-timers.md](results/s2-timers.md) |
 | S-3 | How much memory and CPU does a WebSocket connection cost on Tomcat vs Netty? | [results/s3-websockets.md](results/s3-websockets.md) |
-| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Offline trace verifier prepared; broker measurements remain pending in phase 17 |
+| S-4 | Outbox relay throughput and per-aggregate ordering through failover | Offline trace verifier and fault-tested batch runner prepared; broker measurements remain pending in phase 17 |
 
 ## What's here
 
@@ -52,3 +52,22 @@ are allowed because one state change may emit multiple events. Distinct aggregat
 It checks identity and order, not payload schemas, and prints a JSON summary with at most 20 example violations.
 Invalid input or a violated delivery invariant exits nonzero. A passing trace is not a throughput measurement or
 proof that the actual Kafka relay is correct; those require the phase 17 failover experiment.
+
+## S-4 batch runner
+
+[outbox_relay.go](bench/outbox_relay.go) models the conservative baseline in [LLD §19.1](../docs/low-level-design.md#191-v3-kafka).
+It checks lease ownership before reading and between sends, waits for each acknowledgement in ID order, then
+marks the full batch published. The store must atomically check the holder, fencing token and unexpired lease
+when marking; a publisher must return success only after acknowledgement. Neither adapter is implemented here yet.
+Every batch reads pending rows again, so a late commit below a previous batch's IDs is not skipped.
+
+```sh
+cd bench
+go test -count=1 -race -run 'TestOutbox(Relay|Trace)' ./...
+```
+
+Deterministic tests inject send and acknowledgement failures, lease takeover between events and before marking,
+a new token for the same holder, failed database marking and cancellation. A successor replays the unpublished
+batch, and the trace verifier checks that the duplicates introduce neither loss nor first-delivery reordering.
+These are control-flow tests with an in-memory store and publisher, not PostgreSQL fencing tests, Kafka failover
+evidence or throughput results. The product's V2 runtime is unchanged; real adapters and measurements remain pending.
