@@ -233,3 +233,47 @@ not a sustained ingestion rate, a broker-outage experiment, a replica-durability
 Use AC power and an open lid for larger measurements, and retain the hardware/service context alongside the artifacts.
 CI runs a small end-to-end experiment and checks retained evidence after a publish deadline; no load threshold is
 inferred from those smoke tests.
+
+### Paced arrivals
+
+Set `-arrival-interval` to insert events at a steady pace while the same fenced relay publishes them. Zero keeps
+the original preloaded-backlog mode. The input window is `events * arrival-interval`, with the first arrival at
+its start. The overall timeout must exceed that window to leave room for setup, tail drain and verification.
+
+For example, the following specifies 100 events/second for five minutes **(an example workload, not a measured result)**:
+
+```sh
+SPIKE_PG='postgres://ridehailing:ridehailing@localhost:5434/postgres?sslmode=disable' \
+	go run -buildvcs=true . outbox-run -brokers localhost:29092 \
+	-events 30000 -aggregates 100 -batch 500 -arrival-interval 10ms \
+	-max-arrival-lag 100ms -timeout 7m \
+	-output "../../build/spikes/s4-paced-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+Run this from `spikes/bench`, with the dedicated broker started as above. Use AC power and an open lid for
+measurements; do not run competing builds or load tests at the same time.
+
+The report labels this workload `paced-arrivals` and includes a separate `sustained` object:
+
+| Field | Meaning |
+|---|---|
+| `arrivals.committed` | Inserts acknowledged by PostgreSQL, not merely attempted |
+| `arrivals.max_schedule_lag_ns` | Largest scheduled-to-commit delay, in nanoseconds |
+| `input_monotonic_seconds`, `input_wall_seconds` | Complete input window on both clocks |
+| `committed_events_per_wall_second` | Actual admission rate, excluding tail drain |
+| `published_during_input_per_wall_second` | Successful fenced publication marks observed during the input window |
+| `backlog_at_input_end`, `caught_up_at_input_end` | Whether the relay had caught up when input ended |
+| `tail_drain_monotonic_seconds`, `tail_drain_wall_seconds` | Additional time needed after input stopped |
+
+`max-arrival-lag` defaults to 100ms. A late insert, including the final one, fails the run rather than hiding
+insufficient generator throughput with an unbounded catch-up burst. A discrepancy between wall and monotonic
+input durations beyond the same budget also fails the run. A slow relay can complete with a nonzero input-end
+backlog and positive tail drain: `success` means the experiment and delivery verification completed, **not** that
+the requested rate was sustained. Use `caught_up_at_input_end` and the reported rates when interpreting it.
+The old top-level drain-rate fields apply only to the preloaded mode and remain zero in paced mode.
+
+On failure, arrivals and relay work are cancelled and joined before cleanup. A separately bounded five-second
+attempt exports the actual committed ledger even if the workload deadline expired. Reports and available evidence
+remain in the private output directory; this evidence step is outside the workload timeout. No application schema
+or Kafka group offset is changed. These measurements characterize the spike's synchronous relay on the recorded
+machine and broker settings, not the Java product relay, replicated durability or long-term production capacity.
