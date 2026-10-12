@@ -3137,14 +3137,28 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
   - The captured `CityOwnership` claim guards one transaction for `surge_runs`, current multipliers and history. The database interval and strictly advancing sample timestamp prevent repeated damping after retry, restart or takeover. Lease expiry rolls back the whole cycle. History stores raw counts, weighted demand/supply, target, step configuration, holder and token, and is purged after seven days by pricing retention.
   - Quotes read the indexed multiplier table directly when their city is enabled. A value expires two minutes after sampling; missing, future or stale values fall back to rules, then 1.00. Fresh computed values replace rules even when lower. Existing quoted fares never change. Database errors still propagate; the code does not hide a failing pricing database.
   - `pricing_surge_cycles_total{outcome}` counts published, inactive, recovering, not-owner, stale/not-due and failed cycles. `pricing_surge_selection_total{source}` counts computed/rule/none selections, not committed quote counts. The planned Valkey surge hash and editable `surge_steps` table are deferred until measurements or a versioned administration contract justify them. Functional tests do not certify pricing or matching outcomes.
-- **Batch-matching experiment:** `BatchOfferPolicy` runs on the city owner every 2 s for the zones where it is switched on.
+- **Batch-matching experiment:** the offline assignment engine and comparison harness are implemented ([ADR-032](decisions/ADR-032-bounded-batch-assignment.md)); live `BatchOfferPolicy` remains planned. The target live loop runs on the city owner every 2 s for the zones where it is switched on.
   1. Claim the due search tasks of the section (`SKIP LOCKED`).
   2. Take share locks on their rides in ID order.
   3. Build an ETA matrix to the available drivers nearby.
   4. Solve with the Hungarian algorithm up to 200 × 200, greedy-with-regret above that.
   5. Reserve the chosen drivers in driver-ID order with the same conditional update as §8.3, and create all the window's offers in one transaction.
 
-  Evaluated with simulator hotspot scenarios against the adoption rule in [dispatch §8](dispatch-design.md#8-batch-matching-v4-experiment).
+  `BatchMatcher` uses JGraphT 1.5.3's Hungarian solver up to 200 drivers and 200 rides. Rows are driver origins and
+  columns are ride pickups. Padding and a penalty above the maximum total finite cost maximize reachable match
+  count before minimizing total ETA; unreachable and dummy edges never leave the solver as assignments. The
+  bound is enforced, not silently truncated. Costs remain finite nonnegative seconds within the integer duration
+  ceiling, and returned matches preserve fractional values. Exact tie priority is not yet a business policy.
+
+  `./gradlew batchMatchingExperiment` compares the same matrix with sequential lowest-ETA matching in ride order,
+  records its SHA-256 and both plans, and compares mean reductions only for identical matched ride sets. It runs
+  without external services, and its single-run timings are not throughput certification. Generated small matrices
+  are checked against an exhaustive oracle; the full 200x200 bound and invalid input paths are tested.
+
+  Live matrix preparation (the OSRM adapter currently caps combined coordinates at 100), priority semantics,
+  fenced transactional offers and greedy-with-regret for larger windows remain pending. Adoption is evaluated
+  with simulator hotspot scenarios against [dispatch §8](dispatch-design.md#8-batch-matching-v4-experiment), not
+  decided from the synthetic fixture.
 - **Back-to-back trips:** designed only ([dispatch §10](dispatch-design.md#10-back-to-back-trips-designed-for-v4)).
 
 ### 19.3 V5–V8

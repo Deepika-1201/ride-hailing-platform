@@ -166,6 +166,12 @@ Greedy sequential matching gives each request the best driver at that moment. In
 - **Ownership:** the opt-in `CityOwnership` coordinator holds a PostgreSQL lease and fencing token per city ([ADR-028](decisions/ADR-028-city-owned-database-work.md)), shared with future computed-surge work. Prepare outside the guard, then commit database mutations with the captured claim; stale or expired ownership cannot authorize the transaction. Sequential searches remain leaderless. The coordinator is implemented; batch matching itself remains an experiment to implement and measure.
 - **Adoption test:** run against the simulator on hotspot scenarios. Keep it only if mean pickup ETA in dense zones drops by at least 10% **(assumed)** without hurting the match rate.
 
+The first implementation slice is an offline, bounded assignment engine, not a live offer policy. It uses JGraphT's
+Hungarian solver for at most 200 drivers and 200 rides, maximizing reachable assignments before minimizing their
+total ETA. Matrix rows are drivers and columns are rides; unreachable cells cannot become assignments. Comparison
+uses the same matrix and ride order for a sequential lowest-ETA baseline. Larger-window handling and transactional
+offer creation remain pending, and a synthetic matrix improvement does not meet the simulator adoption gate.
+
 ## 9. Hotspots
 
 When demand in one zone is 10× normal (requirements §7), many searches chase the same few drivers. Dispatch handles that contention as follows:

@@ -4,7 +4,10 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing and time-of-day factors, ETA and weighted ranking, stable percentage experiments, fenced city ownership, and database-backed computed surge without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-031.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing and time-of-day factors, ETA and weighted ranking, stable percentage experiments, fenced city ownership, database-backed computed surge, and an offline bounded batch-assignment prototype without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-032.
+
+The separate [portfolio-completion checklist](docs/portfolio-completion.md) tracks a reproducible, evidence-backed
+portfolio release. It does not replace or complete the original 23-phase roadmap.
 
 ## Quick start
 
@@ -238,7 +241,7 @@ of idle credit, and neutral heading penalty when usable motion is missing or too
 `weighted_score` records its inputs, effective weights and component costs so the result is explainable without
 adding raw coordinates to the log. `dispatch_ranking_total{strategy="weighted",outcome}` reports weighted
 executions and fallbacks. See [ADR-027](docs/decisions/ADR-027-weighted-dispatch-scoring.md) for the exact rules.
-Outcome comparisons and the batch-matching experiment remain pending.
+Outcome comparisons and live batch-matching integration remain pending.
 
 ### Ranking experiments
 
@@ -262,6 +265,22 @@ Omitted or null experiments preserve the current setting on update. Set `percent
 for new assignments; `100` assigns all of them to treatment. This does not override active searches and is not an
 emergency kill switch. No experiment is configured by default, and ETA/weighted treatments still need OSRM for
 road times. See [ADR-030](docs/decisions/ADR-030-stable-ranking-experiments.md). Outcome measurements remain pending.
+
+### Offline batch assignment
+
+The batch prototype compares a sequential lowest-ETA baseline with JGraphT's Hungarian solver on the same
+driver-to-ride matrix, up to 200 by 200. It maximizes reachable matches first, then minimizes their total ETA;
+unreachable pairs and padded vertices never become assignments. Live dispatch remains unchanged.
+
+```bash
+./gradlew batchMatchingExperiment
+```
+
+This runs the committed synthetic example and writes `build/spikes/batch-matching/report.json`, including input
+digest, assignments, match rates and ETA totals. It requires JDK 25 but no running application or containers.
+See the [input format and comparison limits](spikes/batch-matching/README.md). Synthetic results are not an
+adoption decision: priority handling, bounded live matrix preparation, transactional offers, larger windows and
+simulator hotspot comparisons remain pending ([ADR-032](docs/decisions/ADR-032-bounded-batch-assignment.md)).
 
 ### City ownership
 

@@ -1,0 +1,4 @@
+{
+  "name": "synthetic-two-ride-contention",
+  "durations_s": [[1, 2], [2, 100]]
+}

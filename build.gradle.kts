@@ -22,6 +22,7 @@ val archunitVersion = "1.5.1"
 val h3Version = "4.5.0"
 val jsonSchemaValidatorVersion = "3.0.8"
 val jqwikVersion = "1.10.1"
+val jgraphtVersion = "1.5.3"
 
 dependencyManagement {
     imports {
@@ -43,6 +44,7 @@ dependencies {
     implementation("io.lettuce:lettuce-core")
     implementation("org.apache.kafka:kafka-clients")
     implementation("org.springframework.kafka:spring-kafka")
+    implementation("org.jgrapht:jgrapht-core:$jgraphtVersion")
     runtimeOnly("org.postgresql:postgresql")
     runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
@@ -98,4 +100,14 @@ tasks.withType<org.springframework.boot.gradle.tasks.run.BootRun> {
 tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootTestRun") {
     mainClass = "com.ridehailing.TestRideHailingApplication"
     environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
+}
+
+tasks.register<JavaExec>("batchMatchingExperiment") {
+    group = "verification"
+    description = "Compare sequential and bounded Hungarian matching on one offline ETA matrix"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass = "com.ridehailing.dispatch.app.BatchMatchingExperiment"
+    args(providers.gradleProperty("batchMatrix").getOrElse("spikes/batch-matching/example.json"),
+        providers.gradleProperty("batchReport").getOrElse("build/spikes/batch-matching/report.json"))
 }

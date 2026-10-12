@@ -1,6 +1,6 @@
 # Design spikes
 
-Throwaway experiments that answer the open questions in [requirements §12](../docs/requirements.md#12-open-questions-for-design-spikes) before the design is written. **Not product code**: nothing here is reused by the application, and it doesn't follow the product's coding standards. The findings are recorded in [results/](results/) and in the ADRs that cite them.
+The original throwaway experiments answer the open questions in [requirements §12](../docs/requirements.md#12-open-questions-for-design-spikes). Their findings are recorded in [results/](results/) and in the ADRs that cite them. Later product comparison harnesses are identified separately below; they are not capacity or adoption certification by themselves.
 
 | Spike | Question | Result |
 |---|---|---|
@@ -16,6 +16,7 @@ Throwaway experiments that answer the open questions in [requirements §12](../d
 | [compose.yaml](compose.yaml) | Valkey 9, PostgreSQL 18 with PostGIS 3.6, the optional S-4 Kafka 4.3.1 broker, and the spike images |
 | [bench/](bench/) | Go load generator: `geo` (S-1), `timers` (S-2), `wsclient` (S-3), and `outbox-run`, `outbox-verify`, `outbox-capture` (S-4) |
 | [ws-server/](ws-server/) | Spring Boot 4.1 WebSocket server that runs on either Tomcat or Netty (S-3) |
+| [batch-matching/](batch-matching/README.md) | Phase-18 offline comparison inputs and instructions; runs the bounded Java assignment engine, with live offer integration still pending |
 | [run.sh](run.sh) | Runs a whole spike and saves raw output to `results/raw/` |
 
 ## Running
