@@ -26,6 +26,10 @@ class H3Zones {
         return h3.latLngToCellAddress(point.lat(), point.lon(), RESOLUTION);
     }
 
+    String routingCellOf(GeoPoint point) {
+        return h3.latLngToCellAddress(point.lat(), point.lon(), 9);
+    }
+
     boolean isCell(String zoneId) {
         try {
             return h3.isValidCell(zoneId) && h3.getResolution(zoneId) == RESOLUTION;

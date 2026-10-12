@@ -3092,9 +3092,11 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
 ### 19.2 V4: dispatch, routing and surge
 
 - **Routing:** `OsrmRoutingProvider` calls `/route/v1/driving` (300 ms timeout) and `/table/v1/driving` (300 ms) on the `routing` profile.
-  - Durations are multiplied by a time-of-day factor per zone **(assumed)**, because OSRM has no live traffic.
-  - Results are cached in Valkey per H3 resolution-9 cell pair for 10 min.
-  - On a timeout or error, the mock answers, and the quote records `MOCK_FALLBACK` (ADR-013).
+  - The route adapter is implemented as opt-in preparation; the table/matrix call and ETA ranker are subsequent work. `ride.routing.osrm.enabled=false` preserves V1-V3 behavior. Enabling it requires explicit `ride.routing.osrm.cities`; the origin's service-area city selects OSRM, with other cities retaining the mock.
+  - The adapter uses longitude/latitude coordinates, no geometry or steps, a 64KiB response cap and a deadline covering the complete HTTP response. Distance and duration round to the nearest metre and second. Redirects are not followed. An explicit OSRM `NoRoute` remains no route; service errors and malformed responses return the mock answer with stored source `MOCK_FALLBACK` (ADR-013).
+  - Successful road results are cached in Valkey by ordered H3 resolution-9 cell pairs and endpoint for 10 min. Each cache read/write has a 20ms default budget **(assumed)**. Invalid entries and cache failures do not block routing; fallback and no-route results are never cached. Without Valkey, the same provider works uncached. The cell-pair approximation is intentional; map changes at the same endpoint require expiry or cache invalidation.
+  - Current OSRM durations use its static car profile. Time-of-day factors per zone are still planned **(assumed)** because OSRM has no live traffic; they must be applied outside the raw-route cache when implemented.
+  - Provider and cache outcome counters are registered at startup and exposed in Prometheus. Tests cover HTTP contracts and deadlines, per-city selection, cache failures, actual Valkey TTL/expiry, quote fare inputs, stored provenance and no-route refusals.
 - **Rankers:**
   - `EtaRanker`: the 10 nearest by distance, re-ranked by OSRM table duration; falls back to distance if the table call fails.
   - `WeightedScoreRanker`: `score = w_eta·eta + w_accept·(1 − acceptance_rate) + w_idle·(−idle_minutes) + w_heading·heading_penalty`, with weights per city. `acceptance_rate` comes from `driver_stats`, with a prior for new drivers.
@@ -3188,7 +3190,9 @@ As built: the sweeper's interval and safety-valve thresholds and the reconcile i
 | `ride.kafka.replication-factor`, `minimum-in-sync-replicas` | `1`, `1` | Local replica defaults; use the declared replicated deployment settings outside the local tier |
 | `ride.kafka.stream.queue-capacity`, `max-record-bytes`, `buffer-bytes` | `1024`, `2048`, `1048576` | Bounded best-effort queue, encoded value and Kafka producer memory (ADR-026) |
 | `ride.kafka.stream.send-timeout`, `shutdown-timeout` | `2s`, `1s` | Delivery timeout off the request path and bounded sender shutdown |
-| `ride.routing.provider`, `osrm.url`, `timeout` | `mock`, —, `300ms` | V4 |
+| `ride.routing.osrm.enabled`, `cities` | `false`, empty | Opt-in V4 route adapter; explicit origin cities required when enabled |
+| `ride.routing.osrm.base-url`, `timeout` | `http://localhost:5000`, `300ms` | Self-hosted OSRM endpoint and complete HTTP response deadline |
+| `ride.routing.osrm.cache-ttl`, `cache-timeout` | `10m`, `20ms` | Positive route cache lifetime and maximum wait per Valkey operation |
 | `DB_URL`, `DB_USER`, `DB_PASSWORD`, `DB_POOL_SIZE` | local values, pool `20` | Database (pool per role in the cloud, HLD §5.1) |
 
 ---

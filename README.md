@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming are in development. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-026.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 routing preparation adds opt-in OSRM road routes and caching without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-026.
 
 ## Quick start
 
@@ -131,6 +131,38 @@ malformed dead letters remain stored and unresolved. Resolved letters and finish
 `ride.retention.failed-deliveries` (14 days by default); unresolved letters and running jobs are retained.
 Metrics include `dead_letters_pending`, `dead_letters_redriven_total`, `event_replays_running`,
 `event_replays_failures_total`, `event_replays_completed_total` and `event_replay_events_total`.
+
+## OSRM routing development
+
+The default routing provider remains the deterministic mock. Phase 18 preparation can use self-hosted OSRM for
+explicitly selected origin cities, with road distances and durations flowing into quotes and tracking ETAs.
+This does not enable ETA-ranked dispatch, traffic adjustment or computed surge, and is not a capacity result.
+
+```bash
+./scripts/setup-maps.sh
+RIDE_ROUTING_OSRM_ENABLED=true RIDE_ROUTING_OSRM_CITIES=blr \
+  docker compose --profile routing up --build --detach
+```
+
+For a host-run JVM with its existing database setup, use `RIDE_ROUTING_OSRM_ENABLED=true`,
+`RIDE_ROUTING_OSRM_CITIES=blr` and `RIDE_ROUTING_OSRM_BASE_URL=http://localhost:5000`. Configure these settings
+consistently on roles that calculate routes. Enabling OSRM requires a nonempty city list; other cities keep the
+mock. Merely starting the `routing` profile does not change the application's routing provider.
+
+The complete HTTP response has a 300ms default deadline and a 64KiB size limit. Provider errors and malformed
+responses use the mock with stored quote source `MOCK_FALLBACK`; OSRM's explicit `NoRoute` still produces
+`422 ROUTE_NOT_FOUND`. OSRM's static car profile is not live traffic data.
+
+With Valkey enabled, valid road results are cached for ten minutes by ordered H3 resolution-9 cell pairs and
+OSRM endpoint. Nearby endpoints may share an approximate route. Each cache read/write waits at most 20ms;
+cache failures degrade to an uncached call. Fallback and no-route answers are never cached. Changing map data
+at the same endpoint requires clearing that routing cache namespace or waiting for expiry. Without Valkey,
+OSRM works uncached. `routing_requests_total{provider,outcome}` and `routing_cache_total{outcome}` expose
+provider outcomes and cache behavior on the management endpoint.
+
+The settings are `ride.routing.osrm.enabled`, `base-url`, `cities`, `timeout`, `cache-ttl` and `cache-timeout`.
+See [ADR-013](docs/decisions/ADR-013-routing-provider.md) for the decision and limits. Phase 16 measurements
+must keep this opt-in disabled so they retain the declared V2 baseline.
 
 ## Simulator and web app
 

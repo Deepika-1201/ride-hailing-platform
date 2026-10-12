@@ -4,6 +4,7 @@ import com.ridehailing.geography.RoutingProvider;
 import com.ridehailing.shared.GeoPoint;
 import java.time.ZonedDateTime;
 import java.util.Optional;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Component;
  * Deterministic, so quotes and simulator runs repeat.
  */
 @Component
+@ConditionalOnProperty(prefix = "ride.routing.osrm", name = "enabled", havingValue = "false", matchIfMissing = true)
 class MockRoutingProvider implements RoutingProvider {
 
     static final double DETOUR_FACTOR = 1.35;

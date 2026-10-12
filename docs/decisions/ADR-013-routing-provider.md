@@ -50,3 +50,10 @@ Where do distances and travel times come from, in V1 and later?
   - `route` takes the departure time, so the mock's answers depend only on its inputs and repeat in tests; providers without time-of-day speeds ignore it. An empty answer means no route (`422 ROUTE_NOT_FOUND`).
   - In V1 the mock uses one speed profile by local hour for every zone (30 km/h at night down to 18 km/h at the peaks) **(assumed)**; speeds per zone wait until simulator runs show they matter.
   - `matrix` arrives with ETA ranking in V4; nothing before it needs more than one route at a time.
+
+- **2026-10-12, phase 18 routing preparation:**
+  - The OSRM route adapter remains opt-in while the V2/V3 measurement gates stay open. Requests use longitude/latitude order, preserve a configured base-path prefix, and suppress route geometry and steps.
+  - A 300ms default deadline covers headers and response-body completion. Timeout, connection failure, invalid measurements and service errors use the existing mock with source `MOCK_FALLBACK`; OSRM's explicit `NoRoute` remains an empty result, not a fabricated road route.
+  - Distance and duration are rounded to the nearest metre and second, consistent with the existing mock. OSRM durations represent its static car profile; time-of-day adjustment and matrix ranking are separate follow-up work. Responses are capped at 64KiB and redirects are not followed.
+  - Activation uses `ride.routing.osrm.enabled=true` with an explicit, nonempty `cities` set. The origin's service-area city selects OSRM; other cities retain `MOCK`. Disabled mode creates no OSRM HTTP client. A missing Valkey instance allows uncached OSRM calls.
+  - The route cache keeps only valid `OSRM` results, keyed by ordered H3 resolution-9 cell pairs and the configured OSRM endpoint. It expires after ten minutes; a cache read or write waits at most 20ms by default **(assumed)**. Cache errors, invalid entries, `NoRoute` and fallback results never poison successful road-route entries. The cell-pair approximation is intentional; changing routing data at the same endpoint requires waiting for expiry or clearing its cache namespace.
