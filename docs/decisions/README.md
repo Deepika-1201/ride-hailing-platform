@@ -32,5 +32,6 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-026](ADR-026-best-effort-location-stream.md) | Bounded best-effort location publication outside the request path | Accepted |
 | [ADR-027](ADR-027-weighted-dispatch-scoring.md) | Explainable weighted dispatch with bounded signals and versioned category coefficients | Accepted |
 | [ADR-028](ADR-028-city-owned-database-work.md) | Per-city PostgreSQL ownership with captured fencing tokens and guarded database commits | Accepted |
+| [ADR-029](ADR-029-computed-surge.md) | Bounded surge measurements, fenced publication, durable damping and rule fallback | Accepted |
 
 Amendments are dated sections at the end of an ADR; the original decision text stays as it was.

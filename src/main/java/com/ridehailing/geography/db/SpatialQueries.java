@@ -1,6 +1,7 @@
 package com.ridehailing.geography.db;
 
 import com.ridehailing.shared.GeoPoint;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -48,6 +49,32 @@ public class SpatialQueries {
                 .param("lat", point.lat())
                 .query((row, rowNumber) -> new Containing(row.getString("city_id"), row.getString("special_area")))
                 .optional();
+    }
+
+    public List<ZonedPoint> containingIn(String cityId, List<GeoPoint> points) {
+        if (points.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql("""
+                WITH points AS (
+                    SELECT ordinality::integer AS ordinal, ST_SetSRID(ST_MakePoint(lon, lat), 4326) AS point
+                    FROM unnest(CAST(:latitudes AS double precision[]), CAST(:longitudes AS double precision[]))
+                         WITH ORDINALITY AS coordinates(lat, lon, ordinality)
+                )
+                SELECT points.ordinal,
+                    (SELECT code FROM geography.special_areas
+                     WHERE city_id = :city AND active AND ST_Covers(area, points.point)
+                     ORDER BY priority DESC, code LIMIT 1) AS special_area
+                FROM points
+                WHERE EXISTS (SELECT 1 FROM geography.service_areas
+                              WHERE city_id = :city AND active AND ST_Covers(area, points.point))
+                """).param("city", cityId)
+                .param("latitudes", points.stream().map(GeoPoint::lat).toArray(Double[]::new))
+                .param("longitudes", points.stream().map(GeoPoint::lon).toArray(Double[]::new))
+                .query((row, rowNumber) -> new ZonedPoint(row.getInt("ordinal") - 1, row.getString("special_area"))).list();
+    }
+
+    public record ZonedPoint(int index, String specialArea) {
     }
 
     /** {@code specialArea} is null outside every special area. */

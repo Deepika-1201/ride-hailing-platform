@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -57,6 +58,11 @@ class CityLeaseCoordinator implements CityOwnership, SmartLifecycle {
         lost = metrics.counter("dispatch.city.ownership", "outcome", "lost");
         failures = metrics.counter("dispatch.city.ownership", "outcome", "error");
         Gauge.builder("dispatch.city.ownership.held", this, coordinator -> coordinator.owned().size()).register(metrics);
+    }
+
+    @Override
+    public Set<String> configuredCities() {
+        return properties.cities();
     }
 
     @Override

@@ -45,7 +45,8 @@ public final class SurgeWindows {
 
         public enum Source {
             NONE,
-            RULE
+            RULE,
+            COMPUTED
         }
     }
 }

@@ -35,20 +35,20 @@ class Quotes implements PricingApi {
     private final GeographyApi geography;
     private final RoutingProvider routing;
     private final RuleRepository ruleVersions;
-    private final SurgeRuleCache surgeRules;
+    private final SurgeSelection surgeSelection;
     private final PickupEtas pickupEtas;
     private final QuoteRepository quotes;
     private final RateLimiter rateLimiter;
     private final QuoteProperties properties;
     private final Clock clock;
 
-    Quotes(GeographyApi geography, RoutingProvider routing, RuleRepository ruleVersions, SurgeRuleCache surgeRules,
+    Quotes(GeographyApi geography, RoutingProvider routing, RuleRepository ruleVersions, SurgeSelection surgeSelection,
             PickupEtas pickupEtas, QuoteRepository quotes, RateLimiter rateLimiter, QuoteProperties properties,
             Clock clock) {
         this.geography = geography;
         this.routing = routing;
         this.ruleVersions = ruleVersions;
-        this.surgeRules = surgeRules;
+        this.surgeSelection = surgeSelection;
         this.pickupEtas = pickupEtas;
         this.quotes = quotes;
         this.rateLimiter = rateLimiter;
@@ -71,7 +71,7 @@ class Quotes implements PricingApi {
         FeeRule feeRule = ruleVersions.feeInEffect(cityId, request.category()).orElseThrow(Quotes::notAvailable);
         Route route = routing.route(request.pickup(), request.dropoff(), local).orElseThrow(() -> unprocessable(
                 "ROUTE_NOT_FOUND", "There is no route between the pickup and the drop-off."));
-        Surge surge = SurgeWindows.at(surgeRules.of(cityId), location.zoneId(), local);
+        Surge surge = surgeSelection.at(cityId, location.zoneId(), local);
         Fare fare = FareCalculator.calculate(fareRule, route.distanceM(), route.durationS(), surge.multiplier());
         Integer pickupEta = pickupEtas.estimate(cityId, request.category(), request.pickup(), local).orElse(null);
 

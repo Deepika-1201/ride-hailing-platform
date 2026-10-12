@@ -50,6 +50,9 @@ public interface LiveIndex {
     /** Up to {@code max} online drivers with a position inside the box, nearest its centre first (operations map). */
     List<OnlineDriver> snapshot(String cityId, BoundingBox box, int max);
 
+    /** Fresh available drivers across categories; rejects more than {@code max} positioned online drivers (1..10000). */
+    List<OnlineDriver> available(String cityId, int max);
+
     enum Status {
         OFFLINE,
         AVAILABLE,

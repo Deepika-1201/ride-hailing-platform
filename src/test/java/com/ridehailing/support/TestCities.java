@@ -48,13 +48,16 @@ public class TestCities {
 
     /** A city with its own service area, offering the categories with default settings. */
     public TestCity create(String... offered) {
+        return createWithId(newId(), offered);
+    }
+
+    public TestCity createWithId(String id, String... offered) {
         int n = NEXT.getAndIncrement();
         if (n >= COLUMNS * ROWS) {
             throw new IllegalStateException("Every test-city square is taken after " + n + " cities");
         }
         double lon = -180 + (n % COLUMNS) * STEP;
         double lat = -50 + (n / COLUMNS) * STEP;
-        String id = newId();
         cities.create(ADMIN, new NewCity(id, "Test " + id, "Asia/Kolkata", "INR", polygon(lon, lat, SIZE)));
         cities.replaceServiceArea(ADMIN, id, multiPolygon(lon, lat, SIZE));
         for (String category : offered) {

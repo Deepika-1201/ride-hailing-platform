@@ -218,6 +218,25 @@ public class InMemoryLiveIndex implements LiveIndex {
                 .toList();
     }
 
+    @Override
+    public List<OnlineDriver> available(String cityId, int max) {
+        if (max < 1 || max > 10_000) {
+            throw new IllegalArgumentException("Supply snapshots require a limit of 1..10000 online drivers");
+        }
+        Instant oldest = clock.instant().minus(freshness);
+        List<Map.Entry<UUID, Entry>> online = city(cityId).entrySet().stream()
+                .filter(driver -> driver.getValue().status() != Status.OFFLINE && driver.getValue().position() != null)
+                .limit(max + 1L).toList();
+        if (online.size() > max) {
+            throw new IllegalStateException("Online driver population exceeds the supply snapshot limit");
+        }
+        return online.stream().filter(driver -> driver.getValue().matchable()
+                        && !driver.getValue().seenAt().isBefore(oldest))
+                .map(driver -> new OnlineDriver(driver.getKey(), driver.getValue().position(), driver.getValue().status(),
+                        driver.getValue().category(), driver.getValue().rideId(), driver.getValue().seenAt()))
+                .toList();
+    }
+
     private Map<UUID, Entry> city(String cityId) {
         return cities.computeIfAbsent(cityId, id -> new ConcurrentHashMap<>());
     }

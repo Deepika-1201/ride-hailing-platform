@@ -1,6 +1,7 @@
 package com.ridehailing.geography;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.ridehailing.geography.GeographyApi.Location;
 import com.ridehailing.geography.app.CityAdministration;
@@ -14,6 +15,8 @@ import com.ridehailing.support.TestCities;
 import com.ridehailing.support.TestCities.TestCity;
 import com.uber.h3core.H3Core;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -120,7 +123,35 @@ class ZoneResolutionTests extends IntegrationTest {
         assertThat(geography.isZone(city.id(), "area:NOWHERE")).isFalse();
     }
 
-    private UUID areaId(String code) {
+        @Test
+        void batchedZoneCountsKeepCityScopeSpecialAreaPriorityAndDistinctNeighborCounts() throws IOException {
+        TestCity city = cities.create();
+        TestCity other = cities.create();
+        String low = TestCities.newCode();
+        String high = TestCities.newCode();
+        cities.addSpecialArea(city, low, 1, 0.1, 0.1, 0.2);
+        cities.addSpecialArea(city, high, 5, 0.15, 0.15, 0.1);
+        GeoPoint ordinary = city.at(0.4, 0.4);
+        String cell = cellOf(ordinary);
+        var counts = geography.countByZone(city.id(), List.of(ordinary, ordinary, city.at(0.2, 0.2),
+            other.at(0.2, 0.2), city.at(-0.05, 0.2)));
+        assertThat(counts).containsEntry(cell, new GeographyApi.ZoneCount(2, 0))
+            .containsEntry("area:" + high, new GeographyApi.ZoneCount(1, 0)).doesNotContainKey("area:" + low);
+        H3Core h3 = H3Core.newInstance();
+        h3.gridDisk(cell, 1).stream().filter(neighbor -> !neighbor.equals(cell)).forEach(neighbor ->
+            assertThat(counts).containsEntry(neighbor, new GeographyApi.ZoneCount(0, 2)));
+        assertThat(counts.values().stream().mapToLong(GeographyApi.ZoneCount::local).sum()).isEqualTo(3);
+        }
+
+        @Test
+        void emptyAndOversizedZoneBatchesAreExplicit() {
+        TestCity city = cities.create();
+        assertThat(geography.countByZone(city.id(), List.of())).isEmpty();
+        assertThatThrownBy(() -> geography.countByZone(city.id(), Collections.nCopies(10_001, city.at(0.2, 0.2))))
+            .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        private UUID areaId(String code) {
         return jdbc.sql("SELECT id FROM geography.special_areas WHERE code = :code").param("code", code)
                 .query(UUID.class).single();
     }

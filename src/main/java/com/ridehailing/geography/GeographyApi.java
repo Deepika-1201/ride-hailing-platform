@@ -3,6 +3,8 @@ package com.ridehailing.geography;
 import com.ridehailing.shared.BoundingBox;
 import com.ridehailing.shared.GeoPoint;
 import java.time.ZoneId;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /** Cities, service areas and pricing zones, for the other modules (LLD §2.2, §10.1). */
@@ -24,6 +26,12 @@ public interface GeographyApi {
 
     /** An H3 resolution-7 cell, or {@code area:<code>} of an active special area in the city. */
     boolean isZone(String cityId, String zoneId);
+
+    /** Counts up to 10000 points inside this city's service area; special areas have no implicit neighbor ring. */
+    Map<String, ZoneCount> countByZone(String cityId, List<GeoPoint> points);
+
+    record ZoneCount(long local, long neighboring) {
+    }
 
     record CityView(String id, String name, ZoneId timeZone, String currency, boolean active) {
     }

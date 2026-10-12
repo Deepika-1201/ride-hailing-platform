@@ -237,6 +237,36 @@ public class ValkeyLiveIndex implements LiveIndex {
                 .toList();
     }
 
+    @Override
+    public List<OnlineDriver> available(String cityId, int max) {
+        if (max < 1 || max > 10_000) {
+            throw new IllegalArgumentException("Supply snapshots require a limit of 1..10000 online drivers");
+        }
+        Instant oldest = clock.instant().minus(freshness);
+        List<String> online = valkey.await("live_supply", valkey.timeouts().other(),
+                valkey.commands().zrange(geo(cityId, "online"), 0, max));
+        if (online.size() > max) {
+            throw new IllegalStateException("Online driver population exceeds the supply snapshot limit");
+        }
+        List<OnlineDriver> available = new ArrayList<>();
+        for (int offset = 0; offset < online.size(); offset += STATES_CHUNK) {
+            List<Held> candidates = states(cityId, online.subList(offset, Math.min(offset + STATES_CHUNK, online.size())), false).stream()
+                    .filter(held -> held.status() == Status.AVAILABLE && held.position() != null && held.lastSeen() != null
+                    && !held.lastSeen().isBefore(oldest)).toList();
+            List<RedisFuture<Double>> memberships = candidates.stream().map(held ->
+                valkey.commands().zscore(geo(cityId, held.category()), held.driverId().toString())).toList();
+            List<Double> scores = valkey.await("live_supply", valkey.timeouts().other(), memberships);
+            for (int index = 0; index < candidates.size(); index++) {
+            if (scores.get(index) != null) {
+                Held held = candidates.get(index);
+                available.add(new OnlineDriver(held.driverId(), held.position(), held.status(), held.category(),
+                    held.rideId(), held.lastSeen()));
+            }
+            }
+        }
+        return List.copyOf(available);
+    }
+
     private List<Held> states(String cityId, List<String> ids, boolean forgetGone) {
         String[] keys = new String[ids.size() + 1];
         String[] args = new String[ids.size() + 2];

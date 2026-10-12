@@ -191,6 +191,11 @@ class QuoteWorkedExampleTests extends IntegrationTest {
         public List<OnlineDriver> snapshot(String cityId, com.ridehailing.shared.BoundingBox box, int max) {
             throw new UnsupportedOperationException();
         }
+
+        @Override
+        public List<OnlineDriver> available(String cityId, int max) {
+            throw new UnsupportedOperationException();
+        }
     }
 
     record RouteCall(GeoPoint from, GeoPoint to, String zone) {

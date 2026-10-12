@@ -101,4 +101,9 @@ class ScriptedLiveIndex implements LiveIndex {
     public List<OnlineDriver> snapshot(String cityId, BoundingBox box, int max) {
         return real.snapshot(cityId, box, max);
     }
+
+    @Override
+    public List<OnlineDriver> available(String cityId, int max) {
+        return real.available(cityId, max);
+    }
 }

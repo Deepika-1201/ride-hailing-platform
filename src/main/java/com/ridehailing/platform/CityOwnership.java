@@ -1,8 +1,11 @@
 package com.ridehailing.platform;
 
 import java.util.List;
+import java.util.Set;
 
 public interface CityOwnership {
+
+    Set<String> configuredCities();
 
     /** Cached claims for preparing work; each must be checked again when committing it. */
     List<Claim> owned();

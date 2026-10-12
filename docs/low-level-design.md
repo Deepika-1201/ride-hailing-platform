@@ -1124,12 +1124,15 @@ CREATE TABLE platform.dead_letters (
 );
 
 -- V4: computed surge (§19.2)
-CREATE TABLE pricing.surge_steps (city_id text, ratio_from numeric(5,2), multiplier numeric(3,2),
-                                  PRIMARY KEY (city_id, ratio_from));
+-- Per-city steps are explicit deployment configuration initially (ADR-029).
+CREATE TABLE pricing.surge_runs (city_id text PRIMARY KEY, sampled_at timestamptz NOT NULL,
+  computed_at timestamptz NOT NULL, owner_holder text NOT NULL, owner_token bigint NOT NULL);
 CREATE TABLE pricing.surge_multipliers (city_id text, zone_id text, multiplier numeric(3,2) NOT NULL,
-  demand int NOT NULL, supply int NOT NULL, computed_at timestamptz NOT NULL, PRIMARY KEY (city_id, zone_id));
-CREATE TABLE pricing.surge_history (city_id text, zone_id text, computed_at timestamptz, multiplier numeric(3,2),
-  demand int, supply int, PRIMARY KEY (city_id, zone_id, computed_at));       -- kept 7 days
+  sampled_at timestamptz NOT NULL, computed_at timestamptz NOT NULL, PRIMARY KEY (city_id, zone_id));
+CREATE TABLE pricing.surge_history (city_id text, zone_id text, sampled_at timestamptz, computed_at timestamptz,
+  multiplier numeric(3,2), target numeric(3,2), rides bigint, quotes bigint, available bigint, neighboring bigint,
+  demand numeric(22,2), supply numeric(22,2), steps jsonb, owner_holder text, owner_token bigint,
+  PRIMARY KEY (city_id, zone_id, computed_at));       -- kept 7 days; raw and weighted measurements
 ```
 
 ### 4.9 Migrations
@@ -3117,18 +3120,19 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
   - Heading penalty is `(1 - cos(heading - bearing_to_pickup)) / 2`. Unknown, invalid or slower-than-1m/s motion uses neutral 0.5; a driver within one metre of pickup has zero heading penalty **(assumed rules)**. The decision stores the derived penalty, not a new raw location history. Weighted outcome metrics use strategy `weighted` without also counting an ETA strategy execution.
   - A city can split rides between rankers by percentage; decisions record the ranker.
 - **City ownership:** the lease `city-owner:<city>` (§5.5) picks one `dispatch` node per city for the city's singleton work: computed surge and the batch-matching experiment. Sequential search attempts stay leaderless.
-  - The implemented coordinator is opt-in (`ride.dispatch.city-ownership.enabled=false` by default), dispatch-only, and requires an explicit set of 1..100 valid city IDs. It maintains claims independently of job execution, with a 10s TTL and 3s renewal interval **(assumed initial timing)**. First-acquirer ownership does not balance cities between nodes. It does not yet run the planned surge or batch jobs ([ADR-028](decisions/ADR-028-city-owned-database-work.md)).
+  - The implemented coordinator is opt-in (`ride.dispatch.city-ownership.enabled=false` by default), dispatch-only, and requires an explicit set of 1..100 valid city IDs. It maintains claims independently of job execution, with a 10s TTL and 3s renewal interval **(assumed initial timing)**. First-acquirer ownership does not balance cities between nodes. Computed surge uses it when separately enabled; batch matching remains pending ([ADR-028](decisions/ADR-028-city-owned-database-work.md)).
   - `CityOwnership.owned()` supplies cached claims containing city, holder and fencing token. Preparation happens outside a guarded transaction; the caller passes that exact claim to `runIfOwned` for the final database mutations. A local claim is not proof of current ownership.
   - City-owned database work uses `Leases.runIfHeld`: it owns a transaction, locks the lease row, checks holder/token and `clock_timestamp()` after acquiring that lock, runs the bounded database work, and checks again before committing. Expiry during work rolls the transaction back; exceptions propagate with rollback. The lease row stays locked through commit, preventing a successor from taking ownership before that transaction finishes. This guard is for database mutations, not remote side effects, and must not be called from an existing transaction.
   - Renewal failures discard the affected claim. Shutdown clears all claims before bounded cleanup (5s total), rejects new work and attempts token-scoped release; failed releases expire. In-flight guarded work rolls back if it observes shutdown. Late acquisitions cannot restore stopped ownership, and restart takes new tokens. `ride.workers.autostart=false` suppresses automatic maintenance. Counters `dispatch_city_ownership_total{outcome}` track acquisition, renewal, loss and errors; `dispatch_city_ownership_held` is a cached-claim gauge.
-- **Computed surge**, every 60 s per city by its owner:
-  - demand per zone = rides requested in the last 5 min + 0.2 × quotes in the last 5 min **(assumed)**, from `rides_by_zone` and `quotes_by_zone`;
-  - supply per zone = available drivers in the zone, plus half of those in the neighbouring ring, bucketed from the live index;
-  - target = step table lookup on demand ÷ max(supply, 1);
-  - new multiplier = the target clamped to ±0.2 of the previous value, within 1.0–2.0;
-  - written to `pricing.surge_multipliers`, `surge_history` and the Valkey hash `{city}:surge` (2 min TTL).
-
-  Quotes in cities set to computed surge read the hash, falling back to the table and then to rules.
+- **Computed surge**, implemented as opt-in database-backed publication ([ADR-029](decisions/ADR-029-computed-surge.md)):
+  - A dispatch `Poller` wakes every 5s and evaluates owned, enabled, active cities only when their persisted 60s interval is due. `ride.workers.autostart=false` suppresses it. Configuration must give explicit per-city step tables, and dispatch ownership must include every city configured there. API processes use the same pricing configuration without needing a city owner locally.
+  - Demand per zone is consumed quotes (bookings) plus 0.20 times created quotes within `(sampled_at - 5 minutes, sampled_at]`, using database timestamps and city/time indexes on pricing's own quote table. Consumption is in the booking transaction; retries and rollbacks do not create extra demand. Historical pickup zones are retained. Later cancellation does not erase a request **(assumed policy)**.
+  - Supply is fresh matching-eligible drivers across categories in the zone, plus 0.50 times neighboring H3-ring drivers **(assumed)**. The new bounded live-index read rejects overflow rather than truncating. Its limit applies to positioned online drivers including busy/stale ones, default 5,000 and maximum 10,000. A batched city-scoped PostGIS lookup honors special-area priority; special areas use local supply only and do not donate to an implicit H3 ring **(assumed)**. Zone evaluation is capped at 10,000, including previous zones that must decay when activity disappears.
+  - Target is the configured step for demand divided by `max(supply, 1)`. Comparisons use exact decimal demand against threshold times denominator, without rounding the ratio. Inclusive unique nonnegative thresholds require a `0 -> 1.00` baseline and nondecreasing bounded multipliers. The result moves at most 0.20 from its previous value, within 1.00..2.00, starting at 1.00 **(assumed damping)**.
+  - The live-index epoch must be at least 60s old and unchanged across sampling. A missing/new epoch or any measurement failure skips publication, not an assumed zero supply. Cross-store observations can still see concurrent driver changes; they are not a global atomic snapshot. Database time rejects observations older than 10s or from the future before writing **(assumed timing)**.
+  - The captured `CityOwnership` claim guards one transaction for `surge_runs`, current multipliers and history. The database interval and strictly advancing sample timestamp prevent repeated damping after retry, restart or takeover. Lease expiry rolls back the whole cycle. History stores raw counts, weighted demand/supply, target, step configuration, holder and token, and is purged after seven days by pricing retention.
+  - Quotes read the indexed multiplier table directly when their city is enabled. A value expires two minutes after sampling; missing, future or stale values fall back to rules, then 1.00. Fresh computed values replace rules even when lower. Existing quoted fares never change. Database errors still propagate; the code does not hide a failing pricing database.
+  - `pricing_surge_cycles_total{outcome}` counts published, inactive, recovering, not-owner, stale/not-due and failed cycles. `pricing_surge_selection_total{source}` counts computed/rule/none selections, not committed quote counts. The planned Valkey surge hash and editable `surge_steps` table are deferred until measurements or a versioned administration contract justify them. Functional tests do not certify pricing or matching outcomes.
 - **Batch-matching experiment:** `BatchOfferPolicy` runs on the city owner every 2 s for the zones where it is switched on.
   1. Claim the due search tasks of the section (`SKIP LOCKED`).
   2. Take share locks on their rides in ID order.
@@ -3150,7 +3154,7 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
 
 ## 20. Configuration reference
 
-Properties are typed and validated at startup. Per-city and per-category settings live in the database (§4.4), not here.
+Properties are typed and validated at startup. Business settings normally live in the database (§4.4); initial opt-in computed-surge step tables are deployment configuration (ADR-029).
 
 | Property | Default | Meaning |
 |---|---|---|
@@ -3159,6 +3163,9 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | `ride.dispatch.city-ownership.cities` | empty | Explicit city IDs; 1..100 required when enabled |
 | `ride.dispatch.city-ownership.ttl` | `10s` | City lease lifetime, bounded to 100ms..5m |
 | `ride.dispatch.city-ownership.renew-every` | `3s` | Maintenance interval, at least 10ms and strictly less than half the TTL |
+| `ride.pricing.computed-surge.enabled` | `false` | Select fresh computed prices; run their poller on dispatch-role processes |
+| `ride.pricing.computed-surge.cities.<city>` | empty | Explicit list of `ratio-from`/`multiplier` steps; 1..100 valid cities required when enabled |
+| `ride.pricing.computed-surge.max-drivers` | `5000` | Positioned online population limit for complete supply reads, 1..10000 |
 | `ride.location.store` | `memory`; `valkey` in Compose (phase 13) | Live index, rate limiter, WebSocket tickets and (phase 14) push bus implementation |
 | `ride.location.freshness` | `30s` | Candidates must have been heard from within this |
 | `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |

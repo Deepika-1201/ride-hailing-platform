@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking, and fenced city ownership without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-028.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking, fenced city ownership, and database-backed computed surge without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-029.
 
 ## Quick start
 
@@ -203,12 +203,12 @@ of idle credit, and neutral heading penalty when usable motion is missing or too
 `weighted_score` records its inputs, effective weights and component costs so the result is explainable without
 adding raw coordinates to the log. `dispatch_ranking_total{strategy="weighted",outcome}` reports weighted
 executions and fallbacks. See [ADR-027](docs/decisions/ADR-027-weighted-dispatch-scoring.md) for the exact rules.
-Outcome comparisons, computed surge and the batch-matching experiment remain pending.
+Outcome comparisons, traffic adjustment and the batch-matching experiment remain pending.
 
 ### City ownership
 
-City ownership is an opt-in foundation for singleton surge and batch-matching jobs. It does not change sequential
-ride searches or start those future jobs. Enable it only on processes with the `dispatch` role, using an explicit
+City ownership is an opt-in foundation for singleton surge and future batch-matching jobs. It does not change
+sequential ride searches or enable computed surge by itself. Enable it on processes with the `dispatch` role, using an explicit
 city list:
 
 ```yaml
@@ -233,6 +233,50 @@ suppresses the automatic loop. Defaults leave ownership disabled, so Kafka is no
 `dispatch_city_ownership_total{outcome="acquired|renewed|lost|error"}` records lease maintenance, and
 `dispatch_city_ownership_held` counts cached local claims, not independently verified database owners.
 See [ADR-028](docs/decisions/ADR-028-city-owned-database-work.md) for the transaction boundary and failure rules.
+
+### Computed surge
+
+Computed surge is disabled by default. Enable it with explicit per-city thresholds, and configure city ownership
+on dispatch processes for every city they compute. API processes need the same pricing configuration, but do not
+need the ownership coordinator. For example, the following thresholds are experimental, not tuned recommendations:
+
+```yaml
+ride:
+  dispatch:
+    city-ownership:
+      enabled: true
+      cities: [blr]
+  pricing:
+    computed-surge:
+      enabled: true
+      max-drivers: 5000
+      cities:
+        blr:
+          - {ratio-from: 0, multiplier: 1.00}
+          - {ratio-from: 1, multiplier: 1.50}
+          - {ratio-from: 2, multiplier: 2.00}
+```
+
+Every minute, the city's dispatch owner measures five-minute booking demand plus 0.20 times quote demand and
+compares it with fresh available drivers plus half the neighboring H3-ring supply. Booking demand uses quote
+consumption in the booking transaction, so failed or repeated bookings do not count twice. Special areas use
+local supply only. Thresholds are inclusive, and the multiplier moves by at most 0.20 per committed update,
+within 1.00..2.00. A persisted schedule prevents retries or ownership changes from accelerating that adjustment.
+
+Supply reads reject more than `max-drivers` positioned online drivers (including busy or stale drivers), with a
+hard maximum of 10,000. Zone evaluation is capped at 10,000. The job waits for a live-index epoch at least one
+minute old, rechecks it after sampling, and rejects observations older than ten seconds at publication. Failed,
+incomplete or reset-index samples do not publish zero supply. These are bounded cross-store samples, not a global
+atomic snapshot. `ride.workers.autostart=false` also suppresses the surge poller.
+
+Fresh computed values take precedence over rules, even when lower. After two minutes from observation, or when
+a zone has no computed value, quotes fall back to the existing rules and then 1.00. Issued fares never change.
+Raw counts, weighted inputs, targets, thresholds and ownership tokens are retained in history for seven days.
+`pricing_surge_cycles_total{outcome}` reports publication and skipped/failed cycles;
+`pricing_surge_selection_total{source}` counts quote selection as `computed`, `rule` or `none`.
+
+The initial read path is an indexed PostgreSQL lookup. Valkey surge caching and performance comparisons remain
+deferred, and this is not capacity or improved-outcome certification. See [ADR-029](docs/decisions/ADR-029-computed-surge.md).
 
 ## Simulator and web app
 

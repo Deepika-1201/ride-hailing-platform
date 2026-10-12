@@ -1,6 +1,7 @@
 package com.ridehailing.pricing.app;
 
 import com.ridehailing.pricing.db.QuoteRepository;
+import com.ridehailing.pricing.db.ComputedSurgeRepository;
 import java.time.Duration;
 import org.springframework.stereotype.Service;
 
@@ -14,16 +15,21 @@ public class PricingRetention {
 
     private final QuoteRepository quotes;
     private final QuoteProperties properties;
+    private final ComputedSurgeRepository surge;
 
-    PricingRetention(QuoteRepository quotes, QuoteProperties properties) {
+    PricingRetention(QuoteRepository quotes, QuoteProperties properties, ComputedSurgeRepository surge) {
         this.quotes = quotes;
         this.properties = properties;
+        this.surge = surge;
     }
 
     public void purge() {
         int deleted;
         do {
             deleted = quotes.deleteOld(KEEP_UNUSED.plus(properties.ttl()), KEEP_USED, BATCH);
+        } while (deleted == BATCH);
+        do {
+            deleted = surge.deleteHistory(BATCH);
         } while (deleted == BATCH);
     }
 }

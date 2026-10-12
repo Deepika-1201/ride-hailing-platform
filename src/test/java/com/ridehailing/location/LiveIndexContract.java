@@ -1,6 +1,7 @@
 package com.ridehailing.location;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.ridehailing.location.LiveIndex.Candidate;
 import com.ridehailing.location.LiveIndex.LivePosition;
@@ -120,6 +121,54 @@ public abstract class LiveIndexContract {
         index.mirror(city, driver, new MirrorState(Status.AVAILABLE, 3, MINI, null));
         send(driver, 1, north(100));
         assertThat(index.nearby(city, MINI, HERE, 1000, 5).getFirst().headingDeg()).isNull();
+    }
+
+    @Test
+    void supplyIncludesFreshAvailableDriversAcrossCategoriesOnlyInTheRequestedCity() {
+        UUID mini = available(MINI, 1);
+        UUID sedan = available(SEDAN, 1);
+        UUID offered = available(MINI, 1);
+        available(MINI, 1);
+        send(mini, 1, HERE);
+        index.update(city, sedan, SEDAN, update(1, north(20)));
+        send(offered, 1, north(10));
+        index.mirror(city, offered, new MirrorState(Status.OFFERED, 2, MINI, null));
+        String other = TestCities.newId();
+        UUID foreign = Ids.newId();
+        index.mirror(other, foreign, new MirrorState(Status.AVAILABLE, 1, MINI, null));
+        index.update(other, foreign, MINI, update(1, HERE));
+
+        assertThat(index.available(city, 3)).extracting(OnlineDriver::driverId).containsExactlyInAnyOrder(mini, sedan);
+        clock.advance(FRESHNESS);
+        assertThat(index.available(city, 3)).hasSize(2);
+        clock.advance(Duration.ofMillis(1));
+        assertThat(index.available(city, 3)).isEmpty();
+    }
+
+    @Test
+    void aSupplySnapshotRejectsTruncationAndInvalidLimits() {
+        UUID first = available(MINI, 1);
+        UUID second = available(MINI, 1);
+        send(first, 1, HERE);
+        send(second, 1, north(10));
+        index.mirror(city, second, new MirrorState(Status.OFFERED, 2, MINI, null));
+        assertThatThrownBy(() -> index.available(city, 1)).isInstanceOf(IllegalStateException.class);
+        index.mirror(city, second, new MirrorState(Status.OFFLINE, 3, null, null));
+        assertThat(index.available(city, 1)).extracting(OnlineDriver::driverId).containsExactly(first);
+        assertThatThrownBy(() -> index.available(city, 0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> index.available(city, 10_001)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void supplyDoesNotRestoreASweptDriverFromAFlaggedSignOfLife() {
+        UUID driver = available(MINI, 1);
+        send(driver, 1, HERE);
+        clock.advance(FRESHNESS.plusSeconds(1));
+        index.sweep(city, clock.instant().minus(FRESHNESS));
+        index.update(city, driver, MINI, new LocationUpdate(2, HERE, 500, null, null, clock.instant()));
+        assertThat(index.available(city, 1)).isEmpty();
+        send(driver, 3, HERE);
+        assertThat(index.available(city, 1)).extracting(OnlineDriver::driverId).containsExactly(driver);
     }
 
     @Test

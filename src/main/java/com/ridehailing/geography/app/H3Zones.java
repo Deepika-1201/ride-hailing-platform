@@ -4,6 +4,7 @@ import com.ridehailing.shared.GeoPoint;
 import com.uber.h3core.H3Core;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.List;
 import org.springframework.stereotype.Component;
 
 /** H3 resolution-7 cells (about 5 km²), the pricing zone outside special areas (ADR-012, LLD §10.1). */
@@ -28,6 +29,10 @@ class H3Zones {
 
     String routingCellOf(GeoPoint point) {
         return h3.latLngToCellAddress(point.lat(), point.lon(), 9);
+    }
+
+    List<String> neighbors(String cell) {
+        return h3.gridDisk(cell, 1).stream().filter(neighbor -> !neighbor.equals(cell)).toList();
     }
 
     boolean isCell(String zoneId) {
