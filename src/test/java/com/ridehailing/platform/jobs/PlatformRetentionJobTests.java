@@ -66,7 +66,57 @@ class PlatformRetentionJobTests extends IntegrationTest {
         assertThat(strings("SELECT key FROM platform.idempotency_keys")).isEmpty();
     }
 
-    private void idempotencyKey(String key, String expiresIn) {
+        @Test
+        void recoveryRetentionKeepsUnfinishedWorkAndDeletesExpiredSnapshotsWithTheirJobs() {
+        replay("DONE", 15);
+        replay("FAILED", 15);
+        UUID pending = replay("RUNNING", 30);
+        UUID recentFailure = replay("FAILED", 1);
+        UUID recentDone = replay("DONE", 1);
+        deadLetter(15);
+        UUID unresolved = deadLetter(null);
+        UUID recentResolution = deadLetter(1);
+        RetentionProperties smallBatches = new RetentionProperties(Duration.ofHours(1), 1, properties.outbox(),
+            properties.inbox(), properties.failedDeliveries());
+
+        new PlatformRetentionJob(jdbc, smallBatches).run();
+
+        assertThat(strings("SELECT id::text FROM platform.event_replays"))
+            .containsExactlyInAnyOrder(pending.toString(), recentFailure.toString(), recentDone.toString());
+        assertThat(strings("SELECT replay_id::text FROM platform.event_replay_items"))
+            .containsExactlyInAnyOrder(pending.toString(), recentFailure.toString());
+        assertThat(strings("SELECT id::text FROM platform.dead_letters"))
+            .containsExactlyInAnyOrder(unresolved.toString(), recentResolution.toString());
+        }
+
+        private UUID replay(String status, int daysAgo) {
+        UUID id = UUID.randomUUID();
+        jdbc.sql("""
+            INSERT INTO platform.event_replays (id, consumer, from_at, to_at, reprocess, status, total_events, error, updated_at)
+            VALUES (:id, 'test.first', now() - interval '2 hours', now() - interval '1 hour', false, :status,
+                CASE WHEN :status = 'DONE' THEN 0 ELSE 1 END,
+                CASE WHEN :status = 'FAILED' THEN 'handler failed' END, now() - make_interval(days => :days))
+            """).param("id", id).param("status", status).param("days", daysAgo).update();
+        if (!status.equals("DONE")) {
+            jdbc.sql("INSERT INTO platform.event_replay_items (replay_id, outbox_id, envelope) VALUES (:id, 1, '{}')")
+                .param("id", id).update();
+        }
+        return id;
+        }
+
+        private UUID deadLetter(Integer resolvedDaysAgo) {
+        UUID id = UUID.randomUUID();
+        jdbc.sql("""
+            INSERT INTO platform.dead_letters
+                (id, consumer, topic, kafka_partition, kafka_offset, error, record_headers, created_at, resolved_at)
+            VALUES (:id, 'test.first', :topic, 0, 0, 'failure', convert_to('[]', 'UTF8'), now() - interval '30 days',
+                now() - make_interval(days => :days))
+            """).param("id", id).param("topic", "drivers.events.dlq." + id)
+            .param("days", resolvedDaysAgo, java.sql.Types.INTEGER).update();
+        return id;
+        }
+
+        private void idempotencyKey(String key, String expiresIn) {
         jdbc.sql("""
                         INSERT INTO platform.idempotency_keys (principal, key, request_hash, response_status, expires_at)
                         VALUES ('rider-1', :key, '\\x00', 200, now() + CAST(:expiresIn AS interval))

@@ -11,7 +11,8 @@ public final class PlatformTables {
     public static void reset(JdbcClient jdbc) {
         jdbc.sql("""
                 TRUNCATE platform.outbox, platform.inbox, platform.failed_deliveries, platform.timers,
-                         platform.idempotency_keys, platform.leases
+                         platform.idempotency_keys, platform.leases, platform.dead_letters,
+                         platform.event_replays, platform.event_replay_items
                 """).update();
     }
 }

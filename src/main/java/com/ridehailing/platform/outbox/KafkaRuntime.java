@@ -5,6 +5,7 @@ import com.ridehailing.platform.workers.WorkerProperties;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.springframework.context.SmartLifecycle;
 
 class KafkaRuntime implements SmartLifecycle {
@@ -12,15 +13,17 @@ class KafkaRuntime implements SmartLifecycle {
     private final KafkaTopology topology;
     private final EventConsumers consumers;
     private final Function<EventConsumer, KafkaEventConsumer> factory;
+    private final Supplier<KafkaDeadLetterConsumer> mirrorFactory;
     private final boolean autostart;
-    private final List<KafkaEventConsumer> active = new ArrayList<>();
+    private final List<Runnable> closeActions = new ArrayList<>();
     private boolean running;
 
     KafkaRuntime(KafkaTopology topology, EventConsumers consumers, Function<EventConsumer, KafkaEventConsumer> factory,
-            WorkerProperties workers) {
+            Supplier<KafkaDeadLetterConsumer> mirrorFactory, WorkerProperties workers) {
         this.topology = topology;
         this.consumers = consumers;
         this.factory = factory;
+        this.mirrorFactory = mirrorFactory;
         this.autostart = workers.autostart();
     }
 
@@ -31,9 +34,12 @@ class KafkaRuntime implements SmartLifecycle {
         }
         try {
             topology.prepare();
+            KafkaDeadLetterConsumer mirror = mirrorFactory.get();
+            closeActions.add(mirror::close);
+            mirror.start();
             for (EventConsumer consumer : consumers.all()) {
                 KafkaEventConsumer listener = factory.apply(consumer);
-                active.add(listener);
+                closeActions.add(listener::close);
                 listener.start();
             }
             running = true;
@@ -51,9 +57,9 @@ class KafkaRuntime implements SmartLifecycle {
     public synchronized void stop() {
         running = false;
         RuntimeException failure = null;
-        for (KafkaEventConsumer listener : active.reversed()) {
+        for (Runnable close : closeActions.reversed()) {
             try {
-                listener.close();
+            close.run();
             } catch (RuntimeException closing) {
                 if (failure == null) {
                     failure = closing;
@@ -62,7 +68,7 @@ class KafkaRuntime implements SmartLifecycle {
                 }
             }
         }
-        active.clear();
+        closeActions.clear();
         if (failure != null) {
             throw failure;
         }

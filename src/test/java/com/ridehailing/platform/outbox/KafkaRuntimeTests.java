@@ -7,6 +7,7 @@ import static org.awaitility.Awaitility.await;
 import com.ridehailing.RideHailingApplication;
 import com.ridehailing.platform.DomainEvent;
 import com.ridehailing.platform.EventConsumer;
+import com.ridehailing.platform.EventRecovery;
 import com.ridehailing.platform.LogContext;
 import com.ridehailing.platform.Outbox;
 import com.ridehailing.support.Effects;
@@ -79,11 +80,44 @@ class KafkaRuntimeTests {
 
                 UUID first = append(application, 1);
                 awaitDelivery(jdbc, first);
+
+                ScriptedConsumer observer = application.getBean("kafkaRuntimeObserver", ScriptedConsumer.class);
+                observer.afterEffect(event -> {
+                    throw new IllegalStateException("runtime poison event");
+                });
+                jdbc.sql("ALTER TABLE platform.dead_letters ADD CONSTRAINT test_mirror_unavailable CHECK (false) NOT VALID").update();
+                UUID failed = append(application, 2);
+                try (Admin admin = admin(broker)) {
+                    String deadTopic = "drivers.events.dlq." + OBSERVER;
+                    var partition = new org.apache.kafka.common.TopicPartition(deadTopic, 0);
+                    await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> assertThat(admin.listOffsets(Map.of(
+                            partition, org.apache.kafka.clients.admin.OffsetSpec.latest())).all().get(5, TimeUnit.SECONDS)
+                            .get(partition).offset()).isEqualTo(1));
+                    await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+                        assertThat(jdbc.sql("SELECT count(*) FROM platform.dead_letters").query(Long.class).single()).isZero();
+                        var mirrored = admin.listConsumerGroupOffsets(KafkaDeadLetterConsumer.GROUP)
+                                .partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
+                        assertThat(mirrored.values().stream().filter(Objects::nonNull).mapToLong(offset -> offset.offset()).sum()).isZero();
+                    });
+                } finally {
+                    jdbc.sql("ALTER TABLE platform.dead_letters DROP CONSTRAINT test_mirror_unavailable").update();
+                }
+                await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                    assertThat(jdbc.sql("SELECT event_id FROM platform.dead_letters WHERE consumer = :consumer")
+                        .param("consumer", OBSERVER).query(UUID.class).optional()).contains(failed);
+                    assertThat(jdbc.sql("SELECT error FROM platform.dead_letters WHERE consumer = :consumer")
+                            .param("consumer", OBSERVER).query(String.class).single()).contains("runtime poison event");
+                });
+                assertThat(Effects.count(jdbc, OBSERVER, failed.toString())).isZero();
+                observer.reset();
                 application.stop();
                 assertThat(runtime.isRunning()).isFalse();
                 assertThat(relay.isRunning()).isFalse();
 
-                UUID second = append(application, 2);
+                EventRecovery recovery = application.getBean(EventRecovery.class);
+                UUID replayId = recovery.startReplay(OBSERVER, Instant.now().minusSeconds(60), Instant.now().plusSeconds(60), false).id();
+                assertThat(recovery.replay(replayId).totalEvents()).isEqualTo(2);
+                UUID second = append(application, 3);
                 assertThat(Effects.count(jdbc, OBSERVER, second.toString())).isZero();
                 assertThat(jdbc.sql("SELECT published_at IS NULL FROM platform.outbox WHERE event_id = :id")
                         .param("id", second).query(Boolean.class).single()).isTrue();
@@ -91,14 +125,20 @@ class KafkaRuntimeTests {
                 assertThat(runtime.isRunning()).isTrue();
                 assertThat(relay.isRunning()).isTrue();
                 awaitDelivery(jdbc, second);
-                assertThat(Effects.refs(jdbc, OBSERVER)).containsExactly(first.toString(), second.toString());
+                await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertThat(recovery.replay(replayId).status()).isEqualTo("DONE"));
+                assertThat(recovery.replay(replayId).events()).isEqualTo(2);
+                assertThat(Effects.refs(jdbc, OBSERVER)).containsExactlyInAnyOrder(first.toString(), failed.toString(), second.toString());
+                assertThat(jdbc.sql("SELECT count(*) FROM platform.dead_letters").query(Long.class).single()).isEqualTo(1);
             }
 
             KafkaTopology existing = new KafkaTopology(readOnly, consumers);
             existing.prepare();
             try (Admin admin = admin(broker)) {
                 var offsets = admin.listConsumerGroupOffsets(OBSERVER).partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
-                assertThat(offsets.values().stream().filter(Objects::nonNull).mapToLong(offset -> offset.offset()).sum()).isEqualTo(2);
+                assertThat(offsets.values().stream().filter(Objects::nonNull).mapToLong(offset -> offset.offset()).sum()).isEqualTo(3);
+                var mirrored = admin.listConsumerGroupOffsets(KafkaDeadLetterConsumer.GROUP).partitionsToOffsetAndMetadata()
+                    .get(5, TimeUnit.SECONDS);
+                assertThat(mirrored.values().stream().filter(Objects::nonNull).mapToLong(offset -> offset.offset()).sum()).isEqualTo(1);
                 ConfigResource rides = new ConfigResource(ConfigResource.Type.TOPIC, "rides.events");
                 admin.incrementalAlterConfigs(Map.of(rides, List.of(new AlterConfigOp(
                         new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, "1"), AlterConfigOp.OpType.SET))))

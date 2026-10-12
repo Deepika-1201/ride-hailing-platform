@@ -972,6 +972,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DeadLetterList'}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
   /v1/ops/dead-letters/{dead_letter_id}/redrive:
@@ -980,6 +981,11 @@ paths:
       operationId: redriveDeadLetter
       x-since: V3
       summary: (V3) Run the consumer again on a dead letter
+      description: |
+        Revalidates the stored record and runs its original consumer through the inbox. Resolution,
+        consumer effects and audit commit together. A resolved letter returns the original result.
+        Invalid records, unavailable or unsubscribed consumers, and a handler still failing return
+        `409` without resolving the letter. Raw record data is never edited by this endpoint.
       parameters:
         - {name: dead_letter_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -1001,6 +1007,11 @@ paths:
       operationId: replayEvents
       x-since: V3
       summary: (V3) Re-deliver past events to one consumer
+      description: |
+        Durably snapshots retained outbox events visible at acceptance, subscribed to by this consumer,
+        with occurred_at in [from, to). Workers process the snapshot in outbox ID order.
+        Normal replay keeps inbox deduplication; reprocess deliberately reruns previously handled events.
+        Poll the returned ID through GET /v1/ops/replays/{replay_id} for committed progress or failure.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -1010,7 +1021,7 @@ paths:
             schema: {$ref: '#/components/schemas/ReplayRequest'}
       responses:
         '202':
-          description: Replay started.
+          description: Replay durably accepted; worker processing may not have started yet.
           headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
           content:
             application/json:
@@ -1018,6 +1029,50 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /v1/ops/replays/{replay_id}:
+    get:
+      tags: [Operations]
+      operationId: getReplay
+      x-since: V3
+      summary: (V3) Read event replay progress
+      parameters:
+        - {name: replay_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '200':
+          description: Replay status and committed event count.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Replay'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /v1/ops/replays/{replay_id}/retry:
+    post:
+      tags: [Operations]
+      operationId: retryReplay
+      x-since: V3
+      summary: (V3) Resume a failed event replay
+      description: Retains committed progress and the remaining snapshot; does not query the source outbox again.
+      parameters:
+        - {name: replay_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Failed replay queued again.
+          headers: {X-Request-Id: {$ref: '#/components/headers/RequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Replay'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
 
   # ------------------------------------------------------------------ Admin
   /v1/admin/cities:
@@ -2300,10 +2355,10 @@ components:
       type: object
       required: [consumer, from, to]
       properties:
-        consumer: {type: string}
+        consumer: {type: string, minLength: 1, maxLength: 249}
         from: {$ref: '#/components/schemas/Timestamp'}
         to: {$ref: '#/components/schemas/Timestamp'}
-        reprocess: {type: boolean, default: false, description: Clear the consumer's inbox for the range first, so events it already handled run again.}
+        reprocess: {type: boolean, default: false, description: Remove each selected event's inbox entry in the transaction that reruns it; this deliberately repeats already handled events.}
     Replay:
       type: object
       required: [id, consumer, from, to, status]
@@ -2313,7 +2368,10 @@ components:
         from: {$ref: '#/components/schemas/Timestamp'}
         to: {$ref: '#/components/schemas/Timestamp'}
         status: {type: string, enum: [RUNNING, DONE, FAILED]}
-        events: {type: integer, minimum: 0}
+        events: {type: integer, minimum: 0, description: Committed progress, including events skipped by the inbox.}
+        total_events: {type: integer, minimum: 0, description: Fixed snapshot size at acceptance.}
+        reprocess: {type: boolean}
+        error: {type: string, description: Failure summary when status is FAILED.}
 
     # ---------------------------------------------------------------- admin
     GeoJsonPolygon:

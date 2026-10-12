@@ -21,10 +21,12 @@ class KafkaTopology {
 
     private final KafkaProperties properties;
     private final List<NewTopic> topics;
+    private final Map<String, String> deadLetterTopics;
 
     KafkaTopology(KafkaProperties properties, List<EventConsumer> consumers) {
         this.properties = properties;
         Map<String, NewTopic> planned = new TreeMap<>();
+        Map<String, String> mirrored = new TreeMap<>();
         KafkaTopics.eventTopics().forEach(topic -> planned.put(topic, topic(topic, properties.partitions(), 7)));
         for (EventConsumer consumer : consumers) {
             if (consumer.name() == null || !consumer.name().matches("[A-Za-z0-9._-]+") || consumer.eventTypes().isEmpty()) {
@@ -36,13 +38,19 @@ class KafkaTopology {
                     throw new IllegalArgumentException("Kafka dead-letter topic name is too long");
                 }
                 planned.put(name, topic(name, properties.deadLetterPartitions(), 14));
+                mirrored.put(name, consumer.name());
             }
         }
         topics = List.copyOf(planned.values());
+        deadLetterTopics = Map.copyOf(mirrored);
     }
 
     List<NewTopic> topics() {
         return topics;
+    }
+
+    Map<String, String> deadLetterTopics() {
+        return deadLetterTopics;
     }
 
     void prepare() {

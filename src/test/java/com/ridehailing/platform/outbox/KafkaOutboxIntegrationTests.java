@@ -3,6 +3,9 @@ package com.ridehailing.platform.outbox;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.ridehailing.platform.DomainEvent;
 import com.ridehailing.platform.EventEnvelope;
@@ -120,6 +123,88 @@ class KafkaOutboxIntegrationTests extends IntegrationTest {
     void reset() {
         PlatformTables.reset(jdbc);
         Effects.reset(jdbc);
+    }
+
+    @Test
+    void mirrorsMalformedDeadLettersByteForByteBeforeAcknowledging() {
+        String topic = TOPIC + ".dlq.test.mirror";
+        UUID eventId = UUID.randomUUID();
+        byte[] value = {(byte) 0xff, 0, '{'};
+        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>(topic, 0, 12, new byte[] {0, (byte) 0xff, 1}, value);
+        record.headers().add("event_id", eventId.toString().getBytes(StandardCharsets.UTF_8));
+        record.headers().add("duplicate", new byte[] {0, (byte) 0xff});
+        record.headers().add("duplicate", null);
+        record.headers().add(KafkaHeaders.DLT_EXCEPTION_MESSAGE, "bad\u0000json".getBytes(StandardCharsets.UTF_8));
+        KafkaDeadLetterListener listener = new KafkaDeadLetterListener(jdbc, mapper, Map.of(topic, "test.mirror"));
+        List<KafkaDeadLetterListener.StoredHeader> headers = new ArrayList<>();
+        record.headers().forEach(header -> headers.add(new KafkaDeadLetterListener.StoredHeader(header.key(), header.value())));
+        AtomicInteger acknowledged = new AtomicInteger();
+
+        listener.onMessage(record, () -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            assertThat(jdbc.sql("SELECT record_value FROM platform.dead_letters").query(byte[].class).single()).isEqualTo(value);
+            assertThat(jdbc.sql("SELECT record_key FROM platform.dead_letters").query(byte[].class).single())
+                    .isEqualTo(record.key());
+            assertThat(jdbc.sql("SELECT record_headers FROM platform.dead_letters").query(byte[].class).single())
+                    .isEqualTo(mapper.writeValueAsBytes(headers));
+            assertThat(jdbc.sql("SELECT event_id FROM platform.dead_letters").query(UUID.class).single()).isEqualTo(eventId);
+            assertThat(jdbc.sql("SELECT consumer FROM platform.dead_letters").query(String.class).single()).isEqualTo("test.mirror");
+            assertThat(jdbc.sql("SELECT error FROM platform.dead_letters").query(String.class).single()).isEqualTo("bad\\u0000json");
+            acknowledged.incrementAndGet();
+        });
+
+        assertThat(acknowledged.get()).isEqualTo(1);
+    }
+
+    @Test
+    void mirrorsTombstonesAndUnparseableIdentitiesWithoutBlockingThePartition() {
+        String topic = TOPIC + ".dlq.test.mirror";
+        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>(topic, 0, 13, null, null);
+        record.headers().add("event_id", "0-0-0-0-1".getBytes(StandardCharsets.UTF_8));
+        AtomicInteger acknowledged = new AtomicInteger();
+
+        new KafkaDeadLetterListener(jdbc, mapper, Map.of(topic, "test.mirror")).onMessage(record, acknowledged::incrementAndGet);
+
+        assertThat(acknowledged.get()).isEqualTo(1);
+        assertThat(jdbc.sql("""
+                SELECT record_key IS NULL AND record_value IS NULL AND event_id IS NULL
+                FROM platform.dead_letters
+                """).query(Boolean.class).single()).isTrue();
+    }
+
+    @Test
+    void mirrorsEachOffsetOnceEvenWhenAcknowledgmentFailsOrTheLetterWasResolved() {
+        String topic = TOPIC + ".dlq.test.mirror";
+        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>(topic, 0, 14, new byte[] {2}, new byte[] {1});
+        KafkaDeadLetterListener listener = new KafkaDeadLetterListener(jdbc, mapper, Map.of(topic, "test.mirror"));
+        assertThatThrownBy(() -> listener.onMessage(record, () -> {
+            throw new KafkaException("offset commit failed");
+        })).isInstanceOf(KafkaException.class);
+        jdbc.sql("UPDATE platform.dead_letters SET resolved_at = now()").update();
+        AtomicInteger acknowledged = new AtomicInteger();
+
+        listener.onMessage(record, acknowledged::incrementAndGet);
+
+        assertThat(acknowledged.get()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT count(*) FROM platform.dead_letters").query(Long.class).single()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT resolved_at IS NOT NULL FROM platform.dead_letters").query(Boolean.class).single()).isTrue();
+    }
+
+    @Test
+    void mirrorDatabaseFailuresAndUnregisteredTopicsAreNeverAcknowledged() {
+        String topic = TOPIC + ".dlq.test.mirror";
+        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>(topic, 0, 15, new byte[] {2}, new byte[] {1});
+        JdbcClient unavailable = mock(JdbcClient.class);
+        when(unavailable.sql(anyString())).thenThrow(new org.springframework.dao.DataAccessResourceFailureException("database unavailable"));
+        AtomicInteger acknowledged = new AtomicInteger();
+        KafkaDeadLetterListener listener = new KafkaDeadLetterListener(unavailable, mapper, Map.of(topic, "test.mirror"));
+
+        assertThatThrownBy(() -> listener.onMessage(record, acknowledged::incrementAndGet))
+                .isInstanceOf(org.springframework.dao.DataAccessResourceFailureException.class);
+        assertThatThrownBy(() -> new KafkaDeadLetterListener(jdbc, mapper, Map.of()).onMessage(record, acknowledged::incrementAndGet))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Unregistered");
+        assertThat(acknowledged.get()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM platform.dead_letters").query(Long.class).single()).isZero();
     }
 
     @Test

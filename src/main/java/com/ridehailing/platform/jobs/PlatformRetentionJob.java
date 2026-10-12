@@ -68,6 +68,18 @@ class PlatformRetentionJob implements RecurringJob {
                     WHERE redriven_at < now() - make_interval(secs => :age)
                     LIMIT :batch)
                 """, properties.failedDeliveries());
+        deleteInBatches("resolved Kafka dead letters", """
+                DELETE FROM platform.dead_letters WHERE id IN (
+                    SELECT id FROM platform.dead_letters
+                    WHERE resolved_at < now() - make_interval(secs => :age)
+                    LIMIT :batch FOR UPDATE SKIP LOCKED)
+                """, properties.failedDeliveries());
+        deleteInBatches("finished event replays", """
+                DELETE FROM platform.event_replays WHERE id IN (
+                    SELECT id FROM platform.event_replays
+                    WHERE status <> 'RUNNING' AND updated_at < now() - make_interval(secs => :age)
+                    LIMIT :batch FOR UPDATE SKIP LOCKED)
+                """, properties.failedDeliveries());
     }
 
     private void deleteInBatches(String rows, String sql, Duration age) {

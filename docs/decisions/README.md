@@ -28,5 +28,6 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-022](ADR-022-demo-web-app.md) | Demo web app: React and MapLibre on self-hosted OpenStreetMap tiles | Accepted |
 | [ADR-023](ADR-023-recurring-jobs.md) | Recurring jobs scheduled by the expiry of a database lease | Accepted |
 | [ADR-024](ADR-024-endpoint-access.md) | Endpoints declare who may call them; access is denied by default | Accepted |
+| [ADR-025](ADR-025-durable-event-recovery.md) | Durable dead-letter mirroring and snapshot-based event recovery | Accepted |
 
 Amendments are dated sections at the end of an ADR; the original decision text stays as it was.

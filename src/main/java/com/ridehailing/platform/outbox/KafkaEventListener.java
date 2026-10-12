@@ -41,14 +41,20 @@ class KafkaEventListener implements AcknowledgingMessageListener<String, byte[]>
     @Override
     public void onMessage(ConsumerRecord<String, byte[]> record, Acknowledgment acknowledgment) {
         Objects.requireNonNull(acknowledgment, "Manual Kafka acknowledgement is required");
+        deliverRecord(record);
+        acknowledgment.acknowledge();
+    }
+
+    boolean deliverRecord(ConsumerRecord<String, byte[]> record) {
         EventEnvelope event = decode(record);
         if (consumer.eventTypes().contains(event.eventType())) {
             if (event.eventVersion() != 1) {
                 throw new SerializationException("Unsupported " + event.eventType() + " version " + event.eventVersion());
             }
             LogContext.run(Map.of(LogContext.ROLE, "worker"), () -> delivery.deliver(consumer, event));
+            return true;
         }
-        acknowledgment.acknowledge();
+        return false;
     }
 
     private EventEnvelope decode(ConsumerRecord<String, byte[]> record) {

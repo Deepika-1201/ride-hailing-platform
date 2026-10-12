@@ -7,6 +7,7 @@ import com.ridehailing.platform.workers.WorkerProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.json.JsonMapper;
 
 @Configuration(proxyBeanMethods = false)
@@ -30,8 +31,10 @@ class KafkaConfiguration {
     @Bean
     @ConditionalOnRole(Role.WORKER)
     KafkaRuntime kafkaRuntime(KafkaTopology topology, EventConsumers consumers, ConsumerDelivery delivery, JsonMapper json,
-            KafkaProperties properties, WorkerProperties workers) {
+            KafkaProperties properties, WorkerProperties workers, JdbcClient jdbc) {
         return new KafkaRuntime(topology, consumers,
-                consumer -> new KafkaEventConsumer(consumer, delivery, json, properties.brokers(), properties.publishTimeout()), workers);
+                consumer -> new KafkaEventConsumer(consumer, delivery, json, properties.brokers(), properties.publishTimeout()),
+                () -> new KafkaDeadLetterConsumer(topology.deadLetterTopics(), jdbc, json, properties.brokers(), properties.publishTimeout()),
+                workers);
     }
 }

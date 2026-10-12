@@ -3,6 +3,7 @@ package com.ridehailing.platform.outbox;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -14,6 +15,7 @@ import com.ridehailing.platform.workers.WorkerProperties;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.config.TopicConfig;
@@ -24,6 +26,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.json.JsonMapper;
 
 class KafkaConfigurationTests {
@@ -34,6 +37,7 @@ class KafkaConfigurationTests {
             .withUserConfiguration(KafkaConfiguration.class, InProcessOutboxTransport.class, EventConsumers.class)
             .withBean(JsonMapper.class, () -> JsonMapper.builder().build())
             .withBean(ConsumerDelivery.class, () -> mock(ConsumerDelivery.class))
+            .withBean(JdbcClient.class, () -> mock(JdbcClient.class))
             .withPropertyValues("ride.workers.autostart=false");
 
     @Test
@@ -77,8 +81,11 @@ class KafkaConfigurationTests {
         KafkaProperties properties = new KafkaProperties(true, List.of("localhost:9092"), Duration.ofSeconds(5),
                 false, 3, 1, (short) 3, 2);
 
-        List<NewTopic> topics = new KafkaTopology(properties, List.of(consumer)).topics();
+        KafkaTopology topology = new KafkaTopology(properties, List.of(consumer));
+        List<NewTopic> topics = topology.topics();
 
+        assertThat(topology.deadLetterTopics()).containsExactlyInAnyOrderEntriesOf(Map.of(
+            "drivers.events.dlq.notification.test", "notification.test", "payments.events.dlq.notification.test", "notification.test"));
         assertThat(topics).extracting(NewTopic::name).containsExactly("dispatch.events", "drivers.events",
                 "drivers.events.dlq.notification.test", "payments.events", "payments.events.dlq.notification.test", "rides.events");
         assertThat(topics).allSatisfy(topic -> {
@@ -103,7 +110,11 @@ class KafkaConfigurationTests {
         KafkaEventConsumer freshSecond = mock(KafkaEventConsumer.class);
         doThrow(new IllegalStateException("listener startup failed")).when(failed).start();
         ArrayDeque<KafkaEventConsumer> instances = new ArrayDeque<>(List.of(first, failed, freshFirst, freshSecond));
-        KafkaRuntime runtime = new KafkaRuntime(topology, consumers, ignored -> instances.removeFirst(), new WorkerProperties(false));
+        KafkaDeadLetterConsumer firstMirror = mock(KafkaDeadLetterConsumer.class);
+        KafkaDeadLetterConsumer freshMirror = mock(KafkaDeadLetterConsumer.class);
+        ArrayDeque<KafkaDeadLetterConsumer> mirrors = new ArrayDeque<>(List.of(firstMirror, freshMirror));
+        KafkaRuntime runtime = new KafkaRuntime(topology, consumers, ignored -> instances.removeFirst(), mirrors::removeFirst,
+            new WorkerProperties(false));
 
         assertThat(runtime.isAutoStartup()).isFalse();
         assertThat(runtime.getPhase()).isLessThan(SmartLifecycle.DEFAULT_PHASE);
@@ -111,6 +122,13 @@ class KafkaConfigurationTests {
         assertThat(runtime.isRunning()).isFalse();
         verify(first).close();
         verify(failed).close();
+        var startup = inOrder(firstMirror, first, failed);
+        startup.verify(firstMirror).start();
+        startup.verify(first).start();
+        startup.verify(failed).start();
+        startup.verify(failed).close();
+        startup.verify(first).close();
+        startup.verify(firstMirror).close();
 
         runtime.start();
         runtime.start();
@@ -123,6 +141,8 @@ class KafkaConfigurationTests {
         assertThat(runtime.isRunning()).isFalse();
         verify(freshFirst).close();
         verify(freshSecond).close();
+        verify(freshMirror).start();
+        verify(freshMirror).close();
     }
 
     @Test

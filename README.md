@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done, and phase 16 (laptop tier) is next. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-024.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery and recovery are in development. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-025.
 
 ## Quick start
 
@@ -57,9 +57,10 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434), Valkey (6
 
 ## Kafka development
 
-Domain-event publication and inbox-backed consumers can run through Kafka. This is opt-in development work;
-phase 17 is not complete. Dead-letter mirroring, operations replay, the location stream and the remaining phase
-gates are still pending. Normal startup and the V2 capacity baseline retain in-process delivery.
+Domain-event publication, inbox-backed consumers and durable dead-letter mirroring can run through Kafka.
+Staff can redrive failures and request durable event replays. This is opt-in development work; phase 17 is not
+complete. The location stream, sustained S-4 throughput measurements and remaining phase gates are still pending.
+Normal startup and the V2 capacity baseline retain in-process delivery.
 
 Stop all workers before changing transport mode, and configure every worker consistently. To run the local
 single-broker stack:
@@ -84,6 +85,30 @@ Rows already marked published by in-process delivery are not automatically backf
 leaves new outbox rows pending; it never switches delivery back to in-process. Keep the transport setting consistent
 when recreating application containers. The separate S-4 spike infrastructure remains throwaway and should not
 carry application traffic.
+
+### Event recovery
+
+Operations and admin accounts use these endpoints; every `POST` requires an `Idempotency-Key`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/ops/dead-letters?consumer=notification.rides` | Paginated failure metadata, without raw event payloads |
+| `POST /v1/ops/dead-letters/{id}/redrive` | Revalidate the original record and invoke its consumer through the inbox |
+| `POST /v1/ops/replays` | Accept `{consumer, from, to, reprocess}` and return a durable replay ID |
+| `GET /v1/ops/replays/{id}` | Read `RUNNING`, `DONE` or `FAILED`, committed progress and fixed snapshot size |
+| `POST /v1/ops/replays/{id}/retry` | Resume a failed replay from its remaining snapshot after fixing the consumer |
+
+Replays select retained events in `[from, to)` at acceptance, then process them in outbox ID order. Later events
+are not added, and outbox retention cannot remove the accepted snapshot. Worker restarts resume committed
+progress. Normal replay preserves inbox deduplication; `reprocess: true` deliberately invokes already-handled
+events again and should be used only for a reviewed consumer fix. Retrying a failed replay does not repeat
+committed batches or move live Kafka offsets. Staff recovery commands are audited.
+
+Mirror writes commit before Kafka offsets. Database outages leave the mirror retrying and replay work pending;
+malformed dead letters remain stored and unresolved. Resolved letters and finished replay records use
+`ride.retention.failed-deliveries` (14 days by default); unresolved letters and running jobs are retained.
+Metrics include `dead_letters_pending`, `dead_letters_redriven_total`, `event_replays_running`,
+`event_replays_failures_total`, `event_replays_completed_total` and `event_replay_events_total`.
 
 ## Simulator and web app
 
