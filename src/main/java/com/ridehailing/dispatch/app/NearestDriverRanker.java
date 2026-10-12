@@ -14,7 +14,7 @@ class NearestDriverRanker implements CandidateRanker {
 
     static final String NAME = "nearest";
 
-    private static final Comparator<Candidate> ORDER = Comparator.comparingInt(Candidate::distanceM)
+    static final Comparator<Candidate> ORDER = Comparator.comparingInt(Candidate::distanceM)
             .thenComparing(Candidate::lastSeen, Comparator.reverseOrder())
             .thenComparing(Candidate::driverId);
 
@@ -29,7 +29,8 @@ class NearestDriverRanker implements CandidateRanker {
     }
 
     @Override
-    public List<Ranked> rank(List<Candidate> candidates) {
-        return candidates.stream().sorted(ORDER).map(candidate -> new Ranked(candidate, candidate.distanceM())).toList();
+    public Ranking rank(Context context, List<Candidate> candidates) {
+        return new Ranking(candidates.stream().sorted(ORDER).map(candidate -> new Ranked(candidate, candidate.distanceM())).toList(),
+                "METRES", null, 0, 0);
     }
 }

@@ -140,7 +140,7 @@ Scenarios 4, 5, 6, 8 and 10 concern the ride itself and are in the [ride lifecyc
 
 ## 7. Ranking strategies
 
-`CandidateRanker.rank(request, candidates) → ranked candidates`. A candidate carries driver ID, distance, heading, speed and last-seen time, plus from V4 the ETA, acceptance rate and idle time.
+`CandidateRanker.rank(context, candidates)` returns ranked candidates plus score units, fallback reason and exclusion counts. Context carries city, pickup and local departure time; candidates carry driver ID, position, distance and last-seen time. Weighted ranking will add acceptance rate, idle time and heading inputs later.
 
 | Strategy | Version | Ranks by |
 |---|---|---|
@@ -149,7 +149,9 @@ Scenarios 4, 5, 6, 8 and 10 concern the ride itself and are in the [ride lifecyc
 | `WeightedScoreRanker` | V4 | Weighted sum of ETA, acceptance rate, idle time and heading; weights per city |
 | An ML ranker | Future | Same interface; evaluated offline on simulator replays first |
 
-- The strategy is configured per city and can be split by a percentage of rides. Each decision record names the strategy and its version, so strategies can be compared on real outcomes.
+- The strategy is configured per city and category. Each decision record names the strategy and its version. Percentage-based experiment splits remain planned.
+- `eta` is implemented with one directed table call for the ten nearest eligible drivers. It preserves fractional ETA seconds and breaks ties by distance, freshness and driver ID. Unreachable pairs are excluded; an unavailable table falls back to the complete nearest-driver order. The decision's `score_unit`, `ranking_fallback` and exclusion counts distinguish those outcomes. The default stays `nearest`; real ETA ranking also needs OSRM enabled for that city.
+- The table wait is bounded and remains inside the current search transaction. Driver availability is still checked by the same conditional reservation after the response; tests cover withdrawal during the call and overlapping searches reserving different drivers.
 - Offer policy is a separate interface, `OfferPolicy`: V1 is sequential, and batch matching (§8) is the V4 experiment.
 
 ## 8. Batch matching (V4 experiment)

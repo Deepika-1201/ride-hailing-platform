@@ -10,17 +10,23 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
+import java.util.OptionalDouble;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 class OsrmRoutingProvider implements RoutingProvider {
 
     static final int MAX_RESPONSE_BYTES = 65_536;
+    static final int MAX_TABLE_COORDINATES = 100;
 
     private final URI baseUrl;
     private final Duration timeout;
@@ -30,6 +36,8 @@ class OsrmRoutingProvider implements RoutingProvider {
     private final Counter successful;
     private final Counter unavailable;
     private final Counter noRoute;
+    private final Counter matrixSuccessful;
+    private final Counter matrixUnavailable;
 
     OsrmRoutingProvider(URI baseUrl, Duration timeout, HttpClient http, JsonMapper json, MockRoutingProvider fallback,
             MeterRegistry metrics) {
@@ -46,20 +54,15 @@ class OsrmRoutingProvider implements RoutingProvider {
         successful = metrics.counter("routing.requests", "provider", "osrm", "outcome", "success");
         unavailable = metrics.counter("routing.requests", "provider", "osrm", "outcome", "fallback");
         noRoute = metrics.counter("routing.requests", "provider", "osrm", "outcome", "no_route");
+        matrixSuccessful = metrics.counter("routing.matrix.requests", "provider", "osrm", "outcome", "success");
+        matrixUnavailable = metrics.counter("routing.matrix.requests", "provider", "osrm", "outcome", "fallback");
     }
 
     @Override
     public Optional<Route> route(GeoPoint from, GeoPoint to, ZonedDateTime departure) {
-        URI uri = baseUrl.resolve("route/v1/driving/" + coordinates(from) + ";" + coordinates(to) + "?overview=false&steps=false");
-        HttpRequest request = HttpRequest.newBuilder(uri).timeout(timeout).header("Accept", "application/json").GET().build();
-        CompletableFuture<HttpResponse<byte[]>> response;
         try {
-            response = http.sendAsync(request, HttpResponse.BodyHandlers.limiting(HttpResponse.BodyHandlers.ofByteArray(), MAX_RESPONSE_BYTES));
-        } catch (RuntimeException unavailable) {
-            return fallback(from, to, departure);
-        }
-        try {
-            HttpResponse<byte[]> received = response.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            HttpResponse<byte[]> received = request("route/v1/driving/" + coordinates(from) + ";" + coordinates(to)
+                    + "?overview=false&steps=false");
             if (received.statusCode() != 200 && received.statusCode() != 400) {
                 return fallback(from, to, departure);
             }
@@ -76,13 +79,74 @@ class OsrmRoutingProvider implements RoutingProvider {
             successful.increment();
             return Optional.of(route);
         } catch (InterruptedException interrupted) {
-            response.cancel(true);
             Thread.currentThread().interrupt();
             return fallback(from, to, departure);
         } catch (ExecutionException | TimeoutException | RuntimeException failure) {
-            response.cancel(true);
             return fallback(from, to, departure);
         }
+    }
+
+    @Override
+    public Optional<DurationMatrix> matrix(String cityId, List<GeoPoint> origins, List<GeoPoint> destinations, ZonedDateTime departure) {
+        origins = List.copyOf(origins);
+        destinations = List.copyOf(destinations);
+        if (origins.isEmpty() || destinations.isEmpty() || origins.size() + destinations.size() > MAX_TABLE_COORDINATES) {
+            throw new IllegalArgumentException("OSRM tables require origins and destinations totalling at most 100 coordinates");
+        }
+        String points = Stream.concat(origins.stream(), destinations.stream()).map(OsrmRoutingProvider::coordinates)
+                .collect(Collectors.joining(";"));
+        String sources = indexes(0, origins.size());
+        String targets = indexes(origins.size(), origins.size() + destinations.size());
+        try {
+            HttpResponse<byte[]> received = request("table/v1/driving/" + points + "?sources=" + sources
+                    + "&destinations=" + targets + "&annotations=duration");
+            JsonNode body = json.readTree(received.body());
+            JsonNode durations = body.path("durations");
+            if (received.statusCode() != 200 || !"Ok".equals(body.path("code").asString())
+                    || !durations.isArray() || durations.size() != origins.size()) {
+                return unavailableMatrix();
+            }
+            List<List<OptionalDouble>> result = new ArrayList<>();
+            for (JsonNode row : durations) {
+                if (!row.isArray() || row.size() != destinations.size()) {
+                    return unavailableMatrix();
+                }
+                List<OptionalDouble> values = new ArrayList<>();
+                for (JsonNode value : row) {
+                    values.add(value.isNull() ? OptionalDouble.empty() : OptionalDouble.of(measurementValue(value)));
+                }
+                result.add(values);
+            }
+            DurationMatrix matrix = new DurationMatrix(result);
+            matrixSuccessful.increment();
+            return Optional.of(matrix);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return unavailableMatrix();
+        } catch (ExecutionException | TimeoutException | RuntimeException failure) {
+            return unavailableMatrix();
+        }
+    }
+
+    private HttpResponse<byte[]> request(String path) throws InterruptedException, ExecutionException, TimeoutException {
+        HttpRequest request = HttpRequest.newBuilder(baseUrl.resolve(path)).timeout(timeout).header("Accept", "application/json").GET().build();
+        var response = http.sendAsync(request, HttpResponse.BodyHandlers.limiting(HttpResponse.BodyHandlers.ofByteArray(), MAX_RESPONSE_BYTES));
+        try {
+            return response.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } finally {
+            if (!response.isDone()) {
+                response.cancel(true);
+            }
+        }
+    }
+
+    private Optional<DurationMatrix> unavailableMatrix() {
+        matrixUnavailable.increment();
+        return Optional.empty();
+    }
+
+    private static String indexes(int from, int to) {
+        return IntStream.range(from, to).mapToObj(Integer::toString).collect(Collectors.joining(";"));
     }
 
     private Optional<Route> fallback(GeoPoint from, GeoPoint to, ZonedDateTime departure) {
@@ -91,11 +155,15 @@ class OsrmRoutingProvider implements RoutingProvider {
     }
 
     private static int measurement(JsonNode value) {
+        return (int) Math.round(measurementValue(value));
+    }
+
+    private static double measurementValue(JsonNode value) {
         double number = value.asDouble(Double.NaN);
         if (!value.isNumber() || !Double.isFinite(number) || number < 0 || number > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("OSRM distance and duration must be finite nonnegative integer-range measurements");
         }
-        return (int) Math.round(number);
+        return number;
     }
 
     private static String coordinates(GeoPoint point) {

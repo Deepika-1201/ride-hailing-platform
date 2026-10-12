@@ -267,7 +267,8 @@ public interface GeographyApi {
 }
 public interface RoutingProvider {
     Optional<Route> route(GeoPoint from, GeoPoint to, ZonedDateTime departure);   // empty: no route
-    DurationMatrix matrix(List<GeoPoint> origins, List<GeoPoint> destinations);  // V4, for ETA ranking
+    Optional<DurationMatrix> matrix(String cityId, List<GeoPoint> origins, List<GeoPoint> destinations,
+                    ZonedDateTime departure);                 // V4; empty means unavailable
 }
 public interface RatingApi {
     RatingSummary summary(UUID userId, Party party);
@@ -1746,14 +1747,18 @@ Phase 8 details: the unreachable rule runs before the idle rule, over `ASSIGNED`
 public interface CandidateRanker {
     String name();
     String version();
-    List<RankedCandidate> rank(SearchRequest request, List<Candidate> candidates);
+    Ranking rank(Context context, List<Candidate> candidates);
 }
-record Candidate(UUID driverId, int distanceM, Instant lastSeen, OptionalDouble headingDeg) {}
+  record Context(String cityId, GeoPoint pickup, ZonedDateTime departure) {}
+  record Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen) {}
+  record Ranking(List<Ranked> candidates, String scoreUnit, String fallbackReason, int unreachable, int outsideLimit) {}
 ```
 
 - `NearestDriverRanker` (V1): distance ascending; ties go to the fresher position, then the lower driver ID, so results are deterministic.
 - The ranker is chosen per city and category (`geography.city_categories.ranker`). Each decision records the ranker's name and version.
-- V4 adds `eta` and `weighted` (§19.2).
+- V4's `eta` implementation uses the ten nearest eligible candidates and one directed table call to the pickup. Scores retain fractional seconds; ties use the existing distance, freshness and driver-ID order. Unreachable cells are excluded, with no backfill beyond that attempt's ten-candidate cap. An unavailable, failing or invalid table falls back to the complete nearest-driver order.
+- Decision details add `score_unit` (`SECONDS` or `METRES`), optional `ranking_fallback` (`MATRIX_UNAVAILABLE` or `INVALID_MATRIX`), and counts for `unreachable` and `outside_ranker_limit`. Strategy `eta` is retained even when the result uses distance, so the requested policy and actual scoring are both visible. Index failures have no score unit because ranking did not run.
+- Table lookup remains inside the existing task/ride-share-lock transaction and uses the configured routing timeout (300ms by default); it does not move or weaken conditional driver reservation. The bounded network wait can lengthen that transaction and must be included in later contention measurements. `weighted` and percentage-based strategy experiments remain pending (§19.2).
 
 ## 9. Location and the live index
 
@@ -3092,13 +3097,14 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
 ### 19.2 V4: dispatch, routing and surge
 
 - **Routing:** `OsrmRoutingProvider` calls `/route/v1/driving` (300 ms timeout) and `/table/v1/driving` (300 ms) on the `routing` profile.
-  - The route adapter is implemented as opt-in preparation; the table/matrix call and ETA ranker are subsequent work. `ride.routing.osrm.enabled=false` preserves V1-V3 behavior. Enabling it requires explicit `ride.routing.osrm.cities`; the origin's service-area city selects OSRM, with other cities retaining the mock.
+  - Route and table adapters are opt-in. `ride.routing.osrm.enabled=false` preserves mock routing; enabling it requires explicit `ride.routing.osrm.cities`. The origin's service-area city selects road routes. Matrix requests carry the trusted search-task city explicitly, avoiding a lookup for every driver. Other cities have no road matrix and ETA ranking uses distance fallback.
   - The adapter uses longitude/latitude coordinates, no geometry or steps, a 64KiB response cap and a deadline covering the complete HTTP response. Distance and duration round to the nearest metre and second. Redirects are not followed. An explicit OSRM `NoRoute` remains no route; service errors and malformed responses return the mock answer with stored source `MOCK_FALLBACK` (ADR-013).
   - Successful road results are cached in Valkey by ordered H3 resolution-9 cell pairs and endpoint for 10 min. Each cache read/write has a 20ms default budget **(assumed)**. Invalid entries and cache failures do not block routing; fallback and no-route results are never cached. Without Valkey, the same provider works uncached. The cell-pair approximation is intentional; map changes at the same endpoint require expiry or cache invalidation.
   - Current OSRM durations use its static car profile. Time-of-day factors per zone are still planned **(assumed)** because OSRM has no live traffic; they must be applied outside the raw-route cache when implemented.
   - Provider and cache outcome counters are registered at startup and exposed in Prometheus. Tests cover HTTP contracts and deadlines, per-city selection, cache failures, actual Valkey TTL/expiry, quote fare inputs, stored provenance and no-route refusals.
+  - Table requests cap combined source/destination coordinates at 100, use one `/table` request with directed source and destination indexes, and retain fractional duration seconds. A null cell is unreachable; a missing matrix is unavailable. Wrong dimensions, invalid measurements, service errors and timeouts return unavailable rather than fabricating a matrix. Matrices are uncached and share the complete-response deadline and size cap. `routing_matrix_requests_total{provider,outcome}` records table outcomes.
 - **Rankers:**
-  - `EtaRanker`: the 10 nearest by distance, re-ranked by OSRM table duration; falls back to distance if the table call fails.
+  - `EtaRanker` is implemented and selected with category setting `ranker=eta`: the 10 nearest eligible drivers, re-ranked by OSRM table duration; falls back to distance if the table call fails or OSRM is not enabled for the city. `dispatch_ranking_total{strategy,outcome}` records successful and fallback ranking executions, not committed offer counts. The seeded/default policy remains `nearest`.
   - `WeightedScoreRanker`: `score = w_eta·eta + w_accept·(1 − acceptance_rate) + w_idle·(−idle_minutes) + w_heading·heading_penalty`, with weights per city. `acceptance_rate` comes from `driver_stats`, with a prior for new drivers.
   - A city can split rides between rankers by percentage; decisions record the ranker.
 - **City ownership:** the lease `city-owner:<city>` (§5.5) picks one `dispatch` node per city for the city's singleton work: computed surge and the batch-matching experiment. Sequential search attempts stay leaderless.

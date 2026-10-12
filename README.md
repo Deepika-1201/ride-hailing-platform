@@ -136,7 +136,8 @@ Metrics include `dead_letters_pending`, `dead_letters_redriven_total`, `event_re
 
 The default routing provider remains the deterministic mock. Phase 18 preparation can use self-hosted OSRM for
 explicitly selected origin cities, with road distances and durations flowing into quotes and tracking ETAs.
-This does not enable ETA-ranked dispatch, traffic adjustment or computed surge, and is not a capacity result.
+Traffic adjustment and computed surge are not enabled, and this is not a capacity result. ETA-ranked dispatch is
+available separately through the category's ranker setting; the seeded/default setting stays `nearest`.
 
 ```bash
 ./scripts/setup-maps.sh
@@ -163,6 +164,24 @@ provider outcomes and cache behavior on the management endpoint.
 The settings are `ride.routing.osrm.enabled`, `base-url`, `cities`, `timeout`, `cache-ttl` and `cache-timeout`.
 See [ADR-013](docs/decisions/ADR-013-routing-provider.md) for the decision and limits. Phase 16 measurements
 must keep this opt-in disabled so they retain the declared V2 baseline.
+
+### ETA-ranked dispatch
+
+With OSRM enabled for the city, set `ranker` to `eta` using the existing
+`PUT /v1/admin/cities/{city_id}/categories/{category}` endpoint, including the category's other settings and current
+version. No default or existing category is switched automatically.
+
+An attempt sends one directed OSRM table request for the ten nearest eligible drivers to the pickup. It ranks
+reachable drivers by fractional ETA seconds, with deterministic distance/freshness/ID tie-breaking. Unreachable
+pairs are excluded for that attempt; candidates outside the ten-driver cap are not backfilled. If the table is
+unavailable, malformed or times out, the existing distance order is used. Cities without OSRM also use this
+distance fallback when configured as `eta`.
+
+The decision timeline retains strategy `eta` and reports `score_unit`, optional `ranking_fallback`, and counts of
+unreachable and capped candidates. Matrix requests are uncached and use the same deadline and response cap as
+route requests. Reservation remains conditional, so a driver becoming unavailable during the routing call cannot
+be assigned on stale data. `routing_matrix_requests_total` and `dispatch_ranking_total` expose table and ranker
+outcomes. These checks establish behavior and concurrency safety, not improved pickup-time or capacity targets.
 
 ## Simulator and web app
 

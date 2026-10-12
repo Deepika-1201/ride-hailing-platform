@@ -3,8 +3,12 @@ package com.ridehailing.geography.app;
 import com.ridehailing.geography.GeographyApi;
 import com.ridehailing.geography.RoutingProvider;
 import com.ridehailing.platform.Valkey;
+import com.ridehailing.shared.GeoPoint;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.net.http.HttpClient;
+import java.time.ZonedDateTime;
+import java.util.List;
+import java.util.Optional;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -29,9 +33,18 @@ class OsrmConfiguration {
         OsrmRoutingProvider osrm = new OsrmRoutingProvider(properties.baseUrl(), properties.timeout(), http, json, mock, metrics);
         CachedRoutingProvider cached = new CachedRoutingProvider(osrm, valkey.getIfAvailable(), json, zones, properties.baseUrl(),
                 properties.cacheTtl(), properties.cacheTimeout(), metrics);
-        return (from, to, departure) -> geography.locate(from)
-                .filter(location -> properties.cities().contains(location.cityId()))
-                .map(location -> cached.route(from, to, departure))
-                .orElseGet(() -> mock.route(from, to, departure));
+        return new RoutingProvider() {
+            @Override
+            public Optional<Route> route(GeoPoint from, GeoPoint to, ZonedDateTime departure) {
+                return geography.locate(from).filter(location -> properties.cities().contains(location.cityId()))
+                        .map(location -> cached.route(from, to, departure)).orElseGet(() -> mock.route(from, to, departure));
+            }
+
+            @Override
+            public Optional<DurationMatrix> matrix(String cityId, List<GeoPoint> origins, List<GeoPoint> destinations,
+                    ZonedDateTime departure) {
+                return properties.cities().contains(cityId) ? osrm.matrix(cityId, origins, destinations, departure) : Optional.empty();
+            }
+        };
     }
 }

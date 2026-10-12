@@ -201,15 +201,21 @@ class SearchAttemptTests extends IntegrationTest {
     }
 
     @Test
-    void aRankerThatArrivesInV4FallsBackToTheNearest() {
+    void etaWithoutAnEnabledMatrixProviderRecordsDistanceFallback() {
         jdbc.sql("UPDATE geography.city_categories SET ranker = 'eta' WHERE city_id = :city AND category = 'MINI'")
                 .param("city", city.id()).update();
-        rides.onlineAt(city, "MINI", north(100));
+        TestDriver nearest = rides.onlineAt(city, "MINI", north(100));
+        rides.onlineAt(city, "MINI", north(900));
         RideView ride = rides.book(rider.id(), city, pickup, "MINI");
 
         search();
 
-        assertThat(decision(ride.id()).get("strategy").asString()).isEqualTo("nearest");
+        JsonNode decision = decision(ride.id());
+        assertThat(decision.get("strategy").asString()).isEqualTo("eta");
+        assertThat(decision.get("detail").get("score_unit").asString()).isEqualTo("METRES");
+        assertThat(decision.get("detail").get("ranking_fallback").asString()).isEqualTo("MATRIX_UNAVAILABLE");
+        assertThat(jdbc.sql("SELECT driver_id FROM dispatch.offers WHERE ride_id = :id AND status = 'PENDING'")
+                .param("id", ride.id()).query(UUID.class).single()).isEqualTo(nearest.id());
     }
 
     /** §6.2: pollers skip a task another one holds rather than queue behind it. */

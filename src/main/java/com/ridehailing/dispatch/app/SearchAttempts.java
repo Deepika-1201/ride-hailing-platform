@@ -23,6 +23,7 @@ import com.ridehailing.shared.Ids;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -119,14 +120,19 @@ class SearchAttempts {
             int backoff = task.backoffS() == 0 ? 1 : Math.min(task.backoffS() * 2, MAX_INDEX_BACKOFF_S);
             log.warn("The live index failed for ride {}; searching again in {} s", task.rideId(), backoff, e);
             tasks.backOff(task.rideId(), backoff);
-            decide(task, attempt, ranker, "INDEX_UNAVAILABLE", null, null, List.of(), 0, List.of(), started,
+                decide(task, attempt, ranker, "INDEX_UNAVAILABLE", null, null,
+                    new CandidateRanker.Ranking(List.of(), null, null, 0, 0), 0, List.of(), started,
                     Double.NaN);
             return;
         }
         double indexMs = (System.nanoTime() - indexStarted) / 1e6;
         List<Candidate> eligible = nearby.stream().filter(candidate -> !offeredBefore.contains(candidate.driverId()))
                 .toList();
-        List<CandidateRanker.Ranked> ranked = ranker.rank(eligible);
+        var city = geography.city(task.cityId()).orElseThrow();
+        CandidateRanker.Context context = new CandidateRanker.Context(task.cityId(), task.pickup(),
+            ZonedDateTime.ofInstant(clock.instant(), city.timeZone()));
+        CandidateRanker.Ranking ranking = ranker.rank(context, eligible);
+        List<CandidateRanker.Ranked> ranked = ranking.candidates();
         List<Try> tries = new ArrayList<>();
         for (int position = 0; position < Math.min(ranked.size(), properties.maxReservationTries()); position++) {
             Candidate candidate = ranked.get(position).candidate();
@@ -142,7 +148,7 @@ class SearchAttempts {
                     candidate.distanceM(), settings.offerTtlS());
             timers.schedule(DispatchTimers.OFFER_EXPIRY, offerId, offer.expiresAt(), Map.of());
             tasks.pause(task.rideId());
-            decide(task, attempt, ranker, "OFFERED", candidate.driverId(), offerId, ranked,
+            decide(task, attempt, ranker, "OFFERED", candidate.driverId(), offerId, ranking,
                     nearby.size() - eligible.size(), tries, started, indexMs);
             outbox.append(OfferEndings.event(OfferCreated.TYPE, OfferCreated.VERSION, offer, new OfferCreated(offerId,
                     task.rideId(), candidate.driverId(), attempt, position + 1, candidate.distanceM(), ranker.name(),
@@ -158,26 +164,28 @@ class SearchAttempts {
         boolean lostRaces = !tries.isEmpty();
         tasks.retryLater(task.rideId(), Math.min(task.radiusM() + settings.radiusStepM(), settings.radiusMaxM()),
                 lostRaces ? properties.contentionRetryAfter() : properties.retryAfter());
-        decide(task, attempt, ranker, lostRaces ? "ALL_RESERVATIONS_LOST" : "NO_CANDIDATES", null, null, ranked,
+        decide(task, attempt, ranker, lostRaces ? "ALL_RESERVATIONS_LOST" : "NO_CANDIDATES", null, null, ranking,
                 nearby.size() - eligible.size(), tries, started, indexMs);
     }
 
     private void decide(TaskRow task, int attempt, CandidateRanker ranker, String outcome, UUID chosenDriverId,
-            UUID offerId, List<CandidateRanker.Ranked> ranked, int alreadyOffered, List<Try> tries, long started,
+            UUID offerId, CandidateRanker.Ranking ranking, int alreadyOffered, List<Try> tries, long started,
             double indexMs) {
         Instant now = clock.instant();
-        List<CandidateDetail> candidates = ranked.stream().map(entry -> new CandidateDetail(
+        List<CandidateDetail> candidates = ranking.candidates().stream().map(entry -> new CandidateDetail(
                 entry.candidate().driverId(), entry.candidate().distanceM(),
                 Duration.between(entry.candidate().lastSeen(), now).toSeconds(), entry.score())).toList();
-        String detail = json.writeValueAsString(new Detail(candidates, Map.of("already_offered", alreadyOffered),
-                tries, Double.isNaN(indexMs) ? null : indexMs));
+        String detail = json.writeValueAsString(new Detail(candidates, Map.of("already_offered", alreadyOffered,
+            "unreachable", ranking.unreachable(), "outside_ranker_limit", ranking.outsideLimit()),
+            tries, Double.isNaN(indexMs) ? null : indexMs, ranking.scoreUnit(), ranking.fallbackReason()));
         decisions.insert(Ids.newId(), task.rideId(), attempt, ranker.name(), ranker.version(), task.radiusM(), outcome,
                 chosenDriverId, offerId, detail, (System.nanoTime() - started) / 1_000);
         metrics.attempted(outcome, tries.stream().filter(tried -> tried.result().equals("LOST")).count());
     }
 
     /** The decision record's {@code detail} (§8.3); {@code indexMs} is null when the index failed. */
-    record Detail(List<CandidateDetail> candidates, Map<String, Integer> excluded, List<Try> tries, Double indexMs) {
+        record Detail(List<CandidateDetail> candidates, Map<String, Integer> excluded, List<Try> tries, Double indexMs,
+            String scoreUnit, String rankingFallback) {
     }
 
     record CandidateDetail(UUID driverId, int distanceM, long seenAgoS, double score) {

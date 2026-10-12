@@ -8,7 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-/** The rankers by name; a city may name one that arrives in V4 (eta, weighted), and gets the nearest until then. */
+/** The rankers by name; unimplemented strategies fall back to the nearest-driver policy. */
 @Component
 class Rankers {
 
@@ -25,7 +25,7 @@ class Rankers {
         if (ranker != null) {
             return ranker;
         }
-        log.warn("No ranker named {} before V4; using {}", name, NearestDriverRanker.NAME);
+        log.warn("No ranker named {}; using {}", name, NearestDriverRanker.NAME);
         return byName.get(NearestDriverRanker.NAME);
     }
 }

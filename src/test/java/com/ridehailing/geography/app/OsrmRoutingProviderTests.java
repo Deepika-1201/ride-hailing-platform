@@ -20,7 +20,9 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.ZonedDateTime;
+import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -176,6 +178,51 @@ class OsrmRoutingProviderTests {
     }
 
     @Test
+    void oneTableCallPreservesDirectionFractionalSecondsAndUnreachableCells() {
+        AtomicReference<String> requested = new AtomicReference<>();
+        handler.set(exchange -> {
+            requested.set(exchange.getRequestURI().toString());
+            reply(exchange, 200, "{\"code\":\"Ok\",\"durations\":[[14.25,0],[null,7.5]]}");
+        });
+
+        var matrix = routing().matrix("blr", List.of(FROM, TO), List.of(TO, FROM), DEPARTURE).orElseThrow();
+
+        assertThat(requested.get()).isEqualTo("/routing/table/v1/driving/77.64115,12.97194;77.62448,12.93524;"
+                + "77.62448,12.93524;77.64115,12.97194?sources=0;1&destinations=2;3&annotations=duration");
+        assertThat(matrix.durationsS()).containsExactly(List.of(OptionalDouble.of(14.25), OptionalDouble.of(0)),
+                List.of(OptionalDouble.empty(), OptionalDouble.of(7.5)));
+        assertThat(metrics.get("routing.matrix.requests").tag("outcome", "success").counter().count()).isEqualTo(1);
+        assertThatThrownBy(() -> matrix.durationsS().getFirst().add(OptionalDouble.empty())).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "null", "{}", "{\"code\":\"NoTable\"}", "{\"code\":\"Ok\",\"durations\":[]}",
+        "{\"code\":\"Ok\",\"durations\":[[1,2]]}", "{\"code\":\"Ok\",\"durations\":[[-1]]}",
+        "{\"code\":\"Ok\",\"durations\":[[\"7\"]]}", "{\"code\":\"Ok\",\"durations\":[[2147483648]]}"})
+    void invalidTablesReturnUnavailableRatherThanFabricatingEtas(String body) {
+        handler.set(exchange -> reply(exchange, 200, body));
+
+        assertThat(routing().matrix("blr", List.of(FROM), List.of(TO), DEPARTURE)).isEmpty();
+        assertThat(metrics.get("routing.matrix.requests").tag("outcome", "fallback").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void tableFailuresAreBoundedAndUnavailableTablesDoNotBecomeMockMatrices() {
+        handler.set(exchange -> reply(exchange, 503, "{\"code\":\"Ok\",\"durations\":[[1]]}"));
+        assertThat(routing().matrix("blr", List.of(FROM), List.of(TO), DEPARTURE)).isEmpty();
+        server.stop(0);
+        assertThat(routing().matrix("blr", List.of(FROM), List.of(TO), DEPARTURE)).isEmpty();
+        assertThat(mock.matrix("blr", List.of(FROM), List.of(TO), DEPARTURE)).isEmpty();
+    }
+
+    @Test
+    void tableCoordinateLimitsAreCheckedBeforeSendingARequest() {
+        assertThatThrownBy(() -> routing().matrix("blr", List.of(), List.of(TO), DEPARTURE)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> routing().matrix("blr", java.util.Collections.nCopies(100, FROM), List.of(TO), DEPARTURE))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void defaultStartupKeepsExactlyOneMockProviderWithoutAnHttpClient() {
         context(mock(GeographyApi.class)).run(application -> {
             assertThat(application).hasNotFailed().hasSingleBean(RoutingProvider.class).doesNotHaveBean(HttpClient.class);
@@ -195,9 +242,46 @@ class OsrmRoutingProviderTests {
                     RoutingProvider selected = application.getBean(RoutingProvider.class);
                     assertThat(selected.route(FROM, TO, DEPARTURE)).contains(new Route(6657, 688, Route.Source.OSRM));
                     assertThat(selected.route(TO, FROM, DEPARTURE)).isEqualTo(mock.route(TO, FROM, DEPARTURE));
+                    handler.set(exchange -> reply(exchange, 200, "{\"code\":\"Ok\",\"durations\":[[12.75]]}"));
+                    assertThat(selected.matrix("blr", List.of(FROM), List.of(TO), DEPARTURE)).hasValueSatisfying(matrix ->
+                            assertThat(matrix.durationsS().getFirst().getFirst()).isEqualTo(OptionalDouble.of(12.75)));
+                    assertThat(selected.matrix("other", List.of(FROM), List.of(TO), DEPARTURE)).isEmpty();
                     handler.set(exchange -> reply(exchange, 400, "{\"code\":\"NoRoute\"}"));
                     assertThat(selected.route(FROM, TO, DEPARTURE)).isEmpty();
                 });
+    }
+
+    @Test
+    void aStalledTableBodyCannotHoldDispatchPastItsTimeout() {
+        CountDownLatch release = new CountDownLatch(1);
+        handler.set(exchange -> {
+            exchange.sendResponseHeaders(200, 100);
+            exchange.getResponseBody().write('{');
+            exchange.getResponseBody().flush();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        long started = System.nanoTime();
+        try {
+            assertThat(routing().matrix("blr", List.of(FROM), List.of(TO), DEPARTURE)).isEmpty();
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(2));
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void matrixValuesCannotContainNegativeNonfiniteOrRaggedRows() {
+        for (double invalid : new double[] {-1, Double.NaN, Double.POSITIVE_INFINITY}) {
+            assertThatThrownBy(() -> new RoutingProvider.DurationMatrix(List.of(List.of(OptionalDouble.of(invalid)))))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThatThrownBy(() -> new RoutingProvider.DurationMatrix(List.of())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RoutingProvider.DurationMatrix(List.of(List.of(OptionalDouble.of(1)), List.of())))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @ParameterizedTest

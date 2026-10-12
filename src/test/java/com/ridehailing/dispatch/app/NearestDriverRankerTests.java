@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.ridehailing.location.LiveIndex.Candidate;
 import com.ridehailing.shared.GeoPoint;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,7 @@ class NearestDriverRankerTests {
 
     private static final GeoPoint SOMEWHERE = new GeoPoint(12.97, 77.59);
     private static final Instant NOW = Instant.parse("2026-10-03T10:00:00Z");
+    private static final CandidateRanker.Context CONTEXT = new CandidateRanker.Context("blr", SOMEWHERE, NOW.atZone(ZoneOffset.UTC));
 
     private final NearestDriverRanker ranker = new NearestDriverRanker();
 
@@ -44,12 +46,12 @@ class NearestDriverRankerTests {
     void theScoreIsTheDistance() {
         Candidate candidate = candidate("00000000-0000-0000-0000-000000000001", 450, NOW);
 
-        assertThat(ranker.rank(List.of(candidate))).singleElement()
+        assertThat(ranker.rank(CONTEXT, List.of(candidate)).candidates()).singleElement()
                 .satisfies(ranked -> assertThat(ranked.score()).isEqualTo(450.0));
     }
 
     private List<Candidate> order(Candidate... candidates) {
-        return ranker.rank(List.of(candidates)).stream().map(CandidateRanker.Ranked::candidate).toList();
+        return ranker.rank(CONTEXT, List.of(candidates)).candidates().stream().map(CandidateRanker.Ranked::candidate).toList();
     }
 
     private static Candidate candidate(String driverId, int distanceM, Instant lastSeen) {
