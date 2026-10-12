@@ -28,6 +28,7 @@ class KafkaTopology {
         Map<String, NewTopic> planned = new TreeMap<>();
         Map<String, String> mirrored = new TreeMap<>();
         KafkaTopics.eventTopics().forEach(topic -> planned.put(topic, topic(topic, properties.partitions(), 7)));
+        planned.put(KafkaEventStream.LOCATION_TOPIC, topic(KafkaEventStream.LOCATION_TOPIC, properties.partitions(), 1));
         for (EventConsumer consumer : consumers) {
             if (consumer.name() == null || !consumer.name().matches("[A-Za-z0-9._-]+") || consumer.eventTypes().isEmpty()) {
                 throw new IllegalArgumentException("Kafka consumer needs a valid name and at least one event type");
@@ -88,8 +89,11 @@ class KafkaTopology {
                     String actualValue = configuration.get(setting.getKey()).value();
                     if (setting.getKey().equals(TopicConfig.RETENTION_MS_CONFIG)) {
                         long retention = Long.parseLong(actualValue);
-                        if (retention != -1 && retention < Long.parseLong(setting.getValue())) {
-                            throw new IllegalStateException("Kafka topic retention is too short: " + expected.name());
+                        long required = Long.parseLong(setting.getValue());
+                        boolean incompatible = expected.name().equals(KafkaEventStream.LOCATION_TOPIC)
+                                ? retention != required : retention != -1 && retention < required;
+                        if (incompatible) {
+                            throw new IllegalStateException("Kafka topic retention is incompatible: " + expected.name());
                         }
                     } else if (!setting.getValue().equals(actualValue)) {
                         throw new IllegalStateException("Kafka topic " + expected.name() + " has incompatible " + setting.getKey());

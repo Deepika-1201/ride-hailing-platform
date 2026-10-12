@@ -7,7 +7,9 @@ import com.ridehailing.location.LiveIndex.UpdateResult;
 import com.ridehailing.location.LocationIngestion;
 import com.ridehailing.location.trips.TripPoint;
 import com.ridehailing.location.trips.TripPointBuffer;
+import com.ridehailing.platform.EventStream;
 import com.ridehailing.shared.BoundingBox;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Instant;
@@ -19,6 +21,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 /**
@@ -34,15 +37,20 @@ class Ingestion implements LocationIngestion {
     private final TripPointBuffer tripPoints;
     private final Clock clock;
     private final MeterRegistry meters;
+    private final ObjectProvider<EventStream> streams;
+    private final Counter streamFailures;
     /** City bounds don't change once the city exists. */
     private final Map<String, BoundingBox> bounds = new ConcurrentHashMap<>();
 
-    Ingestion(LiveIndex index, GeographyApi geography, TripPointBuffer tripPoints, Clock clock, MeterRegistry meters) {
+        Ingestion(LiveIndex index, GeographyApi geography, TripPointBuffer tripPoints, Clock clock, MeterRegistry meters,
+            ObjectProvider<EventStream> streams) {
         this.index = index;
         this.geography = geography;
         this.tripPoints = tripPoints;
         this.clock = clock;
         this.meters = meters;
+        this.streams = streams;
+        streamFailures = meters.counter("location.stream.failures");
     }
 
     @Override
@@ -87,10 +95,12 @@ class Ingestion implements LocationIngestion {
             count("invalid");
             return Optional.empty();
         }
+        String appliedCategory = category;
         UpdateResult result = index.update(cityId, driverId, category, update);
         if (result.outcome() == UpdateResult.Outcome.CATEGORY_MISMATCH) {
             // The vehicle's category is the mirror's; the caller's copy was read before a change.
-            result = index.update(cityId, driverId, result.category(), update);
+            appliedCategory = result.category();
+            result = index.update(cityId, driverId, appliedCategory, update);
         }
         if (result.outcome() == UpdateResult.Outcome.APPLIED) {
             if (result.flags() == UpdateResult.POOR_ACCURACY) {
@@ -101,7 +111,24 @@ class Ingestion implements LocationIngestion {
         }
         count(result.outcome().name().toLowerCase(Locale.ROOT));
         buffer(driverId, incoming, result, receivedAt, replayedRide);
+        if (result.outcome() == UpdateResult.Outcome.APPLIED) {
+            stream(cityId, appliedCategory, driverId, incoming, result, receivedAt);
+        }
         return Optional.of(result);
+    }
+
+    private void stream(String cityId, String category, UUID driverId, Incoming incoming, UpdateResult result, Instant receivedAt) {
+        try {
+            EventStream stream = streams.getIfAvailable();
+            if (stream != null) {
+                LocationUpdate update = incoming.update();
+                stream.offer("location.updates", driverId, new StreamUpdate(1, cityId, category, driverId, update.seq(), receivedAt,
+                        update.deviceTime(), update.position().lat(), update.position().lon(), update.accuracyM(), update.headingDeg(),
+                        update.speedMps(), result.status(), result.rideId(), result.flags(), incoming.replay()));
+            }
+        } catch (RuntimeException failed) {
+            streamFailures.increment();
+        }
     }
 
     /**
@@ -136,5 +163,10 @@ class Ingestion implements LocationIngestion {
 
     private void count(String result) {
         meters.counter("location.updates", "result", result).increment();
+    }
+
+    private record StreamUpdate(int schemaVersion, String cityId, String category, UUID driverId, long seq, Instant receivedAt,
+            Instant deviceTime, double lat, double lon, double accuracyM, Double headingDeg, Double speedMps,
+            LiveIndex.Status status, UUID rideId, int flags, boolean replay) {
     }
 }

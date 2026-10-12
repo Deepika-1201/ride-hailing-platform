@@ -4,7 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
+import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SchemaRegistryConfig;
+import com.networknt.schema.SpecificationVersion;
 import com.ridehailing.RideHailingApplication;
+import com.ridehailing.location.LiveIndex;
+import com.ridehailing.location.LocationIngestion;
 import com.ridehailing.platform.DomainEvent;
 import com.ridehailing.platform.EventConsumer;
 import com.ridehailing.platform.EventRecovery;
@@ -14,6 +20,15 @@ import com.ridehailing.support.Effects;
 import com.ridehailing.support.Kafkas;
 import com.ridehailing.support.Postgis;
 import com.ridehailing.support.ScriptedConsumer;
+import com.ridehailing.support.TestCities;
+import com.ridehailing.support.TestCities.TestCity;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -21,13 +36,22 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -36,12 +60,18 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.kafka.KafkaContainer;
+import tools.jackson.databind.json.JsonMapper;
 
 class KafkaRuntimeTests {
 
     private static final String OBSERVER = "test.kafka-runtime";
     private static final UUID DRIVER = UUID.fromString("0199a3f0-0000-7000-8000-000000000052");
     private static final UUID VEHICLE = UUID.fromString("0199a3f0-0000-7000-8000-000000000053");
+        private static final String LOCATION_TOPIC = KafkaEventStream.LOCATION_TOPIC;
+        private static final JsonMapper JSON = JsonMapper.builder().build();
+        private static final Schema LOCATION_SCHEMA = SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12,
+            builder -> builder.schemaRegistryConfig(SchemaRegistryConfig.builder().formatAssertionsEnabled(true).build()))
+            .getSchema(JSON.readTree(Path.of("docs/schemas/location/update.v1.json").toFile()));
 
     @Test
     void theApplicationPublishesAndConsumesThroughKafkaAndRestartsItsWorkers() throws Exception {
@@ -139,6 +169,20 @@ class KafkaRuntimeTests {
                 var mirrored = admin.listConsumerGroupOffsets(KafkaDeadLetterConsumer.GROUP).partitionsToOffsetAndMetadata()
                     .get(5, TimeUnit.SECONDS);
                 assertThat(mirrored.values().stream().filter(Objects::nonNull).mapToLong(offset -> offset.offset()).sum()).isEqualTo(1);
+                ConfigResource locations = new ConfigResource(ConfigResource.Type.TOPIC, LOCATION_TOPIC);
+                for (String retention : List.of("1", "172800000", "-1")) {
+                    admin.incrementalAlterConfigs(Map.of(locations, List.of(new AlterConfigOp(
+                        new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, retention), AlterConfigOp.OpType.SET))))
+                        .all().get(5, TimeUnit.SECONDS);
+                    assertThatThrownBy(existing::prepare).isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("retention").hasMessageContaining(LOCATION_TOPIC);
+                    assertThat(admin.describeConfigs(List.of(locations)).all().get(5, TimeUnit.SECONDS).get(locations)
+                        .get(TopicConfig.RETENTION_MS_CONFIG).value()).isEqualTo(retention);
+                }
+                admin.incrementalAlterConfigs(Map.of(locations, List.of(new AlterConfigOp(
+                    new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, "86400000"), AlterConfigOp.OpType.SET))))
+                    .all().get(5, TimeUnit.SECONDS);
+                existing.prepare();
                 ConfigResource rides = new ConfigResource(ConfigResource.Type.TOPIC, "rides.events");
                 admin.incrementalAlterConfigs(Map.of(rides, List.of(new AlterConfigOp(
                         new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, "1"), AlterConfigOp.OpType.SET))))
@@ -148,6 +192,114 @@ class KafkaRuntimeTests {
                         .get(TopicConfig.RETENTION_MS_CONFIG).value()).isEqualTo("1");
             }
         }
+    }
+
+    @Test
+    void aRealBrokerOutageDoesNotBlockLocationsAndTheStreamResumesAfterRecoveryAndRestart() throws Exception {
+        try (KafkaContainer broker = Kafkas.newBroker()) {
+            broker.start();
+            KafkaProperties properties = new KafkaProperties(true, List.of(broker.getBootstrapServers()), Duration.ofSeconds(5),
+                    true, 1, 1, (short) 1, 1);
+            new KafkaTopology(properties, List.of()).prepare();
+            try (KafkaConsumer<String, byte[]> reader = new KafkaConsumer<>(Map.of(
+                    ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBootstrapServers(),
+                    ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false,
+                    ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest",
+                    ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 5_000), new StringDeserializer(), new ByteArrayDeserializer());
+                    ConfigurableApplicationContext application = new SpringApplicationBuilder(RideHailingApplication.class, TestCities.class)
+                            .profiles("test")
+                            .run("--server.address=127.0.0.1", "--server.port=0", "--management.server.address=127.0.0.1",
+                                    "--management.server.port=0", "--spring.datasource.url=" + Postgis.database("kafka_locations"),
+                                    "--spring.datasource.username=" + Postgis.shared().getUsername(),
+                                    "--spring.datasource.password=" + Postgis.shared().getPassword(), "--ride.roles=api,realtime",
+                                    "--ride.location.single-process-check=false", "--ride.workers.autostart=false",
+                                    "--ride.kafka.enabled=true", "--ride.kafka.brokers=" + broker.getBootstrapServers(),
+                                    "--ride.kafka.stream.queue-capacity=2", "--ride.kafka.stream.buffer-bytes=32768",
+                                    "--ride.kafka.stream.send-timeout=500ms")) {
+                reader.assign(List.of(new TopicPartition(LOCATION_TOPIC, 0)));
+                reader.seekToBeginning(reader.assignment());
+                TestCity city = application.getBean(TestCities.class).create("MINI");
+                LiveIndex index = application.getBean(LiveIndex.class);
+                index.mirror(city.id(), DRIVER, new LiveIndex.MirrorState(LiveIndex.Status.AVAILABLE, 1, "MINI", null));
+                LocationIngestion ingestion = application.getBean(LocationIngestion.class);
+                MeterRegistry metrics = application.getBean(MeterRegistry.class);
+                KafkaEventStream stream = application.getBean(KafkaEventStream.class);
+                AtomicLong sequence = new AtomicLong();
+                assertThat(stream.isRunning()).isTrue();
+                assertThat(application.getBeansOfType(KafkaRuntime.class)).isEmpty();
+                assertLocationRecord(awaitPosition(reader, ingestion, city, sequence, 0), city);
+                double failuresBefore = streamCount(metrics, "failed");
+
+                broker.getDockerClient().pauseContainerCmd(broker.getContainerId()).exec();
+                try (var callers = Executors.newVirtualThreadPerTaskExecutor()) {
+                    callers.submit(() -> {
+                        for (int update = 0; update < 200; update++) {
+                            applyPosition(ingestion, city, sequence.incrementAndGet());
+                        }
+                    }).get(1, TimeUnit.SECONDS);
+                    assertThat(index.position(city.id(), DRIVER)).hasValueSatisfying(position -> assertThat(position.seq()).isEqualTo(sequence.get()));
+                    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(streamCount(metrics, "failed")).isGreaterThan(failuresBefore));
+                    assertThat(streamCount(metrics, "queue_full")).isGreaterThan(0);
+                } finally {
+                    broker.getDockerClient().unpauseContainerCmd(broker.getContainerId()).exec();
+                }
+
+                long afterOutage = sequence.get();
+                assertLocationRecord(awaitPosition(reader, ingestion, city, sequence, afterOutage), city);
+                try (HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()) {
+                    String port = application.getEnvironment().getRequiredProperty("local.management.port");
+                    var response = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/actuator/prometheus"))
+                        .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
+                    assertThat(response.statusCode()).isEqualTo(200);
+                    assertThat(response.body()).contains("event_stream_records_total", "event_stream_queue_size",
+                        "location_stream_failures_total", "outcome=\"queue_full\"", "outcome=\"failed\"");
+                }
+                application.stop();
+                assertThat(stream.isRunning()).isFalse();
+                assertThat(stream.offer(LOCATION_TOPIC, DRIVER, Map.of())).isFalse();
+                application.start();
+                assertThat(stream.isRunning()).isTrue();
+                assertLocationRecord(awaitPosition(reader, ingestion, city, sequence, sequence.get()), city);
+            }
+        }
+    }
+
+    private static ConsumerRecord<String, byte[]> awaitPosition(KafkaConsumer<String, byte[]> reader,
+            LocationIngestion ingestion, TestCity city, AtomicLong sequence, long after) {
+        AtomicReference<ConsumerRecord<String, byte[]>> found = new AtomicReference<>();
+        await().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(100)).until(() -> {
+            applyPosition(ingestion, city, sequence.incrementAndGet());
+            for (ConsumerRecord<String, byte[]> record : reader.poll(Duration.ofMillis(100))) {
+                if (JSON.readTree(record.value()).get("seq").asLong() > after) {
+                    found.set(record);
+                    return true;
+                }
+            }
+            return false;
+        });
+        return found.get();
+    }
+
+    private static void applyPosition(LocationIngestion ingestion, TestCity city, long sequence) {
+        assertThat(ingestion.live(city.id(), "MINI", DRIVER, new LiveIndex.LocationUpdate(sequence, city.at(0.1, 0.1),
+                5, 90.0, 7.5, Instant.now()))).hasValueSatisfying(result ->
+                        assertThat(result.outcome()).isEqualTo(LiveIndex.UpdateResult.Outcome.APPLIED));
+    }
+
+    private static void assertLocationRecord(ConsumerRecord<String, byte[]> record, TestCity city) {
+        assertThat(record.topic()).isEqualTo(LOCATION_TOPIC);
+        assertThat(record.key()).isEqualTo(DRIVER.toString());
+        assertThat(new String(record.headers().lastHeader("schema_version").value(), StandardCharsets.UTF_8)).isEqualTo("1");
+        var value = JSON.readTree(record.value());
+        assertThat(LOCATION_SCHEMA.validate(value)).isEmpty();
+        assertThat(value.get("driver_id").asString()).isEqualTo(record.key());
+        assertThat(value.get("city_id").asString()).isEqualTo(city.id());
+        assertThat(value.get("lat").asDouble()).isEqualTo(city.at(0.1, 0.1).lat());
+        assertThat(value.get("lon").asDouble()).isEqualTo(city.at(0.1, 0.1).lon());
+    }
+
+    private static double streamCount(MeterRegistry metrics, String outcome) {
+        return metrics.get("event_stream.records").tag("outcome", outcome).counter().count();
     }
 
     private static Admin admin(KafkaContainer broker) {

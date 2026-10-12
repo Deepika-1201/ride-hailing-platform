@@ -53,7 +53,7 @@
 
 | # | Version | Scope | Done when (requirements §8) |
 |---|---|---|---|
-| 17 | V3 Event-driven | Spike S-4; Kafka topics, relay to Kafka, consumer groups, dead letters, replay, location stream (§19.1) | Tests with duplicated, delayed and reordered messages and a broker outage pass. **In progress:** opt-in domain-event delivery, inbox-backed consumers, durable dead-letter mirroring, staff redrive and restartable snapshot replay are implemented. The location stream, sustained S-4 measurements and remaining phase exit gates are not yet complete. |
+| 17 | V3 Event-driven | Spike S-4; Kafka topics, relay to Kafka, consumer groups, dead letters, replay, location stream (§19.1) | Tests with duplicated, delayed and reordered messages and a broker outage pass. **In progress:** opt-in domain-event delivery, inbox-backed consumers, durable dead-letter mirroring, staff redrive, restartable snapshot replay and bounded best-effort location publication are implemented. Stream tests cover a real broker pause while the live index keeps advancing, recovery, restart, schema compatibility and retention safeguards. Sustained S-4 measurements and remaining phase exit gates are not yet complete. |
 | 18 | V4 Dispatch | OSRM provider and route cache; ETA and weighted rankers; city ownership; computed surge; batch-matching experiment (§19.2) | NFR-4 met in simulator runs; contention tests show zero double assignments; batch matching adopted or rejected with numbers |
 | 19 | V5 Extraction | Only with a measured reason; LLD section written first | The same test suites pass across process boundaries |
 | 20 | V6 Scale | Second city, partitioning, read replica, cloud-tier load and hotspot tests | Cloud-tier targets met |

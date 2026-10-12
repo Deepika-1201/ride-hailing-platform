@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ride-hailing.example/schemas/location/update.v1.json",
+  "title": "Applied location update, version 1",
+  "description": "Best-effort internal location.updates record, keyed by driver_id. Flags describe the original fix; a flagged fix need not move the usable live position. Consumers tolerate gaps and discard duplicate or obsolete driver sequences.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "city_id", "category", "driver_id", "seq", "received_at", "device_time", "lat", "lon", "accuracy_m", "status", "flags", "replay"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "city_id": {"type": "string", "minLength": 1, "maxLength": 32},
+    "category": {"type": "string", "minLength": 1, "maxLength": 32},
+    "driver_id": {"type": "string", "format": "uuid"},
+    "seq": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "received_at": {"type": "string", "format": "date-time"},
+    "device_time": {"type": "string", "format": "date-time"},
+    "lat": {"type": "number", "minimum": -90, "maximum": 90},
+    "lon": {"type": "number", "minimum": -180, "maximum": 180},
+    "accuracy_m": {"type": "number", "minimum": 0},
+    "heading_deg": {"type": "number", "minimum": 0, "exclusiveMaximum": 360},
+    "speed_mps": {"type": "number", "minimum": 0},
+    "status": {"enum": ["AVAILABLE", "OFFERED", "ASSIGNED", "ON_TRIP"]},
+    "ride_id": {"type": "string", "format": "uuid"},
+    "flags": {"enum": [0, 1, 2], "description": "0 usable; 1 poor accuracy; 2 implausible movement."},
+    "replay": {"type": "boolean"}
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "city_id": "blr",
+      "category": "MINI",
+      "driver_id": "0199a3f0-0000-7000-8000-000000000072",
+      "seq": 1842,
+      "received_at": "2026-10-12T09:00:00.125Z",
+      "device_time": "2026-10-12T09:00:00.000Z",
+      "lat": 12.97571,
+      "lon": 77.60502,
+      "accuracy_m": 8.5,
+      "heading_deg": 91,
+      "speed_mps": 7.2,
+      "status": "ON_TRIP",
+      "ride_id": "0199a3f0-0000-7000-8000-000000000073",
+      "flags": 0,
+      "replay": false
+    }
+  ]
+}

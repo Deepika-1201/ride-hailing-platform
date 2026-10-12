@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ride-hailing.example/schemas/events/envelope.v1.json",
   "title": "Event envelope, version 1",
-  "description": "Every event in the outbox and on Kafka (ADR-008). The payload is validated by <event_type>.v<event_version>.json.",
+  "description": "Every domain event in the outbox and on Kafka (ADR-008). The payload is validated by <event_type>.v<event_version>.json. Best-effort location updates use the separate location/update.v1.json schema.",
   "type": "object",
   "required": ["event_id", "event_type", "event_version", "aggregate_type", "aggregate_id", "aggregate_version",
                "occurred_at", "producer", "correlation_id", "payload"],

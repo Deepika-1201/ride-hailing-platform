@@ -14,9 +14,9 @@
 |---|---|---|---|---|
 | Live position | The latest position of each online driver | Valkey | Until replaced (4 s) | Newest sequence wins; rebuildable |
 | Trip route | Every update from assignment to drop-off | PostgreSQL, daily partitions | 90 days | Batched every 2 s; gaps tolerated |
-| Location stream (V3) | Every accepted update | Kafka `location.updates` | 24 h | At least once; for analytics and counters |
+| Location stream (V3) | Applied updates, including quality flags | Kafka `location.updates` | 24 h | Best effort; gaps and duplicates are possible; consumers use the driver sequence |
 
-Idle drivers leave no history: only their latest position exists (Q17).
+Idle drivers leave no long-lived trip history (Q17). In V3 their applied updates also enter the internal, 24-hour operational stream; downstream analytics retain zone counts, not driver routes.
 
 ## 2. Ingestion
 
@@ -35,7 +35,7 @@ The driver's `realtime` node handles it in this order:
 4. **Quality:** accuracy and speed checks (§5) decide whether the position may be used for matching.
 5. **Live index:** one Valkey script call ([§6](#6-live-index-and-status-mirror)). It drops updates that aren't newer and returns the driver's status and active ride from the status mirror.
 6. **Tracking:** if the driver has an active ride, the node publishes the position on `ride:{rideId}` (§7) and buffers a trip point (§8).
-7. **Stream (V3):** the node produces the update to `location.updates`, keyed by driver ID, asynchronously, with leader acknowledgement only, since losses are tolerated.
+7. **Stream (V3):** after an applied update, the node offers the update to `location.updates`, keyed by driver ID, asynchronously, with leader acknowledgement only, since losses are tolerated. Stale, offline and rejected updates are not published. The stream carries the original fix and quality flags, not a claim that a flagged fix moved the usable position. An applied REST replay is marked as such; stale replays still reach trip storage but do not enter the stream. Publication failure never rejects an already-applied update or prevents trip-point buffering.
 
 S-1 measured step 5 at 0.6 ms p50 at the cloud tier, so the whole path stays far inside NFR-5's 1 s.
 

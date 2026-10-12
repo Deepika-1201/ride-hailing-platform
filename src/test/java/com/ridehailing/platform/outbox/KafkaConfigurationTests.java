@@ -10,8 +10,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ridehailing.platform.EventConsumer;
+import com.ridehailing.platform.EventStream;
 import com.ridehailing.platform.leases.LeaseProperties;
 import com.ridehailing.platform.workers.WorkerProperties;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.List;
@@ -38,6 +41,7 @@ class KafkaConfigurationTests {
             .withBean(JsonMapper.class, () -> JsonMapper.builder().build())
             .withBean(ConsumerDelivery.class, () -> mock(ConsumerDelivery.class))
             .withBean(JdbcClient.class, () -> mock(JdbcClient.class))
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withPropertyValues("ride.workers.autostart=false");
 
     @Test
@@ -74,6 +78,26 @@ class KafkaConfigurationTests {
     }
 
     @Test
+    void streamDefaultsAreBoundedWithoutRequiringKafkaToBeEnabled() {
+        context.run(application -> {
+            KafkaStreamProperties stream = application.getBean(KafkaStreamProperties.class);
+            assertThat(stream.queueCapacity()).isEqualTo(1_024);
+            assertThat(stream.maxRecordBytes()).isEqualTo(2_048);
+            assertThat(stream.bufferBytes()).isEqualTo(1_048_576);
+            assertThat(stream.sendTimeout()).isEqualTo(Duration.ofSeconds(2));
+            assertThat(stream.shutdownTimeout()).isEqualTo(Duration.ofSeconds(1));
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"queue-capacity=0", "queue-capacity=100001", "max-record-bytes=0", "max-record-bytes=1048577",
+        "buffer-bytes=1024", "buffer-bytes=2147483648", "send-timeout=20ms", "send-timeout=30d", "shutdown-timeout=0ms",
+        "shutdown-timeout=11s"})
+    void invalidStreamBoundsFailDuringBinding(String property) {
+        context.withPropertyValues("ride.kafka.stream." + property).run(application -> assertThat(application).hasFailed());
+    }
+
+    @Test
     void theTopologyIncludesEveryEventTopicAndOneDeadLetterTopicPerGroupAndSource() {
         EventConsumer consumer = mock(EventConsumer.class);
         when(consumer.name()).thenReturn("notification.test");
@@ -87,15 +111,16 @@ class KafkaConfigurationTests {
         assertThat(topology.deadLetterTopics()).containsExactlyInAnyOrderEntriesOf(Map.of(
             "drivers.events.dlq.notification.test", "notification.test", "payments.events.dlq.notification.test", "notification.test"));
         assertThat(topics).extracting(NewTopic::name).containsExactly("dispatch.events", "drivers.events",
-                "drivers.events.dlq.notification.test", "payments.events", "payments.events.dlq.notification.test", "rides.events");
+                "drivers.events.dlq.notification.test", "location.updates", "payments.events", "payments.events.dlq.notification.test", "rides.events");
         assertThat(topics).allSatisfy(topic -> {
             boolean deadLetter = topic.name().contains(".dlq.");
+            int retentionDays = topic.name().equals("location.updates") ? 1 : deadLetter ? 14 : 7;
             assertThat(topic.numPartitions()).isEqualTo(deadLetter ? 1 : 3);
             assertThat(topic.replicationFactor()).isEqualTo((short) 3);
             assertThat(topic.configs()).containsEntry(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2")
                     .containsEntry(TopicConfig.CLEANUP_POLICY_CONFIG, "delete")
                     .containsEntry(TopicConfig.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG, "false")
-                    .containsEntry(TopicConfig.RETENTION_MS_CONFIG, Long.toString(Duration.ofDays(deadLetter ? 14 : 7).toMillis()));
+                    .containsEntry(TopicConfig.RETENTION_MS_CONFIG, Long.toString(Duration.ofDays(retentionDays).toMillis()));
         });
     }
 
@@ -150,6 +175,7 @@ class KafkaConfigurationTests {
         wiring.run(application -> {
             assertThat(application).hasNotFailed().hasSingleBean(OutboxTransport.class)
                     .hasSingleBean(InProcessOutboxTransport.class).doesNotHaveBean(KafkaOutboxTransport.class)
+                    .doesNotHaveBean(EventStream.class)
                     .doesNotHaveBean(KafkaTopology.class).doesNotHaveBean(KafkaRuntime.class);
         });
     }
@@ -171,8 +197,13 @@ class KafkaConfigurationTests {
     void anApiOnlyProcessHasNoKafkaConsumerRuntimeEvenWithWorkerAutostartEnabled() {
         wiring.withPropertyValues("ride.kafka.enabled=true", "ride.kafka.brokers=127.0.0.1:1", "ride.roles=api",
                         "ride.workers.autostart=true")
-                .run(application -> assertThat(application).hasNotFailed().hasSingleBean(KafkaOutboxTransport.class)
-                        .doesNotHaveBean(KafkaTopology.class).doesNotHaveBean(KafkaRuntime.class));
+                .run(application -> {
+                    assertThat(application).hasNotFailed().hasSingleBean(KafkaOutboxTransport.class).hasSingleBean(EventStream.class)
+                        .doesNotHaveBean(KafkaTopology.class).doesNotHaveBean(KafkaRuntime.class);
+                    assertThat(application.getBean(KafkaEventStream.class).isRunning()).isTrue();
+                    assertThat(application.getBean(MeterRegistry.class).get("event_stream.records").tag("outcome", "queued")
+                        .counter().count()).isZero();
+                });
     }
 
     @Test
@@ -186,7 +217,7 @@ class KafkaConfigurationTests {
     }
 
     @Configuration(proxyBeanMethods = false)
-    @EnableConfigurationProperties({KafkaProperties.class, LeaseProperties.class, WorkerProperties.class})
+    @EnableConfigurationProperties({KafkaProperties.class, KafkaStreamProperties.class, LeaseProperties.class, WorkerProperties.class})
     static class Properties {
     }
 }

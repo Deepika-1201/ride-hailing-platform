@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery and recovery are in development. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-025.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming are in development. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-026.
 
 ## Quick start
 
@@ -59,7 +59,7 @@ docker compose up --build  # or PostgreSQL + PostGIS (host port 5434), Valkey (6
 
 Domain-event publication, inbox-backed consumers and durable dead-letter mirroring can run through Kafka.
 Staff can redrive failures and request durable event replays. This is opt-in development work; phase 17 is not
-complete. The location stream, sustained S-4 throughput measurements and remaining phase gates are still pending.
+complete. The best-effort location stream is implemented; sustained S-4 throughput measurements and remaining phase gates are still pending.
 Normal startup and the V2 capacity baseline retain in-process delivery.
 
 Stop all workers before changing transport mode, and configure every worker consistently. To run the local
@@ -76,7 +76,7 @@ The broker has its own named volume and is available to containers at `kafka:909
 with its existing database settings. The application waits for the local broker's health check when that profile
 is active; API-only processes do not start Kafka consumers.
 
-Topic management creates missing event and per-consumer dead-letter topics, then validates the existing topology.
+Topic management creates missing event, location and per-consumer dead-letter topics, then validates the existing topology.
 It does not silently alter partitions, replication or retention. Outside this local setup, provision the declared
 topics first and leave `RIDE_KAFKA_MANAGE_TOPICS=false`. Local defaults are three event partitions, one dead-letter
 partition, replication factor one and minimum ISR one; they are not a durability or capacity certification.
@@ -85,6 +85,28 @@ Rows already marked published by in-process delivery are not automatically backf
 leaves new outbox rows pending; it never switches delivery back to in-process. Keep the transport setting consistent
 when recreating application containers. The separate S-4 spike infrastructure remains throwaway and should not
 carry application traffic.
+
+### Location stream
+
+Kafka mode publishes applied live and REST positions to `location.updates`, keyed by driver ID, using the
+[versioned location schema](docs/schemas/location/update.v1.json). Stale, offline and rejected updates are not
+published. Quality flags describe the original fix; a flagged fix need not move the usable live position.
+Applied offline replays carry `replay: true`; stale replays still reach local trip storage independently.
+
+Publication uses a bounded background queue, `acks=1`, 20ms linger and no durable retries. A broker outage,
+serialization error or full queue may drop stream records without blocking live ingestion or trip buffering.
+Consumers must tolerate gaps and use driver sequences to discard duplicate or obsolete records. This does not
+replace domain-event outbox delivery or certify a capacity target.
+
+Defaults under `ride.kafka.stream` are `queue-capacity=1024`, `max-record-bytes=2048`, `buffer-bytes=1048576`,
+`send-timeout=2s` and `shutdown-timeout=1s`. The producer is lazy; API/realtime processes do not need a successful
+broker connection to start accepting locations. Provision topics before starting these roles alone. Worker
+preflight requires exactly 24-hour configured retention for `location.updates`, rejecting longer or unlimited
+retention without silently changing it. Kafka segment deletion scheduling still applies.
+
+`event_stream_records_total{topic,outcome}` counts queued, published, failed, queue-full, oversized and shutdown
+outcomes; `event_stream_queue_size` exposes pending work and `location_stream_failures_total` counts unexpected
+publication-hook failures. All counters are registered at zero. See [ADR-026](docs/decisions/ADR-026-best-effort-location-stream.md).
 
 ### Event recovery
 
@@ -177,7 +199,7 @@ the web app includes the required sprite and IBM Plex font notices in its static
 | [Dispatch design](docs/dispatch-design.md) | Driver availability, search tasks, offers, ranking strategies, race scenarios, batch matching |
 | [Location system](docs/location-system.md) | Ingestion, ordering, freshness, live index and status mirror, tracking, trip routes, privacy |
 | [Low-level design](docs/low-level-design.md) | Code layout, module APIs, database schema, lock order, transaction steps, Valkey scripts, payments, security, realtime protocol, tests |
-| [OpenAPI](docs/openapi.yaml) and [schemas](docs/schemas/) | The REST contract; JSON Schemas for every event and WebSocket message |
+| [OpenAPI](docs/openapi.yaml) and [schemas](docs/schemas/) | The REST contract; JSON Schemas for domain events, location stream records and WebSocket messages |
 | [Implementation plan](docs/implementation-plan.md) | Phases from V1 to V8, tests per phase, exit criteria |
 | [Architecture review](docs/architecture-review.md) | Findings before implementation, single points of failure, bottlenecks, threats |
 | [Decision records](docs/decisions/README.md) | One ADR per significant architecture decision |

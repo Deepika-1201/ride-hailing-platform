@@ -4,6 +4,7 @@ import com.ridehailing.platform.ConditionalOnRole;
 import com.ridehailing.platform.Role;
 import com.ridehailing.platform.leases.LeaseProperties;
 import com.ridehailing.platform.workers.WorkerProperties;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,6 +14,12 @@ import tools.jackson.databind.json.JsonMapper;
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(prefix = "ride.kafka", name = "enabled", havingValue = "true")
 class KafkaConfiguration {
+
+    @Bean(destroyMethod = "close")
+    KafkaEventStream kafkaEventStream(JsonMapper json, KafkaProperties properties, KafkaStreamProperties streamProperties,
+            MeterRegistry metrics) {
+        return new KafkaEventStream(json, properties.brokers(), streamProperties, metrics);
+    }
 
     @Bean(destroyMethod = "close")
     KafkaOutboxTransport kafkaOutboxTransport(JsonMapper json, KafkaProperties properties, LeaseProperties leases) {
