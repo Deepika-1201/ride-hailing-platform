@@ -42,9 +42,9 @@ benchmark/environment failures and intermittent test failures are the largest un
 | ID | Work item | Estimate | Status | Completion evidence |
 |---|---|---|---|---|
 | P1 | Freeze scope and define release checklist | 1-2 h | Complete | Accepted scope, exclusions and independent release criteria recorded here |
-| P2 | Finish and publish the existing batch prototype | 3-6 h | In progress | Solver, tiled preparation and harness tested together; limitations documented; coherent commit and exact-commit CI green |
-| P3 | Close reliability gaps | 6-12 h | Pending | Intermittent failures investigated and tracked; regressions and appropriate repetitions pass without weakened assertions; full local and CI gates pass |
-| P4 | Verify clean setup, startup, demo and cleanup | 3-6 h | Pending | Fresh isolated setup exercised with documented prerequisites, seed accounts and commands; existing project data preserved |
+| P2 | Finish and publish the existing batch prototype | 3-6 h | Complete | Solver, tiled preparation and harness tested together; limitations documented; coherent commit and exact-commit CI green |
+| P3 | Close reliability gaps | 6-12 h | In progress | Intermittent failures investigated and tracked; regressions and appropriate repetitions pass without weakened assertions; full local and CI gates pass |
+| P4 | Verify clean setup, startup, demo and cleanup | 3-6 h | Complete | Fresh isolated setup exercised with documented prerequisites, seed accounts and commands; existing project data preserved |
 | P5 | Polish and record the demo | 5-9 h | Pending | Short walkthrough and screenshots covering rider, driver and operations flows; desktop/mobile experience checked; no credentials exposed |
 | P6 | Run benchmarks and publish defensible results | 8-18 h | Pending | Reproducible workload, exact revision/environment, actual population, throughput, latency, error/match rates, resources and final invariants reported |
 | P7 | Package failure and recovery demonstrations | 4-8 h | Pending | Repeatable commands and evidence for duplicate events, Kafka outage/recovery, Valkey recovery and node restart/draining; expected and observed behavior distinguished |
@@ -92,13 +92,72 @@ calling this portfolio release complete. At that point a reviewer should be able
 4. Reproduce the published workload and understand precisely what its results do and do not prove.
 5. Find operational recovery instructions, known limitations and the still-open 23-phase roadmap.
 
+## Isolated local setup (P4)
+
+Run these commands from the repository root. Docker with Compose, `curl`, and Python 3.8 or later are required;
+the container build supplies Java and Node. Host-side Java tests additionally require JDK 25. The commands use a
+separate Compose project, alternate host ports and the committed compact basemap, not the full OSRM dataset.
+Base-image/package downloads still need Internet access. These images and seed credentials are for local use,
+not public deployment.
+
+```bash
+export POSTGRES_PORT=15434 VALKEY_PORT=16380 API_PORT=18080 MANAGEMENT_PORT=18081 WEB_PORT=18088
+export MAPS_DIR="$PWD/web/testdata"
+export RIDE_KAFKA_ENABLED=false RIDE_ROUTING_OSRM_ENABLED=false
+docker compose -p ride-portfolio-check up --build --detach postgres valkey app
+curl --fail --retry 20 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 \
+  http://127.0.0.1:18081/actuator/health/readiness
+docker compose -p ride-portfolio-check --profile simulator up --build --detach --no-deps web
+BASE=http://127.0.0.1:18080 MANAGEMENT=http://127.0.0.1:18081 ./scripts/demo.sh
+```
+
+Open <http://localhost:18088>. The seeded local sign-in code is `123456`; the manual rider/driver accounts and
+their roles are listed in the [main README](../README.md#simulator-and-web-app). The script chooses fresh seeded
+accounts and exercises booking, dispatch, trip completion, mocked payment, ratings, earnings and the operations
+timeline. It does not measure browser latency or certify capacity. The compact map fixture is suitable for this
+demo and the browser tests; enabling the routing profile requires the actual OSRM data from the normal map setup.
+
+Host-port overrides preserve container-to-container addresses. Without overrides, the original ports remain
+5434, 6380, 8080, 8081, 8088 and 5000; the map directory remains `.maps`. The repeatable configuration checks are
+`node --test scripts/compose-config.test.mjs` (Node 22 in CI). Use another unused set of ports if these are taken.
+Choose a new project name if `ride-portfolio-check` already contains data you want to retain.
+
+### Local download caveat
+
+The source build on the development Mac initially timed out following the Gradle distribution redirect. A
+build-only host override succeeded without changing Gradle or runtime networking:
+
+```bash
+docker build --add-host release-assets.githubusercontent.com:185.199.110.133 -t ride-portfolio-check-app .
+docker compose -p ride-portfolio-check build postgres
+docker compose -p ride-portfolio-check up --no-build --detach postgres valkey app
+```
+
+The address was verified for this network during the recorded run; it is not a permanent GitHub address or a
+general recommendation. Prefer the normal source build. If that workaround is needed on another network,
+diagnose the redirect and connectivity first. Do not claim a cache-free build: base/package layers may be reused.
+The verified local run used freshly created project data and built the application from the current source.
+
+### Safe cleanup
+
+To stop this isolated stack while retaining its database:
+
+```bash
+docker compose -p ride-portfolio-check --profile simulator down
+```
+
+For a disposable verification run only, replace `down` with `down --volumes` to also delete this project's mock
+data. Check the project name before doing so. Neither command targets the original `ride-phase15` database or
+other Compose projects. Do not run global Docker prune commands as part of the demo.
+
 ## Evidence log
 
 | Date | Item | Verified progress | Still open |
 |---|---|---|---|
 | 2026-10-13 | P1 | Separate scope and checklist established; original phase plan preserved | Portfolio release itself remains in progress |
-| 2026-10-13 | P2 | Combined `build batchMatchingExperiment` passed in 9m 31s: 1,268 tests across 153 suites, no failures/errors/skips, including 10 solver/harness and 8 preparation tests; final-assembly deadline regression and preparation limits documented | Publish the coherent milestone and verify exact-commit CI |
-| 2026-10-13 | P3 | Failure-only task/decision diagnostics retained for the earlier intermittent missing-offer race; isolated and full reruns passed | Root cause not established; do not describe it as fixed |
+| 2026-10-13 | P2 | Published as `3f5ad9f`; combined `build batchMatchingExperiment` passed in 9m 31s: 1,268 tests across 153 suites, no failures/errors/skips, including 10 solver/harness and 8 preparation tests; [all five CI jobs passed](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38293995045) | Live dispatch integration remains on the original roadmap, not part of this prototype milestone |
+| 2026-10-13 | P3 | Diagnostics retained; the exact missing-offer race passed 1,000 unchanged repetitions in 1m 46s on AC power, following the green combined full build | Root cause not established; do not describe it as fixed |
+| 2026-10-13 | P4 | Application source `3f5ad9f` built with the documented local workaround; fresh project data, readiness, full scripted demo, web entry/API proxy/PMTiles ranges and both Compose configuration tests passed. Project containers, network and disposable volume removed; the original phase-15 database retained the same container ID and stayed running. Evidence is retained privately under `build/portfolio/evidence/setup-3f5ad9f` | Not a cache-free, cloud, capacity or recorded browser-demo claim; the source-download caveat remains documented |
 
 Use this log for portfolio delivery evidence. Existing ADRs, test reports and phase records remain the sources for
 their respective implementation and verification details.

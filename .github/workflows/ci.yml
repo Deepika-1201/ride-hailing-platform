@@ -158,6 +158,8 @@ jobs:
         run: |
           mkdir -p .maps
           cp web/testdata/bengaluru.pmtiles .maps/bengaluru.pmtiles
+      - name: Validate default and isolated Compose configuration
+        run: node --test scripts/compose-config.test.mjs
       - name: Start PostgreSQL and the app
         run: docker compose up --build --detach
       - name: Wait for readiness
