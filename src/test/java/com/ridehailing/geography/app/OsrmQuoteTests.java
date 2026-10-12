@@ -4,10 +4,15 @@ import static com.ridehailing.support.OpenApiContract.assertAnswered;
 import static com.ridehailing.support.OpenApiContract.assertProblem;
 import static com.ridehailing.support.EventContract.outboxEvents;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 import static org.awaitility.Awaitility.await;
 
 import com.ridehailing.dispatch.DispatchApi;
+import com.ridehailing.dispatch.db.DriverStatsRepository;
 import com.ridehailing.geography.GeographyApi;
+import com.ridehailing.geography.RankingWeights;
+import com.ridehailing.location.LiveIndex;
 import com.ridehailing.geography.app.CityAdministration.NewCity;
 import com.ridehailing.geography.db.CategoryRepository.Settings;
 import com.ridehailing.platform.Caller;
@@ -32,6 +37,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -47,6 +53,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.annotation.DirtiesContext;
@@ -113,6 +121,12 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
     @Autowired
     DispatchApi dispatch;
 
+    @Autowired
+    LiveIndex index;
+
+    @Autowired
+    DriverStatsRepository driverStats;
+
     private String rider;
     private final List<TestDriver> testDrivers = new ArrayList<>();
     private RideView booked;
@@ -132,7 +146,11 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
             categories.put(ADMIN, new Settings(CITY, "MINI", true, 15, 180, 2000, 1000, 6000, "nearest", 0), null);
         }
         prices.price(CITY, "MINI");
-        jdbc.sql("UPDATE geography.city_categories SET ranker = 'nearest' WHERE city_id = :city AND category = 'MINI'")
+        jdbc.sql("""
+            UPDATE geography.city_categories SET ranker = 'nearest', ranking_eta_weight = 1,
+                ranking_acceptance_weight = 60, ranking_idle_weight = 2, ranking_heading_weight = 30
+            WHERE city_id = :city AND category = 'MINI'
+            """)
             .param("city", CITY).update();
         rider = users.create(UserRole.RIDER).authorization();
         valkey.await("test-route-clear", WAIT, valkey.commands().del(key()));
@@ -280,9 +298,11 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
         assertThat(rides.violations(CITY)).isEmpty();
     }
 
-    @Test
-    void aDriverGoingOfflineDuringTheTableCallStillLosesTheConditionalReservation() {
+    @ParameterizedTest
+    @ValueSource(strings = {"eta", "weighted"})
+    void aDriverGoingOfflineDuringTheTableCallStillLosesTheConditionalReservation(String strategy) {
         List<TestDriver> drivers = bookForEta();
+        selectRanker(strategy);
         TABLE_ACTION.set(() -> TestRides.asApi(() -> dispatch.goOffline(drivers.get(1).id())));
 
         searchOnce();
@@ -310,9 +330,11 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
         assertThat(TABLE_CALLS).hasValue(2);
     }
 
-        @Test
-        void concurrentEtaSearchesStillReserveDifferentDrivers() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"eta", "weighted"})
+    void concurrentRoadBasedSearchesStillReserveDifferentDrivers(String strategy) throws Exception {
         bookForEta();
+        selectRanker(strategy);
         var city = new TestCities.TestCity(CITY, 77.3, 12.7);
         TestUser secondRider = rides.rider("Second ETA rider");
         RideView secondRide = rides.book(secondRider.id(), city, PICKUP, "MINI");
@@ -332,7 +354,8 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
             assertThat(jdbc.sql("""
                 SELECT detail->>'score_unit' FROM dispatch.decisions WHERE ride_id IN (:rides)
                 """).param("rides", List.of(booked.id(), secondRide.id())).query(String.class).list())
-                .containsExactly("SECONDS", "SECONDS");
+                .containsExactly(strategy.equals("eta") ? "SECONDS" : "WEIGHTED_SECONDS",
+                    strategy.equals("eta") ? "SECONDS" : "WEIGHTED_SECONDS");
             assertThat(rides.violations(CITY)).isEmpty();
         } finally {
             assertThat(postJson("/v1/rides/" + secondRide.id() + "/cancel", Map.of("Authorization", secondRider.authorization(),
@@ -340,7 +363,111 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
         }
         }
 
-        private List<TestDriver> bookForEta() {
+    @Test
+    void weightedDispatchUsesAuditedCategoryWeightsAndReproducibleInputs() {
+        List<TestDriver> drivers = bookForEta();
+        String admin = users.create(UserRole.ADMIN).authorization();
+        RankingWeights weights = new RankingWeights(1, 100, 4, 40);
+        String body = json.writeValueAsString(Map.of("active", true, "offer_ttl_s", 15, "search_timeout_s", 180,
+                "radius_start_m", 2000, "radius_step_m", 1000, "radius_max_m", 6000, "ranker", "weighted",
+                "version", categories.get(CITY, "MINI").version(), "ranking_weights", weights));
+        assertAnswered("PUT", "/v1/admin/cities/{city_id}/categories/{category}",
+                call("PUT", admin, "/v1/admin/cities/" + CITY + "/categories/MINI", body), 200);
+        outcomes(drivers.getFirst(), 0, 90, 0);
+        outcomes(drivers.get(1), 90, 0, 0);
+        jdbc.sql("UPDATE dispatch.driver_availability SET status_changed_at = clock_timestamp() - interval '20 minutes' WHERE driver_id = :id")
+                .param("id", drivers.get(1).id()).update();
+        motion(drivers.getFirst(), 0, 5);
+        motion(drivers.get(1), 180, 5);
+        TABLE_BODY.set("{\"code\":\"Ok\",\"durations\":[[100],[100]]}");
+
+        searchOnce();
+
+        assertThat(offeredDriver()).isEqualTo(drivers.get(1).id());
+        JsonNode decision = decision();
+        assertThat(decision.get("strategy").asString()).isEqualTo("weighted");
+        JsonNode detail = decision.get("detail");
+        assertThat(detail.get("score_unit").asString()).isEqualTo("WEIGHTED_SECONDS");
+        JsonNode candidate = detail.get("candidates").get(0);
+        JsonNode score = candidate.get("weighted_score");
+        assertThat(score.get("weights")).isEqualTo(json.valueToTree(weights));
+        assertThat(score.get("accepted").asLong()).isEqualTo(90);
+        assertThat(score.get("acceptance_rate").asDouble()).isCloseTo(0.98, within(1e-12));
+        assertThat(score.get("idle_minutes").asDouble()).isBetween(20.0, 20.1);
+        assertThat(score.get("heading_penalty").asDouble()).isZero();
+        assertThat(score.get("total").asDouble()).isEqualTo(candidate.get("score").asDouble());
+        double sum = score.get("eta_cost").asDouble() + score.get("acceptance_cost").asDouble()
+                - score.get("idle_credit").asDouble() + score.get("heading_cost").asDouble();
+        assertThat(sum).isCloseTo(candidate.get("score").asDouble(), within(1e-10));
+        assertThat(detail.get("candidates").get(1).get("weighted_score").get("acceptance_rate").asDouble()).isCloseTo(0.08, within(1e-12));
+        assertThat(outboxEvents(jdbc, "OfferCreated", rides.pendingOffer(booked.id()))).singleElement().satisfies(event -> {
+            EventContract.assertConforms(event);
+            assertThat(event.get("payload").get("strategy").asString()).isEqualTo("weighted");
+        });
+        assertThat(rides.violations(CITY)).isEmpty();
+        assertThat(get(managementPort, "/actuator/prometheus").body()).contains("strategy=\"weighted\"");
+    }
+
+    @Test
+    void weightedRankingUsesThePriorForMissingStatisticsAndNeverMixesUnitsOnFallback() {
+        bookForEta();
+        selectRanker("weighted");
+
+        searchOnce();
+
+        JsonNode score = decision().get("detail").get("candidates").get(0).get("weighted_score");
+        assertThat(score.get("acceptance_rate").asDouble()).isEqualTo(0.8);
+        assertThat(score.get("heading_penalty").asDouble()).isEqualTo(0.5);
+        assertThat(score.get("accepted").asLong()).isZero();
+        TestRides.asApi(() -> dispatch.decline(rides.pendingOffer(booked.id()), offeredDriver()));
+        TABLE_STATUS.set(503);
+        jdbc.sql("UPDATE dispatch.search_tasks SET due_at = now() WHERE ride_id = :id").param("id", booked.id()).update();
+
+        searchOnce();
+
+        JsonNode detail = decision().get("detail");
+        assertThat(detail.get("score_unit").asString()).isEqualTo("METRES");
+        assertThat(detail.get("ranking_fallback").asString()).isEqualTo("MATRIX_UNAVAILABLE");
+        assertThat(detail.get("candidates").get(0).has("weighted_score")).isFalse();
+    }
+
+    @Test
+    void rankingStatisticsAreScopedAndIdleResetsWhenAvailabilityChanges() {
+        List<TestDriver> drivers = bookForEta();
+        outcomes(drivers.getFirst(), 5, 2, 3);
+        jdbc.sql("UPDATE dispatch.driver_availability SET status_changed_at = clock_timestamp() - interval '2 minutes' WHERE driver_id = :id")
+                .param("id", drivers.getFirst().id()).update();
+        var observed = driverStats.rankingInputs(CITY, drivers.stream().map(TestDriver::id).toList());
+        assertThat(observed.get(drivers.getFirst().id()).idleMinutes()).isBetween(2.0, 2.1);
+        assertThat(observed.get(drivers.get(1).id()).accepted()).isZero();
+        assertThat(driverStats.rankingInputs("other-city", List.of(drivers.getFirst().id()))).isEmpty();
+        assertThat(driverStats.rankingInputs(CITY, List.of())).isEmpty();
+        assertThatThrownBy(() -> driverStats.rankingInputs(CITY, java.util.Collections.nCopies(11, drivers.getFirst().id())))
+            .isInstanceOf(IllegalArgumentException.class);
+        TestRides.asApi(() -> dispatch.goOffline(drivers.getFirst().id()));
+        assertThat(driverStats.rankingInputs(CITY, List.of(drivers.getFirst().id())).get(drivers.getFirst().id()).idleMinutes()).isZero();
+        TestRides.asApi(() -> dispatch.goOnline(drivers.getFirst().id(), drivers.getFirst().vehicleId()));
+        assertThat(driverStats.rankingInputs(CITY, List.of(drivers.getFirst().id())).get(drivers.getFirst().id()).idleMinutes()).isBetween(0.0, 0.1);
+    }
+
+    private void outcomes(TestDriver driver, int accepted, int declined, int expired) {
+        jdbc.sql("""
+                INSERT INTO dispatch.driver_stats (driver_id, offers, accepted, declined, expired, updated_at)
+                VALUES (:id, 10000, :accepted, :declined, :expired, now())
+                """).param("id", driver.id()).param("accepted", accepted).param("declined", declined).param("expired", expired).update();
+    }
+
+    private void motion(TestDriver driver, double heading, double speed) {
+        GeoPoint position = index.position(CITY, driver.id()).orElseThrow().position();
+        index.update(CITY, driver.id(), "MINI", new LiveIndex.LocationUpdate(2, position, 5, heading, speed, Instant.now()));
+    }
+
+    private void selectRanker(String strategy) {
+        jdbc.sql("UPDATE geography.city_categories SET ranker = :ranker WHERE city_id = :city AND category = 'MINI'")
+                .param("ranker", strategy).param("city", CITY).update();
+    }
+
+    private List<TestDriver> bookForEta() {
         var city = new TestCities.TestCity(CITY, 77.3, 12.7);
         testDrivers.add(rides.onlineAt(city, "MINI", new GeoPoint(PICKUP.lat() + 0.001, PICKUP.lon())));
         testDrivers.add(rides.onlineAt(city, "MINI", new GeoPoint(PICKUP.lat() + 0.005, PICKUP.lon())));

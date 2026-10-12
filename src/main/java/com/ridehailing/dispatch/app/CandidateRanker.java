@@ -1,6 +1,7 @@
 package com.ridehailing.dispatch.app;
 
 import com.ridehailing.location.LiveIndex.Candidate;
+import com.ridehailing.geography.RankingWeights;
 import com.ridehailing.shared.GeoPoint;
 import java.time.ZonedDateTime;
 import java.util.List;
@@ -14,7 +15,11 @@ interface CandidateRanker {
 
     Ranking rank(Context context, List<Candidate> candidates);
 
-    record Context(String cityId, GeoPoint pickup, ZonedDateTime departure) {
+    record Context(String cityId, GeoPoint pickup, ZonedDateTime departure, RankingWeights rankingWeights) {
+
+        Context(String cityId, GeoPoint pickup, ZonedDateTime departure) {
+            this(cityId, pickup, departure, RankingWeights.DEFAULT);
+        }
     }
 
     record Ranking(List<Ranked> candidates, String scoreUnit, String fallbackReason, int unreachable, int outsideLimit) {
@@ -25,6 +30,10 @@ interface CandidateRanker {
     }
 
     /** Lower scores rank first. */
-    record Ranked(Candidate candidate, double score) {
+    record Ranked(Candidate candidate, double score, WeightedScoring.Score weightedScore) {
+
+        Ranked(Candidate candidate, double score) {
+            this(candidate, score, null);
+        }
     }
 }

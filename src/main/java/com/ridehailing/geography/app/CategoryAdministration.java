@@ -67,7 +67,7 @@ public class CategoryAdministration {
                             "active", result.active(), "offer_ttl_s", result.offerTtlS(),
                             "search_timeout_s", result.searchTimeoutS(), "radius_start_m", result.radiusStartM(),
                             "radius_step_m", result.radiusStepM(), "radius_max_m", result.radiusMaxM(),
-                            "ranker", result.ranker())));
+                            "ranker", result.ranker(), "ranking_weights", result.rankingWeights())));
             return result;
         });
     }

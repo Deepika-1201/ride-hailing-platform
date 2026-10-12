@@ -658,6 +658,10 @@ CREATE TABLE geography.city_categories (
   radius_step_m    int NOT NULL DEFAULT 1000,
   radius_max_m     int NOT NULL DEFAULT 6000,
   ranker           text NOT NULL DEFAULT 'nearest',  -- nearest, eta, weighted (V4)
+  ranking_eta_weight double precision NOT NULL DEFAULT 1 CHECK (ranking_eta_weight > 0 AND ranking_eta_weight <= 1000),
+  ranking_acceptance_weight double precision NOT NULL DEFAULT 60 CHECK (ranking_acceptance_weight >= 0 AND ranking_acceptance_weight <= 3600),
+  ranking_idle_weight double precision NOT NULL DEFAULT 2 CHECK (ranking_idle_weight >= 0 AND ranking_idle_weight <= 60),
+  ranking_heading_weight double precision NOT NULL DEFAULT 30 CHECK (ranking_heading_weight >= 0 AND ranking_heading_weight <= 3600),
   version          int NOT NULL DEFAULT 0,
   PRIMARY KEY (city_id, category),
   CHECK (radius_start_m <= radius_max_m)
@@ -1749,16 +1753,16 @@ public interface CandidateRanker {
     String version();
     Ranking rank(Context context, List<Candidate> candidates);
 }
-  record Context(String cityId, GeoPoint pickup, ZonedDateTime departure) {}
-  record Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen) {}
+  record Context(String cityId, GeoPoint pickup, ZonedDateTime departure, RankingWeights rankingWeights) {}
+  record Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen, Double headingDeg, Double speedMps) {}
   record Ranking(List<Ranked> candidates, String scoreUnit, String fallbackReason, int unreachable, int outsideLimit) {}
 ```
 
 - `NearestDriverRanker` (V1): distance ascending; ties go to the fresher position, then the lower driver ID, so results are deterministic.
 - The ranker is chosen per city and category (`geography.city_categories.ranker`). Each decision records the ranker's name and version.
 - V4's `eta` implementation uses the ten nearest eligible candidates and one directed table call to the pickup. Scores retain fractional seconds; ties use the existing distance, freshness and driver-ID order. Unreachable cells are excluded, with no backfill beyond that attempt's ten-candidate cap. An unavailable, failing or invalid table falls back to the complete nearest-driver order.
-- Decision details add `score_unit` (`SECONDS` or `METRES`), optional `ranking_fallback` (`MATRIX_UNAVAILABLE` or `INVALID_MATRIX`), and counts for `unreachable` and `outside_ranker_limit`. Strategy `eta` is retained even when the result uses distance, so the requested policy and actual scoring are both visible. Index failures have no score unit because ranking did not run.
-- Table lookup remains inside the existing task/ride-share-lock transaction and uses the configured routing timeout (300ms by default); it does not move or weaken conditional driver reservation. The bounded network wait can lengthen that transaction and must be included in later contention measurements. `weighted` and percentage-based strategy experiments remain pending (§19.2).
+- Decision details add `score_unit` (`SECONDS`, `WEIGHTED_SECONDS` or `METRES`), optional `ranking_fallback` (`MATRIX_UNAVAILABLE` or `INVALID_MATRIX`), and counts for `unreachable` and `outside_ranker_limit`. The requested strategy is retained on distance fallback. Weighted candidates also record a `weighted_score` with coefficients, ETA, resolved outcome counts, smoothed acceptance, bounded idle time, heading penalty and each score contribution; raw coordinates are not added to the decision log. Index failures have no score unit because ranking did not run.
+- Table lookup remains inside the existing task/ride-share-lock transaction and uses the configured routing timeout (300ms by default); it does not move or weaken conditional driver reservation. The bounded network wait can lengthen that transaction and must be included in later contention measurements. Weighted ranking reuses the same road eligibility and fallback logic; percentage-based strategy experiments remain pending (§19.2).
 
 ## 9. Location and the live index
 
@@ -1780,6 +1784,8 @@ public interface LiveIndex {
 `UpdateResult` is `APPLIED`, `STALE`, `OFFLINE` or `CATEGORY_MISMATCH`, with the mirror's status, the active ride and quality flags.
 
 As built in phase 6: city IDs are strings; `mirror` answers whether the write was newer than what the index held; `mirrored(city)` returns every driver the index holds, for the reconciler; candidates carry their last-seen time, which ranking uses to break ties (§8.11); `UpdateResult` carries the mirror's category only on a mismatch, as the script does; the operations snapshot waits for V2. The contract suite is `LiveIndexContract` in the tests, driven by a clock the suite moves.
+
+Phase 18 candidates also carry nullable heading and speed from the same last usable fix as their position. Valkey reads `plat`, `plon`, `hdg` and `spd` together, and the in-memory entry preserves the same values. Stale and quality-flagged updates do not replace this motion metadata; an accepted update may clear it, and going offline forgets it. The contract runs on memory, standalone Valkey and a three-shard cluster.
 
 Phase 13 details:
 
@@ -3105,7 +3111,10 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
   - Table requests cap combined source/destination coordinates at 100, use one `/table` request with directed source and destination indexes, and retain fractional duration seconds. A null cell is unreachable; a missing matrix is unavailable. Wrong dimensions, invalid measurements, service errors and timeouts return unavailable rather than fabricating a matrix. Matrices are uncached and share the complete-response deadline and size cap. `routing_matrix_requests_total{provider,outcome}` records table outcomes.
 - **Rankers:**
   - `EtaRanker` is implemented and selected with category setting `ranker=eta`: the 10 nearest eligible drivers, re-ranked by OSRM table duration; falls back to distance if the table call fails or OSRM is not enabled for the city. `dispatch_ranking_total{strategy,outcome}` records successful and fallback ranking executions, not committed offer counts. The seeded/default policy remains `nearest`.
-  - `WeightedScoreRanker`: `score = w_eta·eta + w_accept·(1 − acceptance_rate) + w_idle·(−idle_minutes) + w_heading·heading_penalty`, with weights per city. `acceptance_rate` comes from `driver_stats`, with a prior for new drivers.
+  - `WeightedScoreRanker` is implemented as opt-in `ranker=weighted` ([ADR-027](decisions/ADR-027-weighted-dispatch-scoring.md)): `score = w_eta * eta_seconds + w_acceptance * (1 - acceptance_rate) - w_idle * idle_minutes + w_heading * heading_penalty`, lower first, with the existing deterministic distance/freshness/ID ties. It uses the same ten-driver road shortlist and unreachable/fallback behavior as ETA ranking, with no additional routing calls.
+  - Weights live on the existing versioned city/category resource as `ranking_weights`. Defaults are `(eta=1, acceptance=60, idle=2, heading=30)` **(assumed starting coefficients)**. An omitted or null value preserves current coefficients on update and uses defaults on insert. Audit records include the effective values. Positive bounded ETA weight, nonnegative bounded other weights and database checks reject nonfinite/extreme values.
+  - Acceptance is `(accepted + 8) / (accepted + declined + expired + 10)`, an **assumed 8/10 prior**; pending and withdrawn offers are not treated as refusals. One bounded query reads statistics for up to ten reachable candidates, scoped to the task city. Idle time uses the database clock and `status_changed_at` only while `AVAILABLE`, clamped to 0..30 minutes **(assumed cap)**. Database failures abort the attempt normally rather than continuing inside a failed transaction.
+  - Heading penalty is `(1 - cos(heading - bearing_to_pickup)) / 2`. Unknown, invalid or slower-than-1m/s motion uses neutral 0.5; a driver within one metre of pickup has zero heading penalty **(assumed rules)**. The decision stores the derived penalty, not a new raw location history. Weighted outcome metrics use strategy `weighted` without also counting an ETA strategy execution.
   - A city can split rides between rankers by percentage; decisions record the ranker.
 - **City ownership:** the lease `city-owner:<city>` (§5.5) picks one `dispatch` node per city for the city's singleton work: computed surge and the batch-matching experiment. Sequential search attempts stay leaderless.
 - **Computed surge**, every 60 s per city by its owner:

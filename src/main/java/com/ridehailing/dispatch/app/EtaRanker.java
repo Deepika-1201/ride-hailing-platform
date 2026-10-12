@@ -41,6 +41,14 @@ class EtaRanker implements CandidateRanker {
 
     @Override
     public Ranking rank(Context context, List<Candidate> candidates) {
+        Ranking ranking = roadOrder(context, candidates);
+        if (!candidates.isEmpty()) {
+            (ranking.fallbackReason() == null ? successful : unavailable).increment();
+        }
+        return ranking;
+    }
+
+    Ranking roadOrder(Context context, List<Candidate> candidates) {
         List<Candidate> considered = candidates.stream().sorted(NearestDriverRanker.ORDER).limit(CANDIDATE_LIMIT).toList();
         if (considered.isEmpty()) {
             return new Ranking(List.of(), "SECONDS", null, 0, 0);
@@ -67,12 +75,10 @@ class EtaRanker implements CandidateRanker {
             }
         }
         ranked.sort(Comparator.comparingDouble(Ranked::score).thenComparing(Ranked::candidate, NearestDriverRanker.ORDER));
-        successful.increment();
         return new Ranking(ranked, "SECONDS", null, considered.size() - ranked.size(), candidates.size() - considered.size());
     }
 
     private Ranking fallback(Context context, List<Candidate> candidates, String reason) {
-        unavailable.increment();
         Ranking ranking = nearest.rank(context, candidates);
         return new Ranking(ranking.candidates(), ranking.scoreUnit(), reason, 0, 0);
     }

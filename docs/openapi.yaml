@@ -2468,7 +2468,21 @@ components:
         radius_step_m: {type: integer, minimum: 0}
         radius_max_m: {type: integer, minimum: 100}
         ranker: {type: string, enum: [nearest, eta, weighted]}
+        ranking_weights:
+          anyOf:
+            - $ref: '#/components/schemas/RankingWeights'
+            - {type: 'null'}
+          description: Optional on writes; omitted or null values preserve existing weights, or use defaults for a new category.
         version: {type: integer, description: Required when updating; the current version.}
+    RankingWeights:
+      type: object
+      additionalProperties: false
+      required: [eta, acceptance, idle, heading]
+      properties:
+        eta: {type: number, exclusiveMinimum: 0, maximum: 1000, default: 1}
+        acceptance: {type: number, minimum: 0, maximum: 3600, default: 60}
+        idle: {type: number, minimum: 0, maximum: 60, default: 2}
+        heading: {type: number, minimum: 0, maximum: 3600, default: 30}
     FareRuleCreate:
       type: object
       required: [city_id, category, base_paise, per_km_paise, per_min_paise, minimum_paise, booking_fee_paise, tax_bp, commission_bp, currency]

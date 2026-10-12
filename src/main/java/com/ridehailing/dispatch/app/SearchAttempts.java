@@ -130,7 +130,7 @@ class SearchAttempts {
                 .toList();
         var city = geography.city(task.cityId()).orElseThrow();
         CandidateRanker.Context context = new CandidateRanker.Context(task.cityId(), task.pickup(),
-            ZonedDateTime.ofInstant(clock.instant(), city.timeZone()));
+            ZonedDateTime.ofInstant(clock.instant(), city.timeZone()), settings.rankingWeights());
         CandidateRanker.Ranking ranking = ranker.rank(context, eligible);
         List<CandidateRanker.Ranked> ranked = ranking.candidates();
         List<Try> tries = new ArrayList<>();
@@ -174,7 +174,7 @@ class SearchAttempts {
         Instant now = clock.instant();
         List<CandidateDetail> candidates = ranking.candidates().stream().map(entry -> new CandidateDetail(
                 entry.candidate().driverId(), entry.candidate().distanceM(),
-                Duration.between(entry.candidate().lastSeen(), now).toSeconds(), entry.score())).toList();
+                Duration.between(entry.candidate().lastSeen(), now).toSeconds(), entry.score(), entry.weightedScore())).toList();
         String detail = json.writeValueAsString(new Detail(candidates, Map.of("already_offered", alreadyOffered,
             "unreachable", ranking.unreachable(), "outside_ranker_limit", ranking.outsideLimit()),
             tries, Double.isNaN(indexMs) ? null : indexMs, ranking.scoreUnit(), ranking.fallbackReason()));
@@ -188,7 +188,7 @@ class SearchAttempts {
             String scoreUnit, String rankingFallback) {
     }
 
-    record CandidateDetail(UUID driverId, int distanceM, long seenAgoS, double score) {
+    record CandidateDetail(UUID driverId, int distanceM, long seenAgoS, double score, WeightedScoring.Score weightedScore) {
     }
 
     record Try(UUID driverId, String result) {

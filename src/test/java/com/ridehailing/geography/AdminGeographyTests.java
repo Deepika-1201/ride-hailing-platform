@@ -3,7 +3,9 @@ package com.ridehailing.geography;
 import static com.ridehailing.support.OpenApiContract.assertAnswered;
 import static com.ridehailing.support.OpenApiContract.assertProblem;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.ridehailing.audit.AuditLog;
 import com.ridehailing.shared.UserRole;
 import com.ridehailing.support.Eventually;
 import com.ridehailing.support.IntegrationTest;
@@ -22,7 +24,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.dao.DataIntegrityViolationException;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /** LLD §13.3: cities, service and special areas, categories and city settings, through the admin API. */
 class AdminGeographyTests extends IntegrationTest {
@@ -41,6 +46,12 @@ class AdminGeographyTests extends IntegrationTest {
 
     @Autowired
     private JdbcClient jdbc;
+
+        @Autowired
+        private GeographyApi geography;
+
+        @Autowired
+        private AuditLog audit;
 
     private String admin;
 
@@ -219,8 +230,45 @@ class AdminGeographyTests extends IntegrationTest {
                 "city_category.put");
     }
 
-    @Test
-    void onlyAdminsManageReferenceData() {
+        @Test
+        void rankingWeightsAreVersionedAuditedAndPreservedForOlderClients() {
+                String id = TestCities.newId();
+                assertAnswered("POST", CITIES, call("POST", admin, CITIES, city(id, "Asia/Kolkata", "INR", square(19, 19))), 201);
+                String path = CITIES + "/" + id + "/categories/MINI";
+                JsonNode created = assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, settings(15, null)), 200);
+                JsonMapper mapper = JsonMapper.builder().build();
+                assertThat(created.get("ranking_weights")).isEqualTo(mapper.valueToTree(RankingWeights.DEFAULT));
+                ObjectNode body = (ObjectNode) mapper.readTree(settings(15, 0));
+                RankingWeights custom = new RankingWeights(1.5, 90, 3, 15);
+                body.set("ranking_weights", mapper.valueToTree(custom));
+
+                JsonNode changed = assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 200);
+
+                assertThat(changed.get("ranking_weights")).isEqualTo(mapper.valueToTree(custom));
+                assertThat(geography.settings(id, "MINI").orElseThrow().rankingWeights()).isEqualTo(custom);
+                assertProblem("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 409, "VERSION_CONFLICT");
+                JsonNode olderClient = assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, settings(20, 1)), 200);
+                assertThat(olderClient.get("ranking_weights")).isEqualTo(changed.get("ranking_weights"));
+                assertThat(audit.entries("city_category", List.of(id + ":MINI")).getLast().after().get("ranking_weights"))
+                                .isEqualTo(changed.get("ranking_weights"));
+                ObjectNode nullable = (ObjectNode) mapper.readTree(settings(20, 2));
+                nullable.putNull("ranking_weights");
+                assertThat(assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, nullable.toString()), 200).get("ranking_weights"))
+                        .isEqualTo(changed.get("ranking_weights"));
+                for (double invalid : new double[] {0, -1, 1001, Double.NaN, Double.POSITIVE_INFINITY}) {
+                        assertThatThrownBy(() -> jdbc.sql("UPDATE geography.city_categories SET ranking_eta_weight = :weight WHERE city_id = :city")
+                                        .param("weight", invalid).param("city", id).update()).isInstanceOf(DataIntegrityViolationException.class);
+                }
+                for (String weights : List.of("{\"eta\":0,\"acceptance\":1,\"idle\":1,\"heading\":1}", "{\"eta\":1}")) {
+                            body.put("version", 3);
+                        body.set("ranking_weights", mapper.readTree(weights));
+                        assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 400);
+                }
+                assertThat(json(call("GET", admin, path, null)).get("version").asInt()).isEqualTo(3);
+        }
+
+        @Test
+        void onlyAdminsManageReferenceData() {
         String rider = users.create(UserRole.RIDER).authorization();
 
         assertProblem("GET", CITIES, call("GET", rider, CITIES, null), 403, "FORBIDDEN");

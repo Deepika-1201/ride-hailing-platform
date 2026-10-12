@@ -140,7 +140,7 @@ Scenarios 4, 5, 6, 8 and 10 concern the ride itself and are in the [ride lifecyc
 
 ## 7. Ranking strategies
 
-`CandidateRanker.rank(context, candidates)` returns ranked candidates plus score units, fallback reason and exclusion counts. Context carries city, pickup and local departure time; candidates carry driver ID, position, distance and last-seen time. Weighted ranking will add acceptance rate, idle time and heading inputs later.
+`CandidateRanker.rank(context, candidates)` returns ranked candidates plus score units, fallback reason and exclusion counts. Context carries city, pickup, local departure time and category weights; candidates carry driver ID, position, distance, last-seen time and nullable motion from their last usable fix. Weighted ranking adds one bounded database read for resolved offer outcomes and continuous availability time.
 
 | Strategy | Version | Ranks by |
 |---|---|---|
@@ -151,6 +151,7 @@ Scenarios 4, 5, 6, 8 and 10 concern the ride itself and are in the [ride lifecyc
 
 - The strategy is configured per city and category. Each decision record names the strategy and its version. Percentage-based experiment splits remain planned.
 - `eta` is implemented with one directed table call for the ten nearest eligible drivers. It preserves fractional ETA seconds and breaks ties by distance, freshness and driver ID. Unreachable pairs are excluded; an unavailable table falls back to the complete nearest-driver order. The decision's `score_unit`, `ranking_fallback` and exclusion counts distinguish those outcomes. The default stays `nearest`; real ETA ranking also needs OSRM enabled for that city.
+- `weighted` reuses that road shortlist and fallback, then scores ETA, smoothed acceptance, bounded idle credit and heading alignment using versioned `ranking_weights` from the city/category settings. Decisions retain every effective coefficient and contribution under `weighted_score`, with unit `WEIGHTED_SECONDS`; distance fallback has no weighted components. See [ADR-027](decisions/ADR-027-weighted-dispatch-scoring.md) for priors, bounds and missing-data rules. These starting coefficients have not been adopted as the default or certified to improve outcomes.
 - The table wait is bounded and remains inside the current search transaction. Driver availability is still checked by the same conditional reservation after the response; tests cover withdrawal during the call and overlapping searches reserving different drivers.
 - Offer policy is a separate interface, `OfferPolicy`: V1 is sequential, and batch matching (§8) is the V4 experiment.
 

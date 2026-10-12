@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 routing preparation adds opt-in OSRM road routes and caching without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-026.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-027.
 
 ## Quick start
 
@@ -182,6 +182,28 @@ unreachable and capped candidates. Matrix requests are uncached and use the same
 route requests. Reservation remains conditional, so a driver becoming unavailable during the routing call cannot
 be assigned on stale data. `routing_matrix_requests_total` and `dispatch_ranking_total` expose table and ranker
 outcomes. These checks establish behavior and concurrency safety, not improved pickup-time or capacity targets.
+
+### Weighted dispatch
+
+Set the category's `ranker` to `weighted` through the same versioned admin endpoint to combine road ETA with
+acceptance history, continuous idle time and heading alignment. OSRM must be enabled for that city to supply
+road times; otherwise the policy explicitly falls back to distance. The default remains `nearest`.
+
+The optional `ranking_weights` object has four required values when supplied:
+
+```json
+{"eta": 1, "acceptance": 60, "idle": 2, "heading": 30}
+```
+
+These are initial experimental coefficients, not tuned performance claims. Omitted or null weights preserve
+existing values; new categories use the defaults. Changes require the category's current version and are audited.
+
+The policy uses the same ten-driver shortlist as ETA ranking, an 8/10 acceptance prior, at most thirty minutes
+of idle credit, and neutral heading penalty when usable motion is missing or too slow. The decision's
+`weighted_score` records its inputs, effective weights and component costs so the result is explainable without
+adding raw coordinates to the log. `dispatch_ranking_total{strategy="weighted",outcome}` reports weighted
+executions and fallbacks. See [ADR-027](docs/decisions/ADR-027-weighted-dispatch-scoring.md) for the exact rules.
+Outcome comparisons, city ownership, computed surge and the batch-matching experiment remain pending.
 
 ## Simulator and web app
 

@@ -85,6 +85,44 @@ public abstract class LiveIndexContract {
     }
 
     @Test
+    void candidateMotionComesFromTheSameUsableFixAndIgnoresFlaggedOrStaleUpdates() {
+        UUID driver = available(MINI, 1);
+        index.update(city, driver, MINI, new LocationUpdate(1, north(100), 5, 60.0, 7.5, clock.instant()));
+        clock.advance(Duration.ofSeconds(2));
+        assertThat(index.update(city, driver, MINI, new LocationUpdate(2, north(200), 500, 220.0, 3.0, clock.instant())).flags())
+                .isEqualTo(UpdateResult.POOR_ACCURACY);
+        assertThat(index.update(city, driver, MINI, new LocationUpdate(3, north(10_000), 5, 120.0, 30.0, clock.instant())).flags())
+                .isEqualTo(UpdateResult.IMPLAUSIBLE);
+        assertThat(index.update(city, driver, MINI, new LocationUpdate(3, north(101), 5, 90.0, 2.0, clock.instant())).outcome())
+                .isEqualTo(Outcome.STALE);
+
+        assertThat(index.nearby(city, MINI, HERE, 1000, 5)).singleElement().satisfies(candidate -> {
+            assertThat(candidate.position()).isEqualTo(north(100));
+            assertThat(candidate.headingDeg()).isEqualTo(60.0);
+            assertThat(candidate.speedMps()).isEqualTo(7.5);
+        });
+        index.mirror(city, driver, new MirrorState(Status.OFFERED, 2, MINI, null));
+        index.mirror(city, driver, new MirrorState(Status.AVAILABLE, 3, MINI, null));
+        assertThat(index.nearby(city, MINI, HERE, 1000, 5).getFirst().headingDeg()).isEqualTo(60.0);
+    }
+
+    @Test
+    void aNewUsableFixCanClearMotionAndGoingOfflineForgetsIt() {
+        UUID driver = available(MINI, 1);
+        index.update(city, driver, MINI, new LocationUpdate(1, north(100), 5, 45.0, 4.0, clock.instant()));
+        send(driver, 2, north(100));
+        assertThat(index.nearby(city, MINI, HERE, 1000, 5)).singleElement().satisfies(candidate -> {
+            assertThat(candidate.headingDeg()).isNull();
+            assertThat(candidate.speedMps()).isNull();
+        });
+        index.update(city, driver, MINI, new LocationUpdate(3, north(100), 5, 45.0, 4.0, clock.instant()));
+        index.mirror(city, driver, new MirrorState(Status.OFFLINE, 2, null, null));
+        index.mirror(city, driver, new MirrorState(Status.AVAILABLE, 3, MINI, null));
+        send(driver, 1, north(100));
+        assertThat(index.nearby(city, MINI, HERE, 1000, 5).getFirst().headingDeg()).isNull();
+    }
+
+    @Test
     void repeatedAndOlderSequenceNumbersAreStaleAndChangeNothing() {
         UUID driver = available(MINI, 1);
         send(driver, 5, north(100));

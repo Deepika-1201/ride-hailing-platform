@@ -96,7 +96,11 @@ public interface LiveIndex {
         public static final Quality DEFAULT = new Quality(100, 150 / 3.6, 3);
     }
 
-    record Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen) {
+    record Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen, Double headingDeg, Double speedMps) {
+
+        public Candidate(UUID driverId, GeoPoint position, int distanceM, Instant lastSeen) {
+            this(driverId, position, distanceM, lastSeen, null, null);
+        }
     }
 
     /** The last usable position and when it arrived; {@code seq} is the last applied update's. */

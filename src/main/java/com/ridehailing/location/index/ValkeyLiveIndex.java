@@ -98,10 +98,10 @@ public class ValkeyLiveIndex implements LiveIndex {
                 Long.toString(clock.millis() - freshness.toMillis()));
         List<RedisFuture<List<KeyValue<String, String>>>> reads = new ArrayList<>();
         for (int i = 0; i < found.size(); i += 2) {
-            reads.add(valkey.commands().hmget(driver(cityId, UUID.fromString(found.get(i))), "plat", "plon"));
+            reads.add(valkey.commands().hmget(driver(cityId, UUID.fromString(found.get(i))), "plat", "plon", "hdg", "spd"));
         }
         List<List<KeyValue<String, String>>> positions = valkey.await(QUERY.name(), timeout, reads);
-        record Found(UUID driverId, GeoPoint position, double metres, Instant lastSeen) {
+        record Found(UUID driverId, GeoPoint position, double metres, Instant lastSeen, Double headingDeg, Double speedMps) {
         }
         List<Found> candidates = new ArrayList<>();
         for (int i = 0; i < positions.size(); i++) {
@@ -109,14 +109,15 @@ public class ValkeyLiveIndex implements LiveIndex {
             Optional<GeoPoint> position = point(value(positions.get(i), 0), value(positions.get(i), 1));
             if (position.isPresent() && at.metresTo(position.get()) <= radiusM) {
                 candidates.add(new Found(UUID.fromString(found.get(2 * i)), position.get(),
-                        at.metresTo(position.get()), instant(found.get(2 * i + 1))));
+                    at.metresTo(position.get()), instant(found.get(2 * i + 1)),
+                    optionalNumber(value(positions.get(i), 2)), optionalNumber(value(positions.get(i), 3))));
             }
         }
         return candidates.stream()
                 .sorted(Comparator.comparingDouble(Found::metres).thenComparing(Found::driverId))
                 .limit(k)
                 .map(candidate -> new Candidate(candidate.driverId(), candidate.position(),
-                        (int) Math.round(candidate.metres()), candidate.lastSeen()))
+                    (int) Math.round(candidate.metres()), candidate.lastSeen(), candidate.headingDeg(), candidate.speedMps()))
                 .toList();
     }
 
@@ -288,6 +289,10 @@ public class ValkeyLiveIndex implements LiveIndex {
 
     private static String text(Double value) {
         return value == null ? "" : value.toString();
+    }
+
+    private static Double optionalNumber(String value) {
+        return value == null || value.isEmpty() ? null : Double.valueOf(value);
     }
 
     private static String value(List<KeyValue<String, String>> fields, int index) {

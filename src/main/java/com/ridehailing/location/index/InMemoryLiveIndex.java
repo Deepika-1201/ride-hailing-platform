@@ -63,10 +63,10 @@ public class InMemoryLiveIndex implements LiveIndex {
                     return new Entry(entry.status(), entry.version(), entry.category(), entry.rideId(), update.seq(),
                             now, entry.position(), entry.positionAt(),
                             flags == UpdateResult.IMPLAUSIBLE ? entry.implausible() + 1 : entry.implausible(),
-                            entry.matchable(), null);
+                            entry.matchable(), null, entry.headingDeg(), entry.speedMps());
                 }
                 return new Entry(entry.status(), entry.version(), entry.category(), entry.rideId(), update.seq(), now,
-                        update.position(), now, 0, entry.status() == Status.AVAILABLE, null);
+                        update.position(), now, 0, entry.status() == Status.AVAILABLE, null, update.headingDeg(), update.speedMps());
             }
             return entry;
         });
@@ -98,7 +98,7 @@ public class InMemoryLiveIndex implements LiveIndex {
                 .sorted(Comparator.comparingDouble(Found::metres).thenComparing(Found::driverId))
                 .limit(k)
                 .map(found -> new Candidate(found.driverId(), found.entry().position(),
-                        (int) Math.round(found.metres()), found.entry().seenAt()))
+                    (int) Math.round(found.metres()), found.entry().seenAt(), found.entry().headingDeg(), found.entry().speedMps()))
                 .toList();
     }
 
@@ -124,13 +124,13 @@ public class InMemoryLiveIndex implements LiveIndex {
             if (state.status() == Status.OFFLINE) {
                 // The tombstone keeps only the version, so a restarted app's sequence numbers count again.
                 return new Entry(Status.OFFLINE, state.version(), null, null, null, null, null, null, 0, false,
-                        now.plus(tombstoneTtl));
+                    now.plus(tombstoneTtl), null, null);
             }
             // A tombstone has no position or sequence to keep.
             Entry kept = entry != null ? entry : Entry.EMPTY;
             return new Entry(state.status(), state.version(), state.category(), state.rideId(), kept.seq(),
                     kept.seenAt(), kept.position(), kept.positionAt(), kept.implausible(),
-                    state.status() == Status.AVAILABLE && kept.position() != null, null);
+                    state.status() == Status.AVAILABLE && kept.position() != null, null, kept.headingDeg(), kept.speedMps());
         });
         return applied[0];
     }
@@ -151,7 +151,7 @@ public class InMemoryLiveIndex implements LiveIndex {
                 swept.add(id);
                 return new Entry(entry.status(), entry.version(), entry.category(), entry.rideId(), entry.seq(),
                         entry.seenAt(), entry.position(), entry.positionAt(), entry.implausible(), false,
-                        entry.expiresAt());
+                        entry.expiresAt(), entry.headingDeg(), entry.speedMps());
             });
         }
         return swept;
@@ -234,9 +234,10 @@ public class InMemoryLiveIndex implements LiveIndex {
      * set, so only {@code AVAILABLE} entries have it; {@code expiresAt} is set on tombstones only.
      */
     private record Entry(Status status, long version, String category, UUID rideId, Long seq, Instant seenAt,
-            GeoPoint position, Instant positionAt, int implausible, boolean matchable, Instant expiresAt) {
+            GeoPoint position, Instant positionAt, int implausible, boolean matchable, Instant expiresAt,
+            Double headingDeg, Double speedMps) {
 
-        static final Entry EMPTY = new Entry(Status.OFFLINE, 0, null, null, null, null, null, null, 0, false, null);
+        static final Entry EMPTY = new Entry(Status.OFFLINE, 0, null, null, null, null, null, null, 0, false, null, null, null);
 
         boolean matchableIn(String wanted, Instant oldest) {
             return matchable && wanted.equals(category) && !seenAt.isBefore(oldest);

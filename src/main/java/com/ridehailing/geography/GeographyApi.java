@@ -29,7 +29,12 @@ public interface GeographyApi {
     }
 
     record CategorySettings(boolean active, int offerTtlS, int searchTimeoutS, int radiusStartM, int radiusStepM,
-            int radiusMaxM, String ranker) {
+            int radiusMaxM, String ranker, RankingWeights rankingWeights) {
+
+        public CategorySettings(boolean active, int offerTtlS, int searchTimeoutS, int radiusStartM, int radiusStepM,
+                int radiusMaxM, String ranker) {
+            this(active, offerTtlS, searchTimeoutS, radiusStartM, radiusStepM, radiusMaxM, ranker, RankingWeights.DEFAULT);
+        }
     }
 
     /** {@code zoneId} is {@code area:<code>} inside a special area, otherwise the point's H3 resolution-7 cell. */
