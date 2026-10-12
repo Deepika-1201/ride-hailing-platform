@@ -62,6 +62,7 @@ if [[ ${1:-} == --help ]]; then
     'Runs 2,000 drivers with five minutes of ramp-up and thirty further minutes of demand.' \
     'API_URL, MANAGEMENT_URL, OSRM_URL and WS_URL override local defaults.' \
     'SCENARIO selects a rehearsal scenario; SAMPLE_INTERVAL defaults to 15 seconds.' \
+    'Three consecutive failed metrics scrapes stop the load and preserve the failed capture.' \
     '--check-samples output-directory validates existing metrics without running load.' \
     'Rechecks use the recorded sampling interval when present.' \
     'macOS runs require AC power and an open lid.' \
@@ -107,37 +108,82 @@ curl --fail --silent --show-error --max-time 10 \
 
 cd "$ROOT/simulator"
 go build -o "$OUTPUT/sim" ./cmd/sim
-docker stats --format '{{json .}}' > "$OUTPUT/container-stats.jsonl" &
-STATS_PID=$!
+
+SIM_PID= METRICS_PID= STATS_PID= LOG_PID= AWAKE_PID=
+interrupted=0
+cleanup() {
+  local child
+  for child in "$METRICS_PID" "$STATS_PID" "$SIM_PID" "$LOG_PID" "$AWAKE_PID"; do
+    if [[ -n "$child" ]]; then kill "$child" 2>/dev/null || true; fi
+  done
+  wait 2>/dev/null || true
+  rm -f "$OUTPUT/.run-output.pipe"
+}
+interrupt() {
+  interrupted=1
+  if [[ -n "$SIM_PID" ]]; then kill -TERM "$SIM_PID" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap interrupt INT TERM
+
+collect_stats() {
+  while true; do
+    docker stats --no-stream --format '{{json .}}' </dev/null \
+      >> "$OUTPUT/container-stats.jsonl" 2>> "$OUTPUT/container-stats-errors.txt" || true
+    sleep "$SAMPLE_INTERVAL"
+  done
+}
 
 collect_metrics() {
+  local consecutive_failures=0 sample
   while true; do
     sample=$(date -u +%Y%m%dT%H%M%SZ)
     if curl --fail --silent --show-error --max-time 10 "$MANAGEMENT_URL/actuator/prometheus" \
         > "$OUTPUT/metrics/$sample.prom.part"; then
       mv "$OUTPUT/metrics/$sample.prom.part" "$OUTPUT/metrics/$sample.prom"
+      consecutive_failures=0
     else
       rm -f "$OUTPUT/metrics/$sample.prom.part"
       printf '%s\n' "$sample" >> "$OUTPUT/metrics-failures.txt"
+      consecutive_failures=$((consecutive_failures + 1))
+      if [[ "$consecutive_failures" -ge 3 ]]; then
+        printf '%s\n' 'Stopped after three consecutive failed metrics scrapes.' | tee "$OUTPUT/stop-reason.txt" >&2
+        kill -TERM "$SIM_PID" 2>/dev/null || true
+        return
+      fi
     fi
     sleep "$SAMPLE_INTERVAL"
   done
 }
+
+mkfifo "$OUTPUT/.run-output.pipe"
+tee "$OUTPUT/run.log" < "$OUTPUT/.run-output.pipe" &
+LOG_PID=$!
+"$OUTPUT/sim" run -api "$API_URL" -ws "$WS_URL" -osrm "$OSRM_URL" \
+  -scenario "$SCENARIO" -tokens "$OUTPUT/tokens.json" \
+  -report "$OUTPUT/report.json" > "$OUTPUT/.run-output.pipe" 2>&1 &
+SIM_PID=$!
+if command -v caffeinate >/dev/null; then
+  caffeinate -dims -w "$SIM_PID" &
+  AWAKE_PID=$!
+fi
+collect_stats &
+STATS_PID=$!
 collect_metrics &
 METRICS_PID=$!
-trap 'kill "$STATS_PID" "$METRICS_PID" 2>/dev/null || true' EXIT
-
-SIM=("$OUTPUT/sim")
-if command -v caffeinate >/dev/null; then
-  SIM=(caffeinate -dims "${SIM[@]}")
-fi
 
 set +e
-"${SIM[@]}" run -api "$API_URL" -ws "$WS_URL" -osrm "$OSRM_URL" \
-  -scenario "$SCENARIO" -tokens "$OUTPUT/tokens.json" \
-  -report "$OUTPUT/report.json" 2>&1 | tee "$OUTPUT/run.log"
-run_exit=${PIPESTATUS[0]}
+wait "$SIM_PID"
+run_exit=$?
+if [[ "$interrupted" -eq 1 ]]; then
+  wait "$SIM_PID" 2>/dev/null
+  run_exit=130
+fi
+kill "$METRICS_PID" "$STATS_PID" 2>/dev/null || true
+wait "$METRICS_PID" "$STATS_PID" 2>/dev/null
+wait "$LOG_PID"
 set -e
+SIM_PID= METRICS_PID= STATS_PID= LOG_PID=
 
 curl --fail --silent --show-error --max-time 10 \
   "$MANAGEMENT_URL/actuator/prometheus" > "$OUTPUT/metrics-after.prom" || run_exit=1

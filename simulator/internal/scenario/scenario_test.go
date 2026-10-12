@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,6 +328,104 @@ func TestLaptopCollectorChecksCaptureCompleteness(t *testing.T) {
 			}
 			if got := command.ProcessState.ExitCode(); got != testCase.expectExit {
 				t.Fatalf("exit %d, want %d: %v\n%s", got, testCase.expectExit, runErr, output)
+			}
+		})
+	}
+}
+
+func TestLaptopCollectorStopsLoadWhenMetricsStayUnavailable(t *testing.T) {
+	for _, mode := range []string{"unavailable", "healthy", "intermittent"} {
+		t.Run(mode, func(t *testing.T) {
+			script, err := filepath.Abs("../../../scripts/laptop-tier.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := t.TempDir()
+			bin := filepath.Join(directory, "bin")
+			if err := os.Mkdir(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			executable := func(name, content string) string {
+				t.Helper()
+				path := write(t, bin, name, "#!/usr/bin/env bash\nset -eu\n"+content)
+				if err := os.Chmod(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}
+			executable("pmset", "printf 'Now drawing from AC Power\\n'\n")
+			executable("caffeinate", "exit 0\n")
+			executable("docker", "printf '{}\\n'\n")
+			executable("curl", `case "${!#}" in
+  */actuator/prometheus)
+		attempt=0
+		if [[ -f "$COLLECTOR_TEST_DIR/scraped" ]]; then read -r attempt < "$COLLECTOR_TEST_DIR/scraped"; fi
+		attempt=$((attempt + 1))
+		printf '%s\n' "$attempt" > "$COLLECTOR_TEST_DIR/scraped"
+		if [[ "$COLLECTOR_TEST_MODE" == unavailable && "$attempt" -gt 1 ]]; then exit 22; fi
+		if [[ "$COLLECTOR_TEST_MODE" == intermittent && $((attempt % 3)) -ne 1 ]]; then exit 22; fi
+    printf 'up 1\n'
+    ;;
+  *) printf '{}\n' ;;
+esac
+`)
+			simulator := executable("simulator", `trap 'printf stopped > "$COLLECTOR_TEST_DIR/stopped"; exit 1' TERM
+printf 'simulator started\n'
+for attempt in {1..60}; do sleep 0.1; done
+printf 'simulator ran to completion\n'
+`)
+			executable("go", `if [[ "$1" == version ]]; then printf 'go version test\n'; exit 0; fi
+cp "$COLLECTOR_TEST_SIM" "$3"
+`)
+			output := filepath.Join(directory, "capture")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, "bash", script, output)
+			command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"SAMPLE_INTERVAL=1", "COLLECTOR_TEST_DIR="+directory, "COLLECTOR_TEST_SIM="+simulator, "COLLECTOR_TEST_MODE="+mode)
+			text, runErr := command.CombinedOutput()
+			expectedExit := 1
+			if mode == "healthy" {
+				expectedExit = 0
+			}
+			if ctx.Err() != nil || command.ProcessState == nil || command.ProcessState.ExitCode() != expectedExit {
+				t.Fatalf("collector exit should be %d: %v\n%s", expectedExit, runErr, text)
+			}
+			if mode == "unavailable" {
+				if _, err := os.Stat(filepath.Join(directory, "stopped")); err != nil {
+					t.Fatalf("simulator did not receive termination: %v\n%s", err, text)
+				}
+				reason, err := os.ReadFile(filepath.Join(output, "stop-reason.txt"))
+				if err != nil || !strings.Contains(string(reason), "three consecutive") {
+					t.Fatalf("missing stop reason: %q, %v", reason, err)
+				}
+				if strings.Contains(string(text), "ran to completion") {
+					t.Fatal("collector waited for the full scenario after metrics failed")
+				}
+				failures, err := os.ReadFile(filepath.Join(output, "metrics-failures.txt"))
+				if err != nil || len(strings.Fields(string(failures))) != 3 {
+					t.Fatalf("collector must stop after exactly three failed scrapes: %q, %v", failures, err)
+				}
+			} else {
+				if !strings.Contains(string(text), "ran to completion") {
+					t.Fatalf("collector stopped a recoverable run: %s", text)
+				}
+				if _, err := os.Stat(filepath.Join(output, "stop-reason.txt")); !os.IsNotExist(err) {
+					t.Fatalf("collector reported an unexpected automatic stop: %v", err)
+				}
+				if mode == "intermittent" {
+					failures, err := os.ReadFile(filepath.Join(output, "metrics-failures.txt"))
+					if err != nil || len(strings.Fields(string(failures))) < 3 {
+						t.Fatalf("test did not exercise repeated interrupted failure streaks: %q, %v", failures, err)
+					}
+				}
+			}
+			if _, err := os.Stat(filepath.Join(output, ".run-output.pipe")); !os.IsNotExist(err) {
+				t.Fatalf("temporary log pipe was not removed: %v", err)
+			}
+			exit, err := os.ReadFile(filepath.Join(output, "exit-code.txt"))
+			if err != nil || strings.TrimSpace(string(exit)) != strconv.Itoa(expectedExit) {
+				t.Fatalf("failed run exit code not saved: %q, %v", exit, err)
 			}
 		})
 	}

@@ -201,6 +201,7 @@ the web app includes the required sprite and IBM Plex font notices in its static
 | [Low-level design](docs/low-level-design.md) | Code layout, module APIs, database schema, lock order, transaction steps, Valkey scripts, payments, security, realtime protocol, tests |
 | [OpenAPI](docs/openapi.yaml) and [schemas](docs/schemas/) | The REST contract; JSON Schemas for domain events, location stream records and WebSocket messages |
 | [Implementation plan](docs/implementation-plan.md) | Phases from V1 to V8, tests per phase, exit criteria |
+| [Capacity report](docs/capacity-report.md) | Laptop measurement setup, interrupted attempt, collector safeguards and remaining certification evidence |
 | [Architecture review](docs/architecture-review.md) | Findings before implementation, single points of failure, bottlenecks, threats |
 | [Decision records](docs/decisions/README.md) | One ADR per significant architecture decision |
 | [Design spikes](spikes/README.md) | Throwaway benchmarks behind the ADRs: live location index, database timers, WebSocket cost |
