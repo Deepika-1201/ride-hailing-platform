@@ -727,7 +727,7 @@ CREATE TABLE pricing.quotes (
   pickup_zone       text NOT NULL,
   distance_m        int NOT NULL CHECK (distance_m >= 0),
   duration_s        int NOT NULL CHECK (duration_s >= 0),
-  route_source      text NOT NULL CHECK (route_source IN ('MOCK','OSRM','MOCK_FALLBACK')),
+  route_source      text NOT NULL CHECK (route_source IN ('MOCK','OSRM','OSRM_ADJUSTED','MOCK_FALLBACK')),
   fare_rule_id      uuid NOT NULL,
   fee_rule_id       uuid NOT NULL,
   surge_multiplier  numeric(3,2) NOT NULL,
@@ -3110,7 +3110,8 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
   - Route and table adapters are opt-in. `ride.routing.osrm.enabled=false` preserves mock routing; enabling it requires explicit `ride.routing.osrm.cities`. The origin's service-area city selects road routes. Matrix requests carry the trusted search-task city explicitly, avoiding a lookup for every driver. Other cities have no road matrix and ETA ranking uses distance fallback.
   - The adapter uses longitude/latitude coordinates, no geometry or steps, a 64KiB response cap and a deadline covering the complete HTTP response. Distance and duration round to the nearest metre and second. Redirects are not followed. An explicit OSRM `NoRoute` remains no route; service errors and malformed responses return the mock answer with stored source `MOCK_FALLBACK` (ADR-013).
   - Successful road results are cached in Valkey by ordered H3 resolution-9 cell pairs and endpoint for 10 min. Each cache read/write has a 20ms default budget **(assumed)**. Invalid entries and cache failures do not block routing; fallback and no-route results are never cached. Without Valkey, the same provider works uncached. The cell-pair approximation is intentional; map changes at the same endpoint require expiry or cache invalidation.
-  - Current OSRM durations use its static car profile. Time-of-day factors per zone are still planned **(assumed)** because OSRM has no live traffic; they must be applied outside the raw-route cache when implemented.
+  - Optional `ride.routing.traffic` windows apply time-of-day factors after the raw route cache ([ADR-031](decisions/ADR-031-time-of-day-routing-factors.md)). Enabled cities must also enable OSRM; at most 100 cities and 100 windows per city are accepted. Zones are `*`, H3 resolution-7 cells or active special-area codes. Factors use the origin city's local time, inclusive starts, exclusive ends and the starting weekday for midnight-wrapping windows. The highest matching multiplier in 1.00..3.00 wins **(assumed bound)**; there is no live traffic feed.
+  - Distances and mock/fallback times are unchanged. Route seconds round half-up after multiplication and quotes record `OSRM_ADJUSTED`; cache entries remain raw `OSRM`. Matrix factors use one batched city-scoped lookup for origin zones, apply independently to each row, preserve fractional/unreachable cells, and leave out-of-city origins at 1. ETA and weighted decision candidates retain `traffic_multiplier`. Departure-time inputs can change between retries even while ranking strategy/weights stay captured. Overflow returns the complete raw result, never partial adjustment, and records an `overflow` outcome in `routing_traffic_total{kind,outcome}`. Zone lookup latency remains outside the provider HTTP budget and awaits measurement.
   - Provider and cache outcome counters are registered at startup and exposed in Prometheus. Tests cover HTTP contracts and deadlines, per-city selection, cache failures, actual Valkey TTL/expiry, quote fare inputs, stored provenance and no-route refusals.
   - Table requests cap combined source/destination coordinates at 100, use one `/table` request with directed source and destination indexes, and retain fractional duration seconds. A null cell is unreachable; a missing matrix is unavailable. Wrong dimensions, invalid measurements, service errors and timeouts return unavailable rather than fabricating a matrix. Matrices are uncached and share the complete-response deadline and size cap. `routing_matrix_requests_total{provider,outcome}` records table outcomes.
 - **Rankers:**
@@ -3169,6 +3170,8 @@ Properties are typed and validated at startup. Business settings normally live i
 | `ride.pricing.computed-surge.enabled` | `false` | Select fresh computed prices; run their poller on dispatch-role processes |
 | `ride.pricing.computed-surge.cities.<city>` | empty | Explicit list of `ratio-from`/`multiplier` steps; 1..100 valid cities required when enabled |
 | `ride.pricing.computed-surge.max-drivers` | `5000` | Positioned online population limit for complete supply reads, 1..10000 |
+| `ride.routing.traffic.enabled` | `false` | Apply configured local-time factors to successful OSRM results after the raw cache |
+| `ride.routing.traffic.cities.<city>` | empty | Windows with `zone-id`, `days-of-week`, `start-local`, `end-local` and `multiplier`; enabled cities must also enable OSRM |
 | `ride.location.store` | `memory`; `valkey` in Compose (phase 13) | Live index, rate limiter, WebSocket tickets and (phase 14) push bus implementation |
 | `ride.location.freshness` | `30s` | Candidates must have been heard from within this |
 | `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |

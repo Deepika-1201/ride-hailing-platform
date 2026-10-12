@@ -73,15 +73,8 @@ class GeographyService implements GeographyApi {
 
     @Override
     public Map<String, ZoneCount> countByZone(String cityId, List<GeoPoint> points) {
-        List<GeoPoint> snapshot = List.copyOf(points);
-        if (snapshot.size() > 10_000) {
-            throw new IllegalArgumentException("Zone counting accepts at most 10000 points");
-        }
         Map<String, Long> counts = new HashMap<>();
-        spatial.containingIn(cityId, snapshot).forEach(found -> {
-            String zone = found.specialArea() == null ? zones.cellOf(snapshot.get(found.index())) : AREA_PREFIX + found.specialArea();
-            counts.merge(zone, 1L, Long::sum);
-        });
+        zonesOf(cityId, points).values().forEach(zone -> counts.merge(zone, 1L, Long::sum));
         Map<String, ZoneCount> result = new HashMap<>();
         counts.forEach((zone, count) -> {
             ZoneCount current = result.getOrDefault(zone, new ZoneCount(0, 0));
@@ -92,6 +85,20 @@ class GeographyService implements GeographyApi {
                     result.put(neighbor, new ZoneCount(nearby.local(), nearby.neighboring() + count));
                 });
             }
+        });
+        return Map.copyOf(result);
+    }
+
+    @Override
+    public Map<Integer, String> zonesOf(String cityId, List<GeoPoint> points) {
+        List<GeoPoint> snapshot = List.copyOf(points);
+        if (snapshot.size() > 10_000) {
+            throw new IllegalArgumentException("Zone lookup accepts at most 10000 points");
+        }
+        Map<Integer, String> result = new HashMap<>();
+        spatial.containingIn(cityId, snapshot).forEach(found -> {
+            String zone = found.specialArea() == null ? zones.cellOf(snapshot.get(found.index())) : AREA_PREFIX + found.specialArea();
+            result.put(found.index(), zone);
         });
         return Map.copyOf(result);
     }

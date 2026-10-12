@@ -28,7 +28,7 @@ class OsrmConfiguration {
     @Bean
     RoutingProvider osrmRoutingProvider(GeographyApi geography, OsrmProperties properties,
             @Qualifier("osrmHttpClient") HttpClient http, JsonMapper json, ObjectProvider<Valkey> valkey,
-            H3Zones zones, MeterRegistry metrics) {
+            H3Zones zones, MeterRegistry metrics, TrafficAdjustments traffic) {
         MockRoutingProvider mock = new MockRoutingProvider();
         OsrmRoutingProvider osrm = new OsrmRoutingProvider(properties.baseUrl(), properties.timeout(), http, json, mock, metrics);
         CachedRoutingProvider cached = new CachedRoutingProvider(osrm, valkey.getIfAvailable(), json, zones, properties.baseUrl(),
@@ -37,13 +37,15 @@ class OsrmConfiguration {
             @Override
             public Optional<Route> route(GeoPoint from, GeoPoint to, ZonedDateTime departure) {
                 return geography.locate(from).filter(location -> properties.cities().contains(location.cityId()))
-                        .map(location -> cached.route(from, to, departure)).orElseGet(() -> mock.route(from, to, departure));
+                    .map(location -> cached.route(from, to, departure).map(route -> traffic.route(route, location, departure)))
+                    .orElseGet(() -> mock.route(from, to, departure));
             }
 
             @Override
             public Optional<DurationMatrix> matrix(String cityId, List<GeoPoint> origins, List<GeoPoint> destinations,
                     ZonedDateTime departure) {
-                return properties.cities().contains(cityId) ? osrm.matrix(cityId, origins, destinations, departure) : Optional.empty();
+                return properties.cities().contains(cityId) ? osrm.matrix(cityId, origins, destinations, departure)
+                    .map(matrix -> traffic.matrix(cityId, origins, matrix, departure)) : Optional.empty();
             }
         };
     }

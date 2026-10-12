@@ -17,10 +17,19 @@ public interface RoutingProvider {
         return Optional.empty();
     }
 
-    record DurationMatrix(List<List<OptionalDouble>> durationsS) {
+    record DurationMatrix(List<List<OptionalDouble>> durationsS, List<Double> trafficFactors) {
+
+        public DurationMatrix(List<List<OptionalDouble>> durationsS) {
+            this(durationsS, List.of());
+        }
 
         public DurationMatrix {
             durationsS = durationsS.stream().map(List::copyOf).toList();
+            trafficFactors = List.copyOf(trafficFactors);
+            if (!trafficFactors.isEmpty() && (trafficFactors.size() != durationsS.size()
+                    || trafficFactors.stream().anyMatch(factor -> !Double.isFinite(factor) || factor < 1 || factor > 3))) {
+                throw new IllegalArgumentException("Traffic factors must contain one finite multiplier in 1..3 per matrix origin");
+            }
             int columns = durationsS.isEmpty() ? 0 : durationsS.getFirst().size();
             if (columns == 0 || durationsS.stream().anyMatch(row -> row.size() != columns
                         || row.stream().anyMatch(value -> value.isPresent()
@@ -36,6 +45,7 @@ public interface RoutingProvider {
         public enum Source {
             MOCK,
             OSRM,
+            OSRM_ADJUSTED,
             MOCK_FALLBACK
         }
     }

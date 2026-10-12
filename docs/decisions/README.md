@@ -34,5 +34,6 @@ Format: Context → Problem → Options considered → Decision → Trade-offs �
 | [ADR-028](ADR-028-city-owned-database-work.md) | Per-city PostgreSQL ownership with captured fencing tokens and guarded database commits | Accepted |
 | [ADR-029](ADR-029-computed-surge.md) | Bounded surge measurements, fenced publication, durable damping and rule fallback | Accepted |
 | [ADR-030](ADR-030-stable-ranking-experiments.md) | Stable percentage assignments with versioned configuration and persisted search-policy snapshots | Accepted |
+| [ADR-031](ADR-031-time-of-day-routing-factors.md) | Opt-in local-time routing factors outside the raw cache, with per-origin matrix provenance | Accepted |
 
 Amendments are dated sections at the end of an ADR; the original decision text stays as it was.

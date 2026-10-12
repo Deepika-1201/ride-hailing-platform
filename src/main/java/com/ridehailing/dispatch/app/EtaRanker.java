@@ -71,7 +71,8 @@ class EtaRanker implements CandidateRanker {
         for (int index = 0; index < considered.size(); index++) {
             OptionalDouble duration = durations.get(index).getFirst();
             if (duration.isPresent()) {
-                ranked.add(new Ranked(considered.get(index), duration.getAsDouble()));
+                Double factor = matrix.get().trafficFactors().isEmpty() ? null : matrix.get().trafficFactors().get(index);
+                ranked.add(new Ranked(considered.get(index), duration.getAsDouble(), null, factor));
             }
         }
         ranked.sort(Comparator.comparingDouble(Ranked::score).thenComparing(Ranked::candidate, NearestDriverRanker.ORDER));

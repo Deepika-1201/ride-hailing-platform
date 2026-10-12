@@ -51,7 +51,7 @@ class WeightedScoreRanker implements CandidateRanker {
             WeightedScoring.Score score = WeightedScoring.score(context.rankingWeights(), entry.score(), observed.accepted(),
                     observed.declined(), observed.expired(), observed.idleMinutes(), candidate.position(), context.pickup(),
                     candidate.headingDeg(), candidate.speedMps());
-            return new Ranked(candidate, score.total(), score);
+            return new Ranked(candidate, score.total(), score, entry.trafficMultiplier());
         }).sorted(Comparator.comparingDouble(Ranked::score).thenComparing(Ranked::candidate, NearestDriverRanker.ORDER)).toList();
         if (!candidates.isEmpty()) {
             successful.increment();

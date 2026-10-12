@@ -147,6 +147,8 @@ class ZoneResolutionTests extends IntegrationTest {
         void emptyAndOversizedZoneBatchesAreExplicit() {
         TestCity city = cities.create();
         assertThat(geography.countByZone(city.id(), List.of())).isEmpty();
+            assertThat(geography.zonesOf(city.id(), List.of(city.at(-0.05, 0.2), city.at(0.2, 0.2), city.at(0.2, 0.2))))
+                .containsOnlyKeys(1, 2).containsEntry(1, cellOf(city.at(0.2, 0.2))).containsEntry(2, cellOf(city.at(0.2, 0.2)));
         assertThatThrownBy(() -> geography.countByZone(city.id(), Collections.nCopies(10_001, city.at(0.2, 0.2))))
             .isInstanceOf(IllegalArgumentException.class);
         }

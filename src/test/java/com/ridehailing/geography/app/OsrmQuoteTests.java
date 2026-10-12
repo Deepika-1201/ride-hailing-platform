@@ -12,6 +12,7 @@ import com.ridehailing.dispatch.DispatchApi;
 import com.ridehailing.dispatch.db.DriverStatsRepository;
 import com.ridehailing.geography.GeographyApi;
 import com.ridehailing.geography.RankingWeights;
+import com.ridehailing.geography.RoutingProvider;
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.geography.app.CityAdministration.NewCity;
 import com.ridehailing.geography.db.CategoryRepository.Settings;
@@ -38,6 +39,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -70,6 +74,10 @@ import tools.jackson.databind.json.JsonMapper;
 class OsrmQuoteTests extends ValkeyIntegrationTest {
 
     private static final String CITY = TestCities.newId();
+    private static final String TRAFFIC_CITY = TestCities.newId();
+    private static final ZoneId TRAFFIC_ZONE = ZoneId.of("Asia/Kolkata");
+    private static final LocalTime TRAFFIC_START = LocalTime.now(TRAFFIC_ZONE).minusMinutes(20);
+    private static final LocalTime TRAFFIC_END = LocalTime.now(TRAFFIC_ZONE).plusMinutes(20);
     private static final Caller ADMIN = new Caller(Ids.newId(), Set.of(UserRole.ADMIN));
     private static final GeoPoint PICKUP = new GeoPoint(12.95, 77.5);
     private static final GeoPoint DROPOFF = new GeoPoint(13.0, 77.65);
@@ -127,6 +135,11 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
     @Autowired
     DriverStatsRepository driverStats;
 
+    @Autowired
+    RoutingProvider routingProvider;
+
+    private static TestCities.TestCity trafficCity;
+
     private String rider;
     private final List<TestDriver> testDrivers = new ArrayList<>();
     private RideView booked;
@@ -135,7 +148,18 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
     @DynamicPropertySource
     static void routing(DynamicPropertyRegistry registry) {
         registry.add("ride.routing.osrm.base-url", () -> BASE_URL);
-        registry.add("ride.routing.osrm.cities", () -> CITY);
+        registry.add("ride.routing.osrm.cities", () -> CITY + "," + TRAFFIC_CITY);
+        registry.add("ride.routing.traffic.enabled", () -> true);
+        for (int window = 0; window < 2; window++) {
+            String prefix = "ride.routing.traffic.cities." + TRAFFIC_CITY + "[" + window + "].";
+            String zone = window == 0 ? "*" : "area:PEAK";
+            String multiplier = window == 0 ? "1.50" : "2.00";
+            registry.add(prefix + "zone-id", () -> zone);
+            registry.add(prefix + "multiplier", () -> multiplier);
+            registry.add(prefix + "days-of-week", () -> "1,2,3,4,5,6,7");
+            registry.add(prefix + "start-local", TRAFFIC_START::toString);
+            registry.add(prefix + "end-local", TRAFFIC_END::toString);
+        }
     }
 
     @BeforeEach
@@ -146,6 +170,11 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
             categories.put(ADMIN, new Settings(CITY, "MINI", true, 15, 180, 2000, 1000, 6000, "nearest", 0), null);
         }
         prices.price(CITY, "MINI");
+        if (geography.city(TRAFFIC_CITY).isEmpty()) {
+            trafficCity = otherCities.createWithId(TRAFFIC_CITY, "MINI");
+            otherCities.addSpecialArea(trafficCity, "PEAK", 10, 0.1995, 0.2005, 0.001);
+        }
+        prices.price(TRAFFIC_CITY, "MINI");
         jdbc.sql("""
             UPDATE geography.city_categories SET ranker = 'nearest', ranking_eta_weight = 1,
                 ranking_acceptance_weight = 60, ranking_idle_weight = 2, ranking_heading_weight = 30
@@ -154,6 +183,7 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
             .param("city", CITY).update();
         rider = users.create(UserRole.RIDER).authorization();
         valkey.await("test-route-clear", WAIT, valkey.commands().del(key()));
+        valkey.await("test-traffic-clear", WAIT, valkey.commands().del(key(trafficCity.at(0.2, 0.2), trafficCity.at(0.3, 0.3))));
         CALLS.set(0);
         STATUS.set(200);
         BODY.set("{\"code\":\"Ok\",\"routes\":[{\"distance\":6656.6,\"duration\":688.3}]}");
@@ -468,6 +498,56 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
         assertThat(driverStats.rankingInputs(CITY, List.of(drivers.getFirst().id())).get(drivers.getFirst().id()).idleMinutes()).isBetween(0.0, 0.1);
     }
 
+    @Test
+    void trafficChangesQuotedTimeButCachedRoadDataRemainsReusableOutsideTheWindow() {
+        GeoPoint pickup = trafficCity.at(0.2, 0.2);
+        GeoPoint dropoff = trafficCity.at(0.3, 0.3);
+        JsonNode adjusted = assertAnswered("POST", "/v1/quotes", quote(pickup, dropoff), 201);
+        assertThat(adjusted.get("duration_s").asInt()).isEqualTo(1032);
+        assertThat(adjusted.get("distance_m").asInt()).isEqualTo(6657);
+        assertThat(source(adjusted)).isEqualTo("OSRM_ADJUSTED");
+        String cached = valkey.await("test-traffic-cache", WAIT, valkey.commands().get(key(pickup, dropoff)));
+        assertThat(json.readTree(cached).get("duration_s").asInt()).isEqualTo(688);
+        assertThat(json.readTree(cached).get("source").asString()).isEqualTo("OSRM");
+        var offPeak = routingProvider.route(pickup, dropoff, ZonedDateTime.now(TRAFFIC_ZONE).plusHours(2)).orElseThrow();
+        assertThat(offPeak.durationS()).isEqualTo(688);
+        assertThat(offPeak.source()).isEqualTo(RoutingProvider.Route.Source.OSRM);
+        assertThat(CALLS).hasValue(1);
+
+        valkey.await("test-traffic-clear", WAIT, valkey.commands().del(key(pickup, dropoff)));
+        STATUS.set(503);
+        JsonNode fallback = assertAnswered("POST", "/v1/quotes", quote(pickup, dropoff), 201);
+        assertThat(source(fallback)).isEqualTo("MOCK_FALLBACK");
+        assertThat(valkey.await("test-traffic-empty", WAIT, valkey.commands().get(key(pickup, dropoff)))).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"eta", "weighted"})
+    void trafficAdjustedRankingRecordsFactorsAgainstTheCorrectOrigins(String strategy) {
+        jdbc.sql("""
+                UPDATE geography.city_categories SET ranker = :strategy, ranking_eta_weight = 1,
+                    ranking_acceptance_weight = 0, ranking_idle_weight = 0, ranking_heading_weight = 0
+                WHERE city_id = :city AND category = 'MINI'
+                """).param("strategy", strategy).param("city", TRAFFIC_CITY).update();
+        TestDriver near = rides.onlineAt(trafficCity, "MINI", trafficCity.at(0.2, 0.201));
+        TestDriver far = rides.onlineAt(trafficCity, "MINI", trafficCity.at(0.2, 0.202));
+        testDrivers.addAll(List.of(near, far));
+        TABLE_BODY.set("{\"code\":\"Ok\",\"durations\":[[20],[25]]}");
+        bookingRider = rides.rider("Traffic rider");
+        booked = rides.book(bookingRider.id(), trafficCity, trafficCity.at(0.2, 0.2), "MINI");
+        rides.onlyDueIn(TRAFFIC_CITY);
+        assertThat(TestRides.asDispatch(() -> rides.searchTaskPoller().poll())).isTrue();
+
+        assertThat(offeredDriver()).isEqualTo(far.id());
+        JsonNode candidates = decision().get("detail").get("candidates");
+        assertThat(candidates.get(0).get("driver_id").asString()).isEqualTo(far.id().toString());
+        assertThat(candidates.get(0).get("traffic_multiplier").asDouble()).isEqualTo(1.5);
+        assertThat(candidates.get(0).get("score").asDouble()).isEqualTo(37.5);
+        assertThat(candidates.get(1).get("driver_id").asString()).isEqualTo(near.id().toString());
+        assertThat(candidates.get(1).get("traffic_multiplier").asDouble()).isEqualTo(2);
+        assertThat(candidates.get(1).get("score").asDouble()).isEqualTo(40);
+    }
+
     private void outcomes(TestDriver driver, int accepted, int declined, int expired) {
         jdbc.sql("""
                 INSERT INTO dispatch.driver_stats (driver_id, offers, accepted, declined, expired, updated_at)
@@ -524,8 +604,12 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
     }
 
     private String key() {
+        return key(PICKUP, DROPOFF);
+    }
+
+    private String key(GeoPoint from, GeoPoint to) {
         return "routing:osrm:v1:" + Base64.getUrlEncoder().withoutPadding().encodeToString(BASE_URL.getBytes(StandardCharsets.UTF_8))
-                + ":{" + zones.routingCellOf(PICKUP) + "}:" + zones.routingCellOf(DROPOFF);
+                + ":{" + zones.routingCellOf(from) + "}:" + zones.routingCellOf(to);
     }
 
     private static HttpServer startServer() {

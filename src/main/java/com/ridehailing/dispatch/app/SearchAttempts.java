@@ -184,7 +184,7 @@ class SearchAttempts {
         Instant now = clock.instant();
         List<CandidateDetail> candidates = ranking.candidates().stream().map(entry -> new CandidateDetail(
                 entry.candidate().driverId(), entry.candidate().distanceM(),
-                Duration.between(entry.candidate().lastSeen(), now).toSeconds(), entry.score(), entry.weightedScore())).toList();
+            Duration.between(entry.candidate().lastSeen(), now).toSeconds(), entry.score(), entry.weightedScore(), entry.trafficMultiplier())).toList();
         String detail = json.writeValueAsString(new Detail(candidates, Map.of("already_offered", alreadyOffered,
             "unreachable", ranking.unreachable(), "outside_ranker_limit", ranking.outsideLimit()),
             tries, Double.isNaN(indexMs) ? null : indexMs, ranking.scoreUnit(), ranking.fallbackReason(), assignment));
@@ -198,7 +198,8 @@ class SearchAttempts {
             String scoreUnit, String rankingFallback, RankerAssignment rankingAssignment) {
     }
 
-    record CandidateDetail(UUID driverId, int distanceM, long seenAgoS, double score, WeightedScoring.Score weightedScore) {
+        record CandidateDetail(UUID driverId, int distanceM, long seenAgoS, double score, WeightedScoring.Score weightedScore,
+            Double trafficMultiplier) {
     }
 
     record Try(UUID driverId, String result) {

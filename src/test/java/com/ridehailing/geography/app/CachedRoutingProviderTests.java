@@ -87,6 +87,7 @@ class CachedRoutingProviderTests {
 
     @ParameterizedTest
     @ValueSource(strings = {"{", "null", "{}", "{\"distanceM\":1,\"durationS\":1,\"source\":\"MOCK_FALLBACK\"}",
+        "{\"distanceM\":1,\"durationS\":1,\"source\":\"OSRM_ADJUSTED\"}",
         "{\"distanceM\":-1,\"durationS\":1,\"source\":\"OSRM\"}", "{\"source\":\"OSRM\"}",
         "{\"distanceM\":null,\"durationS\":1,\"source\":\"OSRM\"}",
         "{\"distanceM\":1.5,\"durationS\":1,\"source\":\"OSRM\"}",

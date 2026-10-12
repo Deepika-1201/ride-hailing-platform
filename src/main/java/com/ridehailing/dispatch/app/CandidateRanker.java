@@ -30,10 +30,14 @@ interface CandidateRanker {
     }
 
     /** Lower scores rank first. */
-    record Ranked(Candidate candidate, double score, WeightedScoring.Score weightedScore) {
+    record Ranked(Candidate candidate, double score, WeightedScoring.Score weightedScore, Double trafficMultiplier) {
 
         Ranked(Candidate candidate, double score) {
-            this(candidate, score, null);
+            this(candidate, score, null, null);
+        }
+
+        Ranked(Candidate candidate, double score, WeightedScoring.Score weightedScore) {
+            this(candidate, score, weightedScore, null);
         }
     }
 }

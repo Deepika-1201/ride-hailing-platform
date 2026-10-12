@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking, stable percentage experiments, fenced city ownership, and database-backed computed surge without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-030.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing and time-of-day factors, ETA and weighted ranking, stable percentage experiments, fenced city ownership, and database-backed computed surge without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-031.
 
 ## Quick start
 
@@ -136,7 +136,7 @@ Metrics include `dead_letters_pending`, `dead_letters_redriven_total`, `event_re
 
 The default routing provider remains the deterministic mock. Phase 18 preparation can use self-hosted OSRM for
 explicitly selected origin cities, with road distances and durations flowing into quotes and tracking ETAs.
-Traffic adjustment and computed surge are not enabled, and this is not a capacity result. ETA-ranked dispatch is
+Traffic adjustment and computed surge remain disabled by default, and this is not a capacity result. ETA-ranked dispatch is
 available separately through the category's ranker setting; the seeded/default setting stays `nearest`.
 
 ```bash
@@ -164,6 +164,41 @@ provider outcomes and cache behavior on the management endpoint.
 The settings are `ride.routing.osrm.enabled`, `base-url`, `cities`, `timeout`, `cache-ttl` and `cache-timeout`.
 See [ADR-013](docs/decisions/ADR-013-routing-provider.md) for the decision and limits. Phase 16 measurements
 must keep this opt-in disabled so they retain the declared V2 baseline.
+
+### Time-of-day factors
+
+Optional factors model expected slow periods, not live traffic. Enable OSRM for the same cities, then configure
+explicit windows consistently across roles that calculate routes. The following is an illustrative assumption,
+not a tuned Bengaluru profile:
+
+```yaml
+ride:
+  routing:
+    osrm:
+      enabled: true
+      cities: [blr]
+    traffic:
+      enabled: true
+      cities:
+        blr:
+          - zone-id: "*"
+            days-of-week: [1, 2, 3, 4, 5]
+            start-local: "17:00"
+            end-local: "20:00"
+            multiplier: 1.50
+```
+
+`zone-id` accepts `*`, an H3 resolution-7 cell or `area:<code>`. Only active special areas match. Windows use the
+origin city's local time; starts are inclusive, ends exclusive, and midnight windows belong to the starting day.
+The highest matching factor wins, within 1.00..3.00. Factors apply to duration only, not distance or mock fallback.
+
+The ten-minute cache always holds raw OSRM data. Each request applies its current factor after reading the cache.
+Quotes record `OSRM_ADJUSTED`; matrix rows use their own origin's factor and retain fractional seconds and
+unreachable cells. ETA and weighted decision candidates include `traffic_multiplier` when the matrix is adjusted.
+Overflow preserves the entire raw result and increments `routing_traffic_total{kind,outcome="overflow"}` rather
+than producing invalid or partly adjusted times. Normal outcomes are `adjusted` and `unchanged`.
+
+These static factors still require outcome and latency measurements. See [ADR-031](docs/decisions/ADR-031-time-of-day-routing-factors.md).
 
 ### ETA-ranked dispatch
 
@@ -203,7 +238,7 @@ of idle credit, and neutral heading penalty when usable motion is missing or too
 `weighted_score` records its inputs, effective weights and component costs so the result is explainable without
 adding raw coordinates to the log. `dispatch_ranking_total{strategy="weighted",outcome}` reports weighted
 executions and fallbacks. See [ADR-027](docs/decisions/ADR-027-weighted-dispatch-scoring.md) for the exact rules.
-Outcome comparisons, traffic adjustment and the batch-matching experiment remain pending.
+Outcome comparisons and the batch-matching experiment remain pending.
 
 ### Ranking experiments
 

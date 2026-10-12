@@ -295,7 +295,7 @@ class OsrmRoutingProviderTests {
 
     private ApplicationContextRunner context(GeographyApi geography) {
         return new ApplicationContextRunner()
-                .withUserConfiguration(Properties.class, MockRoutingProvider.class, OsrmConfiguration.class, H3Zones.class)
+            .withUserConfiguration(Properties.class, MockRoutingProvider.class, OsrmConfiguration.class, H3Zones.class, TrafficAdjustments.class)
                 .withBean(JsonMapper.class, () -> json).withBean(MeterRegistry.class, () -> metrics)
                 .withBean(GeographyApi.class, () -> geography)
                 .withPropertyValues("ride.routing.osrm.base-url=" + baseUrl);
@@ -327,7 +327,7 @@ class OsrmRoutingProviderTests {
     }
 
     @TestConfiguration(proxyBeanMethods = false)
-    @EnableConfigurationProperties(OsrmProperties.class)
+    @EnableConfigurationProperties({OsrmProperties.class, TrafficProperties.class})
     static class Properties {
     }
 }

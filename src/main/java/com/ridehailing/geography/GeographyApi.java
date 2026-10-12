@@ -30,6 +30,8 @@ public interface GeographyApi {
     /** Counts up to 10000 points inside this city's service area; special areas have no implicit neighbor ring. */
     Map<String, ZoneCount> countByZone(String cityId, List<GeoPoint> points);
 
+    Map<Integer, String> zonesOf(String cityId, List<GeoPoint> points);
+
     record ZoneCount(long local, long neighboring) {
     }
 
