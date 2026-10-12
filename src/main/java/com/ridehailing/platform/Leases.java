@@ -17,4 +17,7 @@ public interface Leases {
 
     /** Frees the lease, if {@code holder} still has it with this token. */
     void release(String name, String holder, long token);
+
+    /** Runs database-only work in its own fenced transaction; returns false when the lease is no longer held. */
+    boolean runIfHeld(String name, String holder, long token, Runnable work);
 }

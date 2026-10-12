@@ -3117,6 +3117,10 @@ The `simulator` Compose profile runs the simulator as a one-off job, and nginx s
   - Heading penalty is `(1 - cos(heading - bearing_to_pickup)) / 2`. Unknown, invalid or slower-than-1m/s motion uses neutral 0.5; a driver within one metre of pickup has zero heading penalty **(assumed rules)**. The decision stores the derived penalty, not a new raw location history. Weighted outcome metrics use strategy `weighted` without also counting an ETA strategy execution.
   - A city can split rides between rankers by percentage; decisions record the ranker.
 - **City ownership:** the lease `city-owner:<city>` (§5.5) picks one `dispatch` node per city for the city's singleton work: computed surge and the batch-matching experiment. Sequential search attempts stay leaderless.
+  - The implemented coordinator is opt-in (`ride.dispatch.city-ownership.enabled=false` by default), dispatch-only, and requires an explicit set of 1..100 valid city IDs. It maintains claims independently of job execution, with a 10s TTL and 3s renewal interval **(assumed initial timing)**. First-acquirer ownership does not balance cities between nodes. It does not yet run the planned surge or batch jobs ([ADR-028](decisions/ADR-028-city-owned-database-work.md)).
+  - `CityOwnership.owned()` supplies cached claims containing city, holder and fencing token. Preparation happens outside a guarded transaction; the caller passes that exact claim to `runIfOwned` for the final database mutations. A local claim is not proof of current ownership.
+  - City-owned database work uses `Leases.runIfHeld`: it owns a transaction, locks the lease row, checks holder/token and `clock_timestamp()` after acquiring that lock, runs the bounded database work, and checks again before committing. Expiry during work rolls the transaction back; exceptions propagate with rollback. The lease row stays locked through commit, preventing a successor from taking ownership before that transaction finishes. This guard is for database mutations, not remote side effects, and must not be called from an existing transaction.
+  - Renewal failures discard the affected claim. Shutdown clears all claims before bounded cleanup (5s total), rejects new work and attempts token-scoped release; failed releases expire. In-flight guarded work rolls back if it observes shutdown. Late acquisitions cannot restore stopped ownership, and restart takes new tokens. `ride.workers.autostart=false` suppresses automatic maintenance. Counters `dispatch_city_ownership_total{outcome}` track acquisition, renewal, loss and errors; `dispatch_city_ownership_held` is a cached-claim gauge.
 - **Computed surge**, every 60 s per city by its owner:
   - demand per zone = rides requested in the last 5 min + 0.2 × quotes in the last 5 min **(assumed)**, from `rides_by_zone` and `quotes_by_zone`;
   - supply per zone = available drivers in the zone, plus half of those in the neighbouring ring, bucketed from the live index;
@@ -3151,6 +3155,10 @@ Properties are typed and validated at startup. Per-city and per-category setting
 | Property | Default | Meaning |
 |---|---|---|
 | `ride.roles` | `api,realtime,dispatch,worker` | Roles of this process (§1.3) |
+| `ride.dispatch.city-ownership.enabled` | `false` | Run the city-lease coordinator on dispatch-role processes (§19.2) |
+| `ride.dispatch.city-ownership.cities` | empty | Explicit city IDs; 1..100 required when enabled |
+| `ride.dispatch.city-ownership.ttl` | `10s` | City lease lifetime, bounded to 100ms..5m |
+| `ride.dispatch.city-ownership.renew-every` | `3s` | Maintenance interval, at least 10ms and strictly less than half the TTL |
 | `ride.location.store` | `memory`; `valkey` in Compose (phase 13) | Live index, rate limiter, WebSocket tickets and (phase 14) push bus implementation |
 | `ride.location.freshness` | `30s` | Candidates must have been heard from within this |
 | `ride.location.unreachable-after` | `2m` | Assigned driver silence before T7 |

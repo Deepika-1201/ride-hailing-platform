@@ -162,7 +162,7 @@ Greedy sequential matching gives each request the best driver at that moment. In
 - **Window:** collect the searching rides and available drivers of a city section every 2 s.
 - **Solve:** build an ETA cost matrix and solve the assignment problem: Hungarian algorithm up to ~200 × 200, greedy-with-regret above that.
 - **Commit:** create all the window's offers in one transaction.
-- **Ownership:** one owner per city section, through a PostgreSQL lease with a fencing token per city or Kafka partition assignment. This is the first place where city ownership is needed.
+- **Ownership:** the opt-in `CityOwnership` coordinator holds a PostgreSQL lease and fencing token per city ([ADR-028](decisions/ADR-028-city-owned-database-work.md)), shared with future computed-surge work. Prepare outside the guard, then commit database mutations with the captured claim; stale or expired ownership cannot authorize the transaction. Sequential searches remain leaderless. The coordinator is implemented; batch matching itself remains an experiment to implement and measure.
 - **Adoption test:** run against the simulator on hotspot scenarios. Keep it only if mean pickup ETA in dense zones drops by at least 10% **(assumed)** without hurting the match rate.
 
 ## 9. Hotspots

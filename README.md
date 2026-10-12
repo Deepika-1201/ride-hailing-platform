@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-027.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking, and fenced city ownership without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-028.
 
 ## Quick start
 
@@ -203,7 +203,36 @@ of idle credit, and neutral heading penalty when usable motion is missing or too
 `weighted_score` records its inputs, effective weights and component costs so the result is explainable without
 adding raw coordinates to the log. `dispatch_ranking_total{strategy="weighted",outcome}` reports weighted
 executions and fallbacks. See [ADR-027](docs/decisions/ADR-027-weighted-dispatch-scoring.md) for the exact rules.
-Outcome comparisons, city ownership, computed surge and the batch-matching experiment remain pending.
+Outcome comparisons, computed surge and the batch-matching experiment remain pending.
+
+### City ownership
+
+City ownership is an opt-in foundation for singleton surge and batch-matching jobs. It does not change sequential
+ride searches or start those future jobs. Enable it only on processes with the `dispatch` role, using an explicit
+city list:
+
+```yaml
+ride:
+  dispatch:
+    city-ownership:
+      enabled: true
+      cities: [blr, mum]
+      ttl: 10s
+      renew-every: 3s
+```
+
+Nodes compete independently for each `city-owner:<city>` PostgreSQL lease. Ownership is first-acquirer, not load
+balanced. `CityOwnership.owned()` provides cached claims for preparing work; `runIfOwned(claim, databaseWork)`
+checks the captured holder/token under a lease-row lock and commits database work only while that claim remains
+valid. Expiry rolls back pending changes. Remote calls and expensive preparation must happen outside this guard.
+
+Renewal errors discard local claims. Shutdown rejects new work and attempts token-scoped release within five
+seconds; unfinished releases expire naturally. Restart obtains new tokens. `ride.workers.autostart=false`
+suppresses the automatic loop. Defaults leave ownership disabled, so Kafka is not required for it.
+
+`dispatch_city_ownership_total{outcome="acquired|renewed|lost|error"}` records lease maintenance, and
+`dispatch_city_ownership_held` counts cached local claims, not independently verified database owners.
+See [ADR-028](docs/decisions/ADR-028-city-owned-database-work.md) for the transaction boundary and failure rules.
 
 ## Simulator and web app
 
