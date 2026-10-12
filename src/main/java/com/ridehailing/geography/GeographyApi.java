@@ -37,7 +37,12 @@ public interface GeographyApi {
     }
 
     record CategorySettings(boolean active, int offerTtlS, int searchTimeoutS, int radiusStartM, int radiusStepM,
-            int radiusMaxM, String ranker, RankingWeights rankingWeights) {
+            int radiusMaxM, String ranker, RankingWeights rankingWeights, RankingExperiment rankingExperiment, int version) {
+
+        public CategorySettings(boolean active, int offerTtlS, int searchTimeoutS, int radiusStartM, int radiusStepM,
+                int radiusMaxM, String ranker, RankingWeights rankingWeights) {
+            this(active, offerTtlS, searchTimeoutS, radiusStartM, radiusStepM, radiusMaxM, ranker, rankingWeights, null, 0);
+        }
 
         public CategorySettings(boolean active, int offerTtlS, int searchTimeoutS, int radiusStartM, int radiusStepM,
                 int radiusMaxM, String ranker) {

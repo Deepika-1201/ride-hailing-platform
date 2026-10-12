@@ -406,6 +406,24 @@ class OsrmQuoteTests extends ValkeyIntegrationTest {
         });
         assertThat(rides.violations(CITY)).isEmpty();
         assertThat(get(managementPort, "/actuator/prometheus").body()).contains("strategy=\"weighted\"");
+
+        TestRides.asApi(() -> dispatch.decline(rides.pendingOffer(booked.id()), offeredDriver()));
+        selectRanker("nearest");
+        jdbc.sql("UPDATE geography.city_categories SET ranking_eta_weight = 9 WHERE city_id = :city AND category = 'MINI'")
+                .param("city", CITY).update();
+        TABLE_BODY.set("{\"code\":\"Ok\",\"durations\":[[80]]}");
+        try {
+            searchOnce();
+            JsonNode retried = decision();
+            assertThat(retried.get("strategy").asString()).isEqualTo("weighted");
+            assertThat(retried.get("detail").get("ranking_assignment")).isEqualTo(detail.get("ranking_assignment"));
+            JsonNode retriedScore = retried.get("detail").get("candidates").get(0).get("weighted_score");
+            assertThat(retriedScore.get("weights")).isEqualTo(json.valueToTree(weights));
+            assertThat(retriedScore.get("eta_cost").asDouble()).isEqualTo(80.0);
+        } finally {
+            jdbc.sql("UPDATE geography.city_categories SET ranking_eta_weight = :eta WHERE city_id = :city AND category = 'MINI'")
+                    .param("eta", weights.eta()).param("city", CITY).update();
+        }
     }
 
     @Test

@@ -6,10 +6,16 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LiveIndex.Candidate;
+import com.ridehailing.geography.RankingWeights;
+import com.ridehailing.geography.RankingExperiment;
+import com.ridehailing.geography.app.CategoryAdministration;
+import com.ridehailing.geography.db.CategoryRepository.Settings;
+import com.ridehailing.platform.Caller;
 import com.ridehailing.platform.Idempotency;
 import com.ridehailing.ride.RideView;
 import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Ids;
+import com.ridehailing.shared.UserRole;
 import com.ridehailing.support.EventContract;
 import com.ridehailing.support.IntegrationTest;
 import com.ridehailing.support.Postgis;
@@ -25,6 +31,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,6 +63,9 @@ class SearchAttemptTests extends IntegrationTest {
 
     @Autowired
     private JdbcClient jdbc;
+
+    @Autowired
+    private CategoryAdministration categories;
 
     private TestCity city;
     private GeoPoint pickup;
@@ -218,7 +228,47 @@ class SearchAttemptTests extends IntegrationTest {
                 .param("id", ride.id()).query(UUID.class).single()).isEqualTo(nearest.id());
     }
 
-    /** §6.2: pollers skip a task another one holds rather than queue behind it. */
+        @Test
+        void anExperimentAssignmentSurvivesRetryAndConfigurationChangesAndNewSearchesUseTheUpdate() {
+        Caller admin = new Caller(Ids.newId(), Set.of(UserRole.ADMIN));
+        RankingWeights originalWeights = new RankingWeights(1.5, 50, 4, 20);
+        categories.put(admin, new Settings(city.id(), "MINI", true, 15, 180, 2000, 1000, 6000, "nearest", 0,
+            originalWeights, new RankingExperiment("weighted-trial", "weighted", 100)), 0);
+        RideView ride = rides.book(rider.id(), city, pickup, "MINI");
+        search();
+        JsonNode first = decision(ride.id());
+        JsonNode assignment = first.get("detail").get("ranking_assignment");
+        assertThat(first.get("strategy").asString()).isEqualTo("weighted");
+        assertThat(assignment.get("category_version").asInt()).isEqualTo(1);
+        assertThat(assignment.get("experiment").get("id").asString()).isEqualTo("weighted-trial");
+        assertThat(assignment.get("experiment").get("percentage").asInt()).isEqualTo(100);
+        assertThat(assignment.get("weights")).isEqualTo(JSON.valueToTree(originalWeights));
+        categories.put(admin, new Settings(city.id(), "MINI", true, 20, 180, 2000, 1000, 6000, "eta", 0,
+            RankingWeights.DEFAULT, new RankingExperiment("weighted-trial", "weighted", 0)), 1);
+        TestDriver driver = rides.onlineAt(city, "MINI", north(100));
+        makeDue(ride.id());
+        search();
+        JsonNode retried = decision(ride.id());
+        assertThat(retried.get("strategy").asString()).isEqualTo("weighted");
+        assertThat(retried.get("detail").get("ranking_assignment")).isEqualTo(assignment);
+        assertThat(retried.get("detail").get("ranking_fallback").asString()).isEqualTo("MATRIX_UNAVAILABLE");
+        UUID offer = rides.pendingOffer(ride.id());
+        assertThat(outboxEvents(jdbc, "OfferCreated", offer)).singleElement().satisfies(event ->
+            assertThat(event.get("payload").get("strategy").asString()).isEqualTo("weighted"));
+        TestRides.asApi(() -> dispatch.decline(offer, driver.id()));
+        search();
+        assertThat(decision(ride.id()).get("detail").get("ranking_assignment")).isEqualTo(assignment);
+
+        RideView fresh = rides.book(rides.rider("New experiment rider").id(), city, pickup, "MINI");
+        search();
+        JsonNode newAssignment = decision(fresh.id()).get("detail").get("ranking_assignment");
+        assertThat(newAssignment.get("strategy").asString()).isEqualTo("eta");
+        assertThat(newAssignment.get("category_version").asInt()).isEqualTo(2);
+        assertThat(newAssignment.get("experiment").get("percentage").asInt()).isZero();
+        assertThat(rides.violations(city.id())).isEmpty();
+        }
+
+        /** §6.2: pollers skip a task another one holds rather than queue behind it. */
     @Test
     void aTaskAnotherPollerHoldsIsSkipped() throws Exception {
         rides.onlineAt(city, "MINI", north(100));

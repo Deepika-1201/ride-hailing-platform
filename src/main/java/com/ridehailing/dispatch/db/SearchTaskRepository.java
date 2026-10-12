@@ -18,7 +18,7 @@ import org.springframework.stereotype.Repository;
 public class SearchTaskRepository {
 
     private static final String COLUMNS = """
-            SELECT ride_id, city_id, category, pickup_lat, pickup_lon, priority, attempt, radius_m, backoff_s
+            SELECT ride_id, city_id, category, pickup_lat, pickup_lon, priority, attempt, radius_m, backoff_s, ranking_assignment
             FROM dispatch.search_tasks
             """;
 
@@ -57,6 +57,13 @@ public class SearchTaskRepository {
                         """)
                 .query(SearchTaskRepository::task)
                 .optional();
+    }
+
+    public String assignRanker(UUID rideId, String assignment) {
+        return jdbc.sql("""
+                UPDATE dispatch.search_tasks SET ranking_assignment = coalesce(ranking_assignment, CAST(:assignment AS jsonb))
+                WHERE ride_id = :rideId RETURNING ranking_assignment::text
+                """).param("rideId", rideId).param("assignment", assignment).query(String.class).single();
     }
 
     /** Deletes the task the caller holds. */
@@ -136,10 +143,10 @@ public class SearchTaskRepository {
     private static TaskRow task(ResultSet row, int rowNumber) throws SQLException {
         return new TaskRow(row.getObject("ride_id", UUID.class), row.getString("city_id"), row.getString("category"),
                 new GeoPoint(row.getDouble("pickup_lat"), row.getDouble("pickup_lon")), row.getInt("priority"),
-                row.getInt("attempt"), row.getInt("radius_m"), row.getInt("backoff_s"));
+                row.getInt("attempt"), row.getInt("radius_m"), row.getInt("backoff_s"), row.getString("ranking_assignment"));
     }
 
     public record TaskRow(UUID rideId, String cityId, String category, GeoPoint pickup, int priority, int attempt,
-            int radiusM, int backoffS) {
+            int radiusM, int backoffS, String rankingAssignment) {
     }
 }

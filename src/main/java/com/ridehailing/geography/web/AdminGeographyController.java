@@ -1,6 +1,7 @@
 package com.ridehailing.geography.web;
 
 import com.ridehailing.geography.RankingWeights;
+import com.ridehailing.geography.RankingExperiment;
 import com.ridehailing.geography.app.CategoryAdministration;
 import com.ridehailing.geography.app.CityAdministration;
 import com.ridehailing.geography.app.CityAdministration.CityChange;
@@ -116,7 +117,7 @@ class AdminGeographyController {
             @Valid @RequestBody CityCategoryRequest request) {
         Settings wanted = new Settings(cityId, category, request.active(), request.offerTtlS(),
                 request.searchTimeoutS(), request.radiusStartM(), request.radiusStepM(), request.radiusMaxM(),
-                request.ranker(), 0, request.rankingWeights());
+                request.ranker(), 0, request.rankingWeights(), request.rankingExperiment());
         return categories.put(caller, wanted, request.version());
     }
 
@@ -150,6 +151,6 @@ class AdminGeographyController {
             @NotNull @Min(0) Integer radiusStepM,
             @NotNull @Min(100) Integer radiusMaxM,
             @NotNull @Pattern(regexp = "nearest|eta|weighted") String ranker,
-            Integer version, @Valid RankingWeights rankingWeights) {
+            Integer version, @Valid RankingWeights rankingWeights, @Valid RankingExperiment rankingExperiment) {
     }
 }

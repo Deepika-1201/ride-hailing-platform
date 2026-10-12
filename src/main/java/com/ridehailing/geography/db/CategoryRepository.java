@@ -1,6 +1,7 @@
 package com.ridehailing.geography.db;
 
 import com.ridehailing.geography.RankingWeights;
+import com.ridehailing.geography.RankingExperiment;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
@@ -17,7 +18,8 @@ public class CategoryRepository {
     private static final String SETTINGS = """
             SELECT city_id, category, active, offer_ttl_s, search_timeout_s, radius_start_m, radius_step_m,
                      radius_max_m, ranker, version, ranking_eta_weight, ranking_acceptance_weight,
-                     ranking_idle_weight, ranking_heading_weight
+                     ranking_idle_weight, ranking_heading_weight, ranking_experiment_id,
+                     ranking_experiment_ranker, ranking_experiment_percentage
             FROM geography.city_categories
             """;
 
@@ -55,11 +57,12 @@ public class CategoryRepository {
                         INSERT INTO geography.city_categories (city_id, category, active, offer_ttl_s, search_timeout_s,
                                                                radius_start_m, radius_step_m, radius_max_m, ranker,
                                                                ranking_eta_weight, ranking_acceptance_weight,
-                                                               ranking_idle_weight, ranking_heading_weight)
+                                                               ranking_idle_weight, ranking_heading_weight, ranking_experiment_id,
+                                                               ranking_experiment_ranker, ranking_experiment_percentage)
                         VALUES (:cityId, :category, :active, :offerTtlS, :searchTimeoutS,
                                 :radiusStartM, :radiusStepM, :radiusMaxM, :ranker,
                                 coalesce(:etaWeight, 1), coalesce(:acceptanceWeight, 60),
-                                coalesce(:idleWeight, 2), coalesce(:headingWeight, 30))
+                                coalesce(:idleWeight, 2), coalesce(:headingWeight, 30), :experimentId, :experimentRanker, :experimentPercentage)
                         ON CONFLICT (city_id, category) DO NOTHING
                         """)
                 .params(params(settings))
@@ -76,11 +79,15 @@ public class CategoryRepository {
                             ranking_eta_weight = coalesce(:etaWeight, ranking_eta_weight),
                             ranking_acceptance_weight = coalesce(:acceptanceWeight, ranking_acceptance_weight),
                             ranking_idle_weight = coalesce(:idleWeight, ranking_idle_weight),
-                            ranking_heading_weight = coalesce(:headingWeight, ranking_heading_weight)
+                            ranking_heading_weight = coalesce(:headingWeight, ranking_heading_weight),
+                            ranking_experiment_id = coalesce(:experimentId, ranking_experiment_id),
+                            ranking_experiment_ranker = coalesce(:experimentRanker, ranking_experiment_ranker),
+                            ranking_experiment_percentage = coalesce(:experimentPercentage, ranking_experiment_percentage)
                         WHERE city_id = :cityId AND category = :category AND version = :expectedVersion
                         RETURNING city_id, category, active, offer_ttl_s, search_timeout_s, radius_start_m,
                                   radius_step_m, radius_max_m, ranker, version, ranking_eta_weight,
-                                  ranking_acceptance_weight, ranking_idle_weight, ranking_heading_weight
+                                  ranking_acceptance_weight, ranking_idle_weight, ranking_heading_weight,
+                                  ranking_experiment_id, ranking_experiment_ranker, ranking_experiment_percentage
                         """)
                 .params(params(settings))
                 .param("expectedVersion", expectedVersion)
@@ -98,6 +105,10 @@ public class CategoryRepository {
         params.put("acceptanceWeight", weights == null ? null : weights.acceptance());
         params.put("idleWeight", weights == null ? null : weights.idle());
         params.put("headingWeight", weights == null ? null : weights.heading());
+        RankingExperiment experiment = settings.rankingExperiment();
+        params.put("experimentId", experiment == null ? null : experiment.id());
+        params.put("experimentRanker", experiment == null ? null : experiment.ranker());
+        params.put("experimentPercentage", experiment == null ? null : experiment.percentage());
         return params;
     }
 
@@ -118,14 +129,23 @@ public class CategoryRepository {
                 row.getInt("offer_ttl_s"), row.getInt("search_timeout_s"), row.getInt("radius_start_m"),
                 row.getInt("radius_step_m"), row.getInt("radius_max_m"), row.getString("ranker"), row.getInt("version"),
                 new RankingWeights(row.getDouble("ranking_eta_weight"), row.getDouble("ranking_acceptance_weight"),
-                        row.getDouble("ranking_idle_weight"), row.getDouble("ranking_heading_weight")));
+                        row.getDouble("ranking_idle_weight"), row.getDouble("ranking_heading_weight")),
+                row.getString("ranking_experiment_id") == null ? null : new RankingExperiment(row.getString("ranking_experiment_id"),
+                        row.getString("ranking_experiment_ranker"), row.getInt("ranking_experiment_percentage")));
     }
 
     public record Category(String code, String name, int seats) {
     }
 
     public record Settings(String cityId, String category, boolean active, int offerTtlS, int searchTimeoutS,
-                        int radiusStartM, int radiusStepM, int radiusMaxM, String ranker, int version, RankingWeights rankingWeights) {
+                        int radiusStartM, int radiusStepM, int radiusMaxM, String ranker, int version, RankingWeights rankingWeights,
+                        RankingExperiment rankingExperiment) {
+
+                public Settings(String cityId, String category, boolean active, int offerTtlS, int searchTimeoutS,
+                                int radiusStartM, int radiusStepM, int radiusMaxM, String ranker, int version, RankingWeights rankingWeights) {
+                        this(cityId, category, active, offerTtlS, searchTimeoutS, radiusStartM, radiusStepM, radiusMaxM, ranker,
+                                version, rankingWeights, null);
+                }
 
                 public Settings(String cityId, String category, boolean active, int offerTtlS, int searchTimeoutS,
                                 int radiusStartM, int radiusStepM, int radiusMaxM, String ranker, int version) {

@@ -11,6 +11,7 @@ import com.ridehailing.platform.Caller;
 import com.ridehailing.platform.Transactions;
 import com.ridehailing.shared.UserRole;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import org.springframework.stereotype.Service;
 
@@ -62,12 +63,16 @@ public class CategoryAdministration {
                 result = categories.update(wanted, expectedVersion)
                         .orElseThrow(() -> ApiException.versionConflict(current.version()));
             }
-            auditLog.record(new AuditEntry(admin.as(UserRole.ADMIN), "city_category.put", "city_category",
-                    wanted.cityId() + ":" + wanted.category(), null, null, Map.of(
+                Map<String, Object> after = new HashMap<>(Map.of(
                             "active", result.active(), "offer_ttl_s", result.offerTtlS(),
                             "search_timeout_s", result.searchTimeoutS(), "radius_start_m", result.radiusStartM(),
                             "radius_step_m", result.radiusStepM(), "radius_max_m", result.radiusMaxM(),
-                            "ranker", result.ranker(), "ranking_weights", result.rankingWeights())));
+                        "ranker", result.ranker(), "ranking_weights", result.rankingWeights()));
+                if (result.rankingExperiment() != null) {
+                after.put("ranking_experiment", result.rankingExperiment());
+                }
+                auditLog.record(new AuditEntry(admin.as(UserRole.ADMIN), "city_category.put", "city_category",
+                    wanted.cityId() + ":" + wanted.category(), null, null, after));
             return result;
         });
     }

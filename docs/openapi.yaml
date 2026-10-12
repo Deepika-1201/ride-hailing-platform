@@ -2473,7 +2473,20 @@ components:
             - $ref: '#/components/schemas/RankingWeights'
             - {type: 'null'}
           description: Optional on writes; omitted or null values preserve existing weights, or use defaults for a new category.
+        ranking_experiment:
+          anyOf:
+            - $ref: '#/components/schemas/RankingExperiment'
+            - {type: 'null'}
+          description: Optional on writes; omitted or null preserves the experiment, or means none for a new category. Set percentage to zero to disable treatment for new searches. Existing search assignments are unchanged.
         version: {type: integer, description: Required when updating; the current version.}
+    RankingExperiment:
+      type: object
+      additionalProperties: false
+      required: [id, ranker, percentage]
+      properties:
+        id: {type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'}
+        ranker: {type: string, enum: [nearest, eta, weighted], description: Treatment strategy; the category ranker remains the control.}
+        percentage: {type: integer, minimum: 0, maximum: 100, description: Percentage of new searches assigned to treatment by a stable ride bucket.}
     RankingWeights:
       type: object
       additionalProperties: false

@@ -431,9 +431,14 @@ class DispatchRaceTests extends IntegrationTest {
 
     private UUID offer(TestCity city, RideView ride) {
         rides.onlyDueIn(city.id());
-        rides.search();
+        int attempts = rides.search();
         UUID offer = rides.pendingOffer(ride.id());
-        assertThat(offer).as("an offer for ride %s", ride.id()).isNotNull();
+        assertThat(offer).as(() -> "an offer for ride " + ride.id() + " after " + attempts + " attempts; tasks="
+            + jdbc.sql("SELECT * FROM dispatch.search_tasks WHERE ride_id = :ride")
+                .param("ride", ride.id()).query().listOfRows()
+            + "; decisions=" + jdbc.sql("SELECT * FROM dispatch.decisions WHERE ride_id = :ride")
+                .param("ride", ride.id()).query().listOfRows())
+            .isNotNull();
         return offer;
     }
 

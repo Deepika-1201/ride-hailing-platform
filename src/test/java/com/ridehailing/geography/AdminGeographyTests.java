@@ -267,8 +267,56 @@ class AdminGeographyTests extends IntegrationTest {
                 assertThat(json(call("GET", admin, path, null)).get("version").asInt()).isEqualTo(3);
         }
 
-        @Test
-        void onlyAdminsManageReferenceData() {
+    @Test
+    void rankingExperimentsAreVersionedAuditedNullableAndExplicitlyDisabledWithZero() {
+        String id = TestCities.newId();
+        assertAnswered("POST", CITIES, call("POST", admin, CITIES, city(id, "Asia/Kolkata", "INR", square(20, 20))), 201);
+        String path = CITIES + "/" + id + "/categories/MINI";
+        JsonMapper mapper = JsonMapper.builder().build();
+        JsonNode created = assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, settings(15, null)), 200);
+        assertThat(created.has("ranking_experiment")).isFalse();
+        ObjectNode body = (ObjectNode) mapper.readTree(settings(15, 0));
+        JsonNode experiment = mapper.readTree("{\"id\":\"eta-trial\",\"ranker\":\"eta\",\"percentage\":30}");
+        body.set("ranking_experiment", experiment);
+
+        JsonNode changed = assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 200);
+        assertThat(changed.get("ranking_experiment")).isEqualTo(experiment);
+        assertThat(geography.settings(id, "MINI").orElseThrow().rankingExperiment())
+                .isEqualTo(new RankingExperiment("eta-trial", "eta", 30));
+        assertThat(geography.settings(id, "MINI").orElseThrow().version()).isEqualTo(1);
+        assertProblem("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 409, "VERSION_CONFLICT");
+        assertThat(assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, settings(20, 1)), 200).get("ranking_experiment"))
+                .isEqualTo(experiment);
+        body = (ObjectNode) mapper.readTree(settings(20, 2));
+        body.putNull("ranking_experiment");
+        assertThat(assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 200).get("ranking_experiment"))
+                .isEqualTo(experiment);
+        assertThat(audit.entries("city_category", List.of(id + ":MINI")).getLast().after().get("ranking_experiment"))
+                .isEqualTo(experiment);
+        body.put("version", 3);
+        body.set("ranking_experiment", mapper.readTree("{\"id\":\"eta-trial\",\"ranker\":\"eta\",\"percentage\":0}"));
+        JsonNode disabled = assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 200);
+        assertThat(disabled.get("ranking_experiment").get("percentage").asInt()).isZero();
+        for (String invalid : List.of("{}", "{\"id\":\"trial\",\"ranker\":\"eta\"}",
+                "{\"id\":\"bad name\",\"ranker\":\"eta\",\"percentage\":30}",
+                "{\"id\":\"trial\",\"ranker\":\"unknown\",\"percentage\":30}",
+                "{\"id\":\"trial\",\"ranker\":\"eta\",\"percentage\":101}",
+                "{\"id\":\"trial\",\"ranker\":\"eta\",\"percentage\":-1}")) {
+            body.put("version", 4);
+            body.set("ranking_experiment", mapper.readTree(invalid));
+            assertAnswered("PUT", CITY_CATEGORY, call("PUT", admin, path, body.toString()), 400);
+        }
+        for (String assignment : List.of("ranking_experiment_percentage = -1", "ranking_experiment_percentage = 101",
+                "ranking_experiment_percentage = NULL", "ranking_experiment_ranker = NULL", "ranking_experiment_id = NULL",
+                "ranking_experiment_ranker = 'unknown'", "ranking_experiment_id = 'bad name'")) {
+            assertThatThrownBy(() -> jdbc.sql("UPDATE geography.city_categories SET " + assignment + " WHERE city_id = :city")
+                    .param("city", id).update()).isInstanceOf(DataIntegrityViolationException.class);
+        }
+        assertThat(json(call("GET", admin, path, null)).get("version").asInt()).isEqualTo(4);
+    }
+
+    @Test
+    void onlyAdminsManageReferenceData() {
         String rider = users.create(UserRole.RIDER).authorization();
 
         assertProblem("GET", CITIES, call("GET", rider, CITIES, null), 403, "FORBIDDEN");

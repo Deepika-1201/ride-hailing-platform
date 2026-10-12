@@ -1,6 +1,7 @@
 package com.ridehailing.dispatch.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.ridehailing.dispatch.db.AvailabilityRepository;
 import com.ridehailing.dispatch.db.DecisionRepository;
@@ -138,7 +139,56 @@ class IndexOutageTests extends IntegrationTest {
         assertThat(rides.violations(city.id())).isEmpty();
     }
 
-    private SearchAttempts attemptsWith(LiveIndex live) {
+        @Test
+        void anIndexErrorCapturesTheExperimentBeforeTheRetryReadsChangedSettings() {
+        TestCity city = cities.create("MINI");
+        prices.price(city.id(), "MINI");
+        jdbc.sql("""
+            UPDATE geography.city_categories SET ranking_experiment_id = 'outage-trial',
+                ranking_experiment_ranker = 'eta', ranking_experiment_percentage = 100, version = version + 1
+            WHERE city_id = :city AND category = 'MINI'
+            """).param("city", city.id()).update();
+        rides.onlineAt(city, "MINI", city.at(0.1, 0.1));
+        RideView ride = rides.book(rides.rider("Outage experiment").id(), city, city.at(0.1, 0.1), "MINI");
+        rides.onlyDueIn(city.id());
+        assertThat(TestRides.asDispatch(attemptsWith(failingNearby(index))::runNext)).isTrue();
+        String saved = jdbc.sql("SELECT ranking_assignment::text FROM dispatch.search_tasks WHERE ride_id = :ride")
+            .param("ride", ride.id()).query(String.class).single();
+        jdbc.sql("UPDATE geography.city_categories SET ranking_experiment_percentage = 0 WHERE city_id = :city")
+            .param("city", city.id()).update();
+        makeDue(ride.id());
+        assertThat(TestRides.asDispatch(attemptsWith(index)::runNext)).isTrue();
+        assertThat(jdbc.sql("SELECT detail->'ranking_assignment' FROM dispatch.decisions WHERE ride_id = :ride ORDER BY attempt")
+            .param("ride", ride.id()).query(String.class).list()).containsExactly(saved, saved);
+        assertThat(jdbc.sql("SELECT strategy FROM dispatch.decisions WHERE ride_id = :ride ORDER BY attempt")
+            .param("ride", ride.id()).query(String.class).list()).containsExactly("eta", "eta");
+        }
+
+        @Test
+        void aRolledBackAttemptDoesNotKeepItsAssignmentOrReservation() {
+        TestCity city = cities.create("MINI");
+        prices.price(city.id(), "MINI");
+        rides.onlineAt(city, "MINI", city.at(0.1, 0.1));
+        RideView ride = rides.book(rides.rider("Rollback experiment").id(), city, city.at(0.1, 0.1), "MINI");
+        rides.onlyDueIn(city.id());
+        assertThatThrownBy(() -> TestRides.asDispatch(() -> transactions.execute(() -> {
+            assertThat(working.runNext()).isTrue();
+            throw new IllegalStateException("attempt rollback");
+        }))).hasMessage("attempt rollback");
+        assertThat(jdbc.sql("SELECT ranking_assignment IS NULL FROM dispatch.search_tasks WHERE ride_id = :ride")
+            .param("ride", ride.id()).query(Boolean.class).single()).isTrue();
+        assertThat(rides.pendingOffer(ride.id())).isNull();
+        assertThat(jdbc.sql("SELECT count(*) FROM dispatch.decisions WHERE ride_id = :ride")
+            .param("ride", ride.id()).query(Long.class).single()).isZero();
+        jdbc.sql("UPDATE geography.city_categories SET ranker = 'eta', version = version + 1 WHERE city_id = :city")
+            .param("city", city.id()).update();
+        assertThat(TestRides.asDispatch(working::runNext)).isTrue();
+        assertThat(jdbc.sql("SELECT strategy FROM dispatch.decisions WHERE ride_id = :ride")
+            .param("ride", ride.id()).query(String.class).single()).isEqualTo("eta");
+        assertThat(rides.violations(city.id())).isEmpty();
+        }
+
+        private SearchAttempts attemptsWith(LiveIndex live) {
         return new SearchAttempts(tasks, assignment, offers, availability, decisions, stats, geography, live, rankers,
                 timers, outbox, mirror, pushes, transactions, properties, metrics, json, clock);
     }

@@ -4,7 +4,7 @@ A ride-hailing and dispatch platform built as a real-time distributed system. Ri
 
 The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking, fenced city ownership, and database-backed computed surge without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-029.
+> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing, ETA and weighted ranking, stable percentage experiments, fenced city ownership, and database-backed computed surge without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-030.
 
 ## Quick start
 
@@ -204,6 +204,29 @@ of idle credit, and neutral heading penalty when usable motion is missing or too
 adding raw coordinates to the log. `dispatch_ranking_total{strategy="weighted",outcome}` reports weighted
 executions and fallbacks. See [ADR-027](docs/decisions/ADR-027-weighted-dispatch-scoring.md) for the exact rules.
 Outcome comparisons, traffic adjustment and the batch-matching experiment remain pending.
+
+### Ranking experiments
+
+The versioned category endpoint accepts an optional `ranking_experiment` alongside its existing `ranker` and
+`ranking_weights`. The category ranker is the control, and this object configures the treatment:
+
+```json
+{"id": "eta-trial", "ranker": "eta", "percentage": 30}
+```
+
+With category `ranker=nearest`, approximately 30% of new searches receive ETA ranking; the rest use nearest.
+Allocation hashes the ride ID, city, category and experiment ID into a stable bucket. It is not an exact quota.
+Increasing the percentage retains nested cohorts; changing the experiment ID changes the buckets.
+
+The first committed attempt stores its selected strategy, category version, weights and experiment provenance.
+Retries, including index failures and node restarts, keep that policy even if the category changes. Decisions
+include it as `detail.ranking_assignment`; existing strategy columns, offer events and fallback fields remain
+accurate. A new search task after acceptance takes a new snapshot. Analyze those search lifetimes separately.
+
+Omitted or null experiments preserve the current setting on update. Set `percentage` to `0` to disable treatment
+for new assignments; `100` assigns all of them to treatment. This does not override active searches and is not an
+emergency kill switch. No experiment is configured by default, and ETA/weighted treatments still need OSRM for
+road times. See [ADR-030](docs/decisions/ADR-030-stable-ranking-experiments.md). Outcome measurements remain pending.
 
 ### City ownership
 
