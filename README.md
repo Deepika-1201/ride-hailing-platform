@@ -1,19 +1,64 @@
 # Ride-Hailing Platform
 
-A ride-hailing and dispatch platform built as a real-time distributed system. Riders request rides, drivers stream their live locations, and the platform matches each request to a nearby driver within seconds, then manages the ride through an explicit state machine until the trip ends.
+A Java 25 / Spring Boot ride-hailing platform focused on real-time location, geospatial dispatch and concurrent
+ride transitions. A rider can quote and book a trip, a driver can accept and complete it, and operations can
+follow the live map and inspect why each dispatch decision happened.
 
-The focus is the real-time layer: ingesting a continuous stream of driver locations, finding nearby drivers while positions change thousands of times a second, and dispatching safely under concurrency, so that a driver is never assigned to two rides at once.
+**Portfolio release: in progress.** The end-to-end application works locally; the remaining portfolio work is
+tracked separately from the original 23-phase roadmap. Payments are mocked, notifications are log-only, and
+sustained capacity and cloud-readiness claims remain unverified.
 
-> **Status:** design approved on 2026-10-02; V1 complete on 2026-10-07. V1 phases 1 (scaffolding), 2 (platform mechanisms), 3 (identity and access), 4 (reference data and profiles), 5 (quotes), 6 (drivers online and location), 7 (booking and dispatch), 8 (ride lifecycle), 9 (payments), 10 (notifications and ratings), 11 (operations) and 12 (V1 complete) are done; V2 phases 13 (Valkey), 14 (realtime) and 15 (simulator and web app) are done. Phase 16 (laptop tier) awaits its sustained capacity run; phase 17 Kafka delivery, recovery and location streaming still need their final measurements. Phase 18 adds opt-in OSRM routing and time-of-day factors, ETA and weighted ranking, stable percentage experiments, fenced city ownership, database-backed computed surge, and an offline bounded batch-assignment prototype without changing those earlier baselines. The design covers the requirements baseline, design spikes S-1 to S-3, the high-level design with its three deep dives, the low-level design, the OpenAPI contract and event schemas, the implementation plan, the architecture review, and ADR-001 to ADR-032.
+![Live operations map and ride decision timeline](docs/images/portfolio/operations-desktop.png)
 
-The separate [portfolio-completion checklist](docs/portfolio-completion.md) tracks a reproducible, evidence-backed
-portfolio release. It does not replace or complete the original 23-phase roadmap.
+## Start here
 
-See the [three-role demo walkthrough](docs/demo.md) for reviewed desktop/mobile screenshots, recording commands,
-and the distinction between functional demo evidence and capacity claims.
+| Review path | What to inspect |
+|---|---|
+| [Demo walkthrough](docs/demo.md) | Real rider, driver and operations screenshots; redacted recording commands; desktop/mobile checks |
+| [Isolated local setup](docs/portfolio-completion.md#isolated-local-setup-p4) | Fresh seeded data, alternate ports, compact offline maps and project-scoped cleanup |
+| [Architecture](docs/architecture.md#1-at-a-glance) and [dispatch design](docs/dispatch-design.md) | Runtime roles, data ownership, reservation protocol and failure trade-offs |
+| [Failure demonstrations](docs/failure-demonstrations.md) | Reproducible broker, replay, worker-restart, Valkey-loss and node-drain tests with stated limits |
+| [Operations runbook](docs/runbooks.md) | Health and metrics, stuck-ride diagnosis, audited redrive/replay and safe local recovery |
+| [Capacity report](docs/capacity-report.md) | The interrupted laptop attempt and the evidence still needed, without replacing it with a successful-run claim |
 
-The [failure and recovery demonstrations](docs/failure-demonstrations.md) provide executable checks for broker
-outages, duplicate replay, worker restart, Valkey recovery and moving live clients off a draining node.
+## Engineering decisions
+
+One codebase and one container image run as `api`, `realtime`, `dispatch` and `worker` roles. Locally one process
+can run all four; Spring Modulith and architecture tests enforce module boundaries. PostgreSQL/PostGIS holds
+durable state, Valkey holds the live index and cross-node push routing, and optional Kafka carries asynchronous
+events. The React/MapLibre demo and Go simulator use the public interfaces.
+
+| Decision | Reason and trade-off |
+|---|---|
+| Conditional database reservations and invariant indexes | Resolve competing searches at commit time; a candidate lookup does not authorize an assignment |
+| PostgreSQL search tasks and durable timers | Keep dispatch and expiry correctness independent of broker availability, at the cost of database polling |
+| Valkey live index and WebSocket delivery | Separate frequent location changes from durable ride state; mirrors, reconciliation and status reads handle stale or lost transient data |
+| Transactional outbox plus inbox-backed consumers | Preserve committed domain events and deduplicate consumer effects; delivery is not an exactly-once guarantee for arbitrary external side effects |
+| Modular monolith with runtime roles | Support explicit ownership boundaries without premature service extraction; independently deployed services remain conditional future work |
+
+Detailed alternatives and consequences are in the [ADR index](docs/decisions/README.md). Correctness and recovery
+claims are tied to tests; architecture sizing estimates are not production measurements.
+
+## Implemented, experimental, and planned
+
+| Area | Current state |
+|---|---|
+| Booking, offers, ride lifecycle and operations | Implemented with idempotency, state validation, concurrency tests, timelines and invariant checks |
+| Live location and tracking | Implemented with quality checks, Valkey, WebSockets, offline replay and controlled node draining |
+| Event delivery and recovery | Opt-in Kafka transport, dead-letter recovery and durable replay implemented; sustained throughput certification remains open |
+| Routing, ranking and surge | Opt-in OSRM, static traffic factors, ETA/weighted ranking, percentage experiments and computed surge implemented; improved outcomes are not claimed |
+| Batch matching | Tested offline assignment and matrix-preparation prototype; live dispatch remains sequential |
+| Payments and notifications | Deliberately mocked integrations for exercising business and failure paths |
+| Cloud deployment and larger-scale architecture | Future roadmap: conditional extraction, multi-city scaling, production operations and cloud failure engineering |
+
+The recorded full Java build has 1,268 passing tests; the web suite has 26, plus the end-to-end browser workflow.
+The [portfolio evidence log](docs/portfolio-completion.md#evidence-log) links verified revisions and CI results.
+The earlier intermittent missing-offer race remains an open investigation despite passing repeated runs; it is
+not represented as fixed. The 2,000-driver sustained target and browser-render latency target remain uncertified.
+
+Phases 0-15 are complete. Later implementation and measurement gates remain tracked in the unchanged
+[23-phase implementation plan](docs/implementation-plan.md). The [portfolio checklist](docs/portfolio-completion.md)
+is an additional release track, not a replacement or a declaration that all phases are done.
 
 ## Quick start
 
