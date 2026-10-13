@@ -51,10 +51,11 @@ claims are tied to tests; architecture sizing estimates are not production measu
 | Payments and notifications | Deliberately mocked integrations for exercising business and failure paths |
 | Cloud deployment and larger-scale architecture | Future roadmap: conditional extraction, multi-city scaling, production operations and cloud failure engineering |
 
-The recorded full Java build has 1,268 passing tests; the web suite has 26, plus the end-to-end browser workflow.
+The recorded full Java build has 1,269 passing tests; the web suite has 26, plus the end-to-end browser workflow.
 The [portfolio evidence log](docs/portfolio-completion.md#evidence-log) links verified revisions and CI results.
-The earlier intermittent missing-offer race remains an open investigation despite passing repeated runs; it is
-not represented as fixed. The 2,000-driver sustained target and browser-render latency target remain uncertified.
+The earlier intermittent missing-offer race remains an unresolved, [owner-accepted portfolio limitation](docs/portfolio-completion.md#accepted-reliability-limitation-p3)
+despite passing repeated runs; it is not represented as fixed, and recurrence reopens the release gate.
+The 2,000-driver sustained target and browser-render latency target remain uncertified.
 
 Phases 0-15 are complete. Later implementation and measurement gates remain tracked in the unchanged
 [23-phase implementation plan](docs/implementation-plan.md). The [portfolio checklist](docs/portfolio-completion.md)

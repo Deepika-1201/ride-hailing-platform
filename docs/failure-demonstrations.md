@@ -94,6 +94,8 @@ The local run log is `/tmp/ride-portfolio-failure-demonstrations.log`; preserved
 `build/portfolio/evidence/p7-6dd9129`. Raw logs remain private until reviewed. The checks themselves are runnable
 from the committed test sources above and remain part of regular CI.
 
-The earlier intermittent missing-offer race remains a separate P3 investigation. Passing these recovery cases
-does not establish a root cause or close that issue. Likewise, the [capacity report](capacity-report.md) retains
-its original unverified targets and the [23-phase plan](implementation-plan.md) remains unchanged.
+The earlier intermittent missing-offer incident remains unresolved. The project owner has accepted it as a
+[portfolio-only release limitation](portfolio-completion.md#accepted-reliability-limitation-p3), with regression
+checks retained and investigation reopened on recurrence. Passing these recovery cases does not establish a
+root-cause fix. The [capacity report](capacity-report.md) retains its original unverified targets, and the
+[23-phase plan](implementation-plan.md) remains unchanged.

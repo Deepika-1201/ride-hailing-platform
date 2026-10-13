@@ -43,7 +43,7 @@ benchmark/environment failures and intermittent test failures are the largest un
 |---|---|---|---|---|
 | P1 | Freeze scope and define release checklist | 1-2 h | Complete | Accepted scope, exclusions and independent release criteria recorded here |
 | P2 | Finish and publish the existing batch prototype | 3-6 h | Complete | Solver, tiled preparation and harness tested together; limitations documented; coherent commit and exact-commit CI green |
-| P3 | Close reliability gaps | 6-12 h | In progress | Intermittent failures investigated and tracked; regressions and appropriate repetitions pass without weakened assertions; full local and CI gates pass |
+| P3 | Close reliability gaps | 6-12 h | Closed with accepted limitation | Owner-approved portfolio-only disposition below; incident remains disclosed, assertions remain active, and fresh release checks must pass |
 | P4 | Verify clean setup, startup, demo and cleanup | 3-6 h | Complete | Fresh isolated setup exercised with documented prerequisites, seed accounts and commands; existing project data preserved |
 | P5 | Polish and record the demo | 5-9 h | Complete | Short walkthrough and screenshots covering rider, driver and operations flows; desktop/mobile experience checked; no credentials exposed |
 | P6 | Run benchmarks and publish defensible results | 8-18 h | In progress | Reproducible workload, exact revision/environment, actual population, throughput, latency, error/match rates, resources and final invariants reported |
@@ -80,6 +80,23 @@ benchmark/environment failures and intermittent test failures are the largest un
   skip a meaningful test, or relabel an experimental feature merely to obtain a portfolio-complete status.
 - Preserve raw evidence privately when it includes tokens or personal data. Publish sanitized summaries, commands,
   workload/configuration identifiers and the exact tested revision.
+
+## Accepted reliability limitation (P3)
+
+On 2026-10-13 the project owner explicitly approved treating the earlier intermittent missing-offer test failure
+as a documented, unresolved limitation for this portfolio release. This closes P3 by accepted disposition, not
+by claiming a root-cause fix.
+
+- Observed failure: one full-suite acceptance-race setup did not obtain the expected second pending offer.
+  The original cause has not been established, so it is not classified as harmless or production-safe.
+- Evidence: later full builds and CI passed; the related race passed repeated and forced 1,000-iteration runs;
+  explicit expiry/availability/index preconditions and failure details remain in the test. A separate controlled
+  lock-timeout test proves atomic expiry rollback and successful retry, not the cause of the original incident.
+- No production behavior was changed to hide the failure, and no test or assertion is skipped or weakened.
+- Reopen P3 and stop release completion if the failure recurs, a new invariant violation appears, or the final
+  benchmark/build/CI checks fail. This approval does not turn a failing release check into a pass.
+- The exception is limited to the portfolio checklist. It does not certify production reliability, complete an
+  original phase, or waive any benchmark or original roadmap criterion.
 
 ## Release gate
 
@@ -156,7 +173,7 @@ other Compose projects. Do not run global Docker prune commands as part of the d
 |---|---|---|---|
 | 2026-10-13 | P1 | Separate scope and checklist established; original phase plan preserved | Portfolio release itself remains in progress |
 | 2026-10-13 | P2 | Published as `3f5ad9f`; combined `build batchMatchingExperiment` passed in 9m 31s: 1,268 tests across 153 suites, no failures/errors/skips, including 10 solver/harness and 8 preparation tests; [all five CI jobs passed](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38293995045) | Live dispatch integration remains on the original roadmap, not part of this prototype milestone |
-| 2026-10-13 | P3 | Explicit expiry, availability and matching preconditions passed 1,000 forced repetitions. The [deterministic lock-timeout regression](failure-demonstrations.md#failed-offer-expiry-investigation) verifies atomic rollback and successful retry. The combined full build passed in 10m 14s: 1,269 tests across 153 suites, including 17 offer tests, 14 dispatch race cases and contract coverage, with no failures/errors/skips | The failure mechanism is demonstrated, but the original intermittent incident is not reproduced or attributed; do not describe it as fixed or weaken the assertions |
+| 2026-10-13 | P3 | Explicit expiry, availability and matching preconditions passed 1,000 forced repetitions. The [deterministic lock-timeout regression](failure-demonstrations.md#failed-offer-expiry-investigation) verifies atomic rollback and successful retry. Full build: 1,269 tests across 153 suites, no failures/errors/skips. Owner approved the [portfolio-only known-issue disposition](#accepted-reliability-limitation-p3) | Original incident remains unattributed, not fixed; reopen on recurrence or failed final verification. No original phase criterion is waived |
 | 2026-10-13 | P4 | Application source `3f5ad9f` built with the documented local workaround; fresh project data, readiness, full scripted demo, web entry/API proxy/PMTiles ranges and both Compose configuration tests passed. Project containers, network and disposable volume removed; the original phase-15 database retained the same container ID and stayed running. Evidence is retained privately under `build/portfolio/evidence/setup-3f5ad9f` | Not a cache-free, cloud, capacity or recorded browser-demo claim; the source-download caveat remains documented |
 | 2026-10-13 | P5 | Published as `6dd9129`; [all five CI jobs passed](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38375754116). Recording passed in 1.4m; normal browser run in 1.1m; web build, 26 unit tests and strict E2E typecheck passed. Full Java build: 1,268 tests, no failures/errors/skips. Seven reviewed screenshots and commands in the [walkthrough](demo.md); demo services stopped and data retained | Raw videos remain ignored; no capacity or production-readiness claim |
 | 2026-10-13 | P7 | [Failure guide](failure-demonstrations.md) packages five existing recovery cases. Fresh execution on `6dd9129` passed in 1m 6s: five demonstrations plus ten architecture checks, no failures/errors/skips; five-driver Valkey recovery observed at 5,665 ms. The same test sources passed full CI above | No claim of cloud/host-loss or large-population certification; P3's intermittent failure remains separate |
