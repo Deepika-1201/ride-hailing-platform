@@ -9,6 +9,9 @@ The focus is the real-time layer: ingesting a continuous stream of driver locati
 The separate [portfolio-completion checklist](docs/portfolio-completion.md) tracks a reproducible, evidence-backed
 portfolio release. It does not replace or complete the original 23-phase roadmap.
 
+See the [three-role demo walkthrough](docs/demo.md) for reviewed desktop/mobile screenshots, recording commands,
+and the distinction between functional demo evidence and capacity claims.
+
 ## Quick start
 
 JDK 25 and Docker are required (on macOS, Colima works).

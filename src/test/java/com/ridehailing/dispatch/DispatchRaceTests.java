@@ -2,6 +2,7 @@ package com.ridehailing.dispatch;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.ridehailing.location.LiveIndex;
 import com.ridehailing.platform.Idempotency;
 import com.ridehailing.platform.Poller;
 import com.ridehailing.ride.RideView;
@@ -61,6 +62,9 @@ class DispatchRaceTests extends IntegrationTest {
 
     @Autowired
     private JdbcClient jdbc;
+
+    @Autowired
+    private LiveIndex liveIndex;
 
     /** Race 1: 2–10 searches reserve the same driver; one offer, the others move on. */
     @Test
@@ -125,6 +129,14 @@ class DispatchRaceTests extends IntegrationTest {
             RideView first = rides.book(rides.rider("Rider").id(), city, pickup(city), "MINI");
             UUID old = offer(city, first);
             rides.fire("OFFER_EXPIRY", old);
+            assertThat(rides.offerStatus(old)).as(() -> "expired offer " + old + "; timers="
+                + jdbc.sql("SELECT kind, attempts, last_error, due_at, parked_at FROM platform.timers WHERE aggregate_id = :offer")
+                    .param("offer", old).query().listOfRows()).isEqualTo("EXPIRED");
+            assertThat(availability(driver)).as("driver released after offer %s expired", old).isEqualTo("AVAILABLE");
+            assertThat(liveIndex.nearby(city.id(), "MINI", pickup(city), 2000, 20))
+                .as(() -> "driver " + driver.id() + " matchable after expiry; mirror=" + liveIndex.mirrored(city.id())
+                    + "; lastSeen=" + liveIndex.lastSeen(city.id(), List.of(driver.id())))
+                .extracting(LiveIndex.Candidate::driverId).contains(driver.id());
             RideView second = rides.book(rides.rider("Rider").id(), city, pickup(city), "MINI");
             UUID live = offer(city, second);
 
