@@ -43,14 +43,14 @@ benchmark/environment failures and intermittent test failures are the largest un
 |---|---|---|---|---|
 | P1 | Freeze scope and define release checklist | 1-2 h | Complete | Accepted scope, exclusions and independent release criteria recorded here |
 | P2 | Finish and publish the existing batch prototype | 3-6 h | Complete | Solver, tiled preparation and harness tested together; limitations documented; coherent commit and exact-commit CI green |
-| P3 | Close reliability gaps | 6-12 h | Closed with accepted limitation | Original incident retains its owner-approved disposition; reproduced simulator defects corrected, unchanged benchmark and exact-commit CI passed |
+| P3 | Close reliability gaps | 6-12 h | Closed with accepted limitation at publication | Original incident remains disclosed; simulator defects corrected and CI category-supply starvation reproduced, documented and corrected with explicit owner approval |
 | P4 | Verify clean setup, startup, demo and cleanup | 3-6 h | Complete | Fresh isolated setup exercised with documented prerequisites, seed accounts and commands; existing project data preserved |
 | P5 | Polish and record the demo | 5-9 h | Complete | Short walkthrough and screenshots covering rider, driver and operations flows; desktop/mobile experience checked; no credentials exposed |
 | P6 | Run benchmarks and publish defensible results | 8-18 h | Complete | Unchanged 200-driver scenario passed: 60 completed rides, zero unfinished, p95 receipt 9.925ms, eight clean invariants; population/resources/reconnects and failed first attempt disclosed |
 | P7 | Package failure and recovery demonstrations | 4-8 h | Complete | Repeatable commands and evidence for duplicate events, Kafka outage/recovery, Valkey recovery and node restart/draining; expected and observed behavior distinguished |
 | P8 | Write troubleshooting and recovery runbooks | 4-7 h | Complete | Verified health/metrics checks, stuck-ride diagnosis, event recovery, startup failures and safe cleanup instructions |
 | P9 | Refine the portfolio narrative | 4-8 h | Complete | Concise README entry path, architecture overview, engineering trade-offs, verified results and implemented/experimental/future-work table linked to deeper docs |
-| P10 | Verify and publish the release | 2-4 h | Complete at publication | [Release notes](releases/portfolio-v1.0.0.md) link verified evidence and limitations; the published tag is gated on all five exact-commit CI jobs |
+| P10 | Verify and publish the release | 2-4 h | Complete at publication | [Release notes](releases/portfolio-v1.0.0.md) link evidence and limitations; the published tag requires all five final exact-commit CI jobs to pass |
 | Total | Portfolio release only | 40-80 h | Complete at publication | Original planning estimate, not logged effort; the original 23-phase roadmap remains open |
 
 ## Execution order
@@ -104,6 +104,12 @@ unchanged portfolio scenario and all five CI jobs passed on `9ee418c`. The [capa
 retains both failures, the different corrected trace and recovered startup subscription timeouts. This restores
 the accepted disposition, not a root-cause claim for the earlier Java race or CI latency variability. P10 still
 requires the final release revision's checks before tag publication.
+
+A later final CI miss was reproduced locally and traced to four XL drivers serving overlapping demand, with
+millisecond search attempts but no eligible supply. The owner explicitly approved 100 drivers in the CI fixture
+only. Three replays passed; its 60s bound, faults and 16 generated requests remain unchanged. The
+[ADR amendment](decisions/ADR-021-simulator.md#amendment-2026-10-13-sufficient-category-supply-in-ci) records this
+workload decision; neither benchmark scenario nor production dispatch behavior was changed.
 
 ## Release gate
 
@@ -195,6 +201,8 @@ other Compose projects. Do not run global Docker prune commands as part of the d
 | 2026-10-13 | P3/P6/P10 | First AC-powered portfolio run finished with complete sampling and clean invariants but failed zero-unfinished acceptance. Tests reproduced and corrected out-of-bound destination fallback and premature rider drain accounting; fixed workload settings and deadlines retained. CI on `1bf057f` separately failed its unchanged 60s p95 assignment threshold (72.12s), with clean invariants | Release gate reopened: corrected benchmark and CI must pass. Failed evidence remains retained; no portfolio-complete claim yet |
 | 2026-10-13 | P3/P6 | Fresh corrected runtime `9ee418c` passed all six unchanged portfolio checks: 60 booked/assigned/completed, zero unfinished, eight clean invariants, 239 metric samples. All 119 post-ramp demand samples showed 200 non-offline drivers, about 49.94 applied updates/s; receipt p95 9.925ms, app peak sampled memory 486 MiB. [Report and sanitized data](capacity-report.md#corrected-portfolio-attempt-passed) include five recovered startup subscription timeouts. [All five CI jobs passed](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38407873690), including the recorded simulator and browser workflow | Single modest local workload only; original phase-16 target, browser rendering and cloud capacity remain uncertified. P10 final publication remains open |
 | 2026-10-13 | P10 | Evidence revision `e49c743` passed [all five CI jobs](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38413814197), including the full Java build, recorded simulator and browser workflow. Public data reconciles with retained captures; all runtime-source hashes match the measured revision, local simulator race/vet and documentation checks passed. Benchmark containers were removed without deleting either captured database; original project database preserved. [Portfolio 1.0.0](releases/portfolio-v1.0.0.md) is published only after the documentation-only final revision also passes exact-commit CI | Accepted P3 issue and all stated measurement/production limits remain; completion applies only to this separate portfolio release |
+| 2026-10-13 | P3/P10 | Final candidate `696b864` failed [CI](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38417494376): all 16 simulator rides completed and invariants were clean, but assignment p95 was 140.130s against the unchanged 60s maximum. Other four jobs passed; browser checks were skipped after the simulator failure. Report and job logs retained privately | Release not published; P3/P10 reopened pending investigation. The passing P6 measurement remains valid for its recorded runtime and workload |
+| 2026-10-13 | P3/P10 | Local 40-driver replay reproduced 139.393s assignment wait and retained 26 no-candidate decisions plus the offer/competing-ride timeline. Owner approved CI-only supply 40 to 100; guard verifies the unchanged latency/fault gates and same 16 requests. Three sequential replays passed at p95 23.277s, 9.047s and 9.047s with no unfinished rides and eight clean invariants each. Full simulator race/vet passed; both benchmark YAML files and the original phase plan verified unchanged | Final tag publication remains conditional on all five exact-commit CI jobs; original failed evidence and accepted Java-race limitation remain disclosed |
 
 Use this log for portfolio delivery evidence. Existing ADRs, test reports and phase records remain the sources for
 their respective implementation and verification details.

@@ -35,7 +35,12 @@ The evidence revision `e49c743eb4145151d49d6bb433c3938cbfa97746` passed
 [all five CI jobs](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38413814197): Java build/tests,
 simulator and spike checks, replicated Kafka tests, web build/tests, and the container workflow with recorded
 simulator and browser lifecycle checks. Local simulator race/vet checks and documentation/data reconciliation
-also passed. The final release revision changes only release documentation and is separately CI-gated.
+also passed. A subsequent final-candidate CI miss was reproduced and traced to insufficient XL driver supply,
+not a stuck dispatch worker. The owner approved increasing CI-only drivers from 40 to 100, keeping its 40 riders,
+16 requests, 60s bound and fault settings. Three local replays passed at assignment p95 23.277s, 9.047s and 9.047s
+with no unfinished rides and clean invariants. The [ADR amendment](../decisions/ADR-021-simulator.md#amendment-2026-10-13-sufficient-category-supply-in-ci)
+retains the diagnosis and trade-offs. Neither benchmark scenario nor production code changed. This fixture
+correction, its guard and final documentation are separately exact-commit CI-gated before publication.
 
 ## Known limits
 

@@ -78,3 +78,24 @@
 - A recording is keyed by endpoints rounded to five decimal places. Matching and idle movement still depend on server responses, so missing routes fall back to straight lines and are counted in the report. Replay validates client/server behavior without OSRM; it does not certify realistic routing or capacity.
 - The CI scenario uses 40 drivers and 40 riders, four minutes of demand and a seven-minute drain. Larger scenarios retain their own workloads. The 2026-10-10 live and recorded runs each completed 17 rides with all eight invariants clean; the recorded run had 88 fallback routes. Phase 16 remains the laptop-tier performance gate.
 - Osmium preprocessing renumbers local node IDs before clipping complete ways, avoiding a bitmap sized by the largest global OSM ID. The preprocessing and routing service use the same verified multi-platform OSRM image digest.
+
+## Amendment 2026-10-13: sufficient category supply in CI
+
+The 40-driver CI workload intermittently missed its 60s assignment-p95 check. A retained local reproduction
+completed all 16 rides with clean invariants but took 139.393s to assign one XL request. Its durable decisions
+showed 26 no-candidate attempts: three of four XL drivers were occupied, the fourth declined a pickup near the
+6km radius limit, and a new offer succeeded about three seconds after another XL trip completed. This was
+insufficient fixture supply, not a blocked dispatch worker; attempts took milliseconds.
+
+The owner explicitly approved increasing **only CI driver count from 40 to 100**. Rider count stays 40, the same
+16 seeded requests remain, the assignment bound stays 60s, and all fault rates, acceptance behavior, speed and
+timing settings remain active. Neither the 200-driver portfolio scenario nor the original 2,000-driver laptop
+scenario changes. Loosening latency, disabling faults, changing production reservation policy, and repeatedly
+rerunning a known supply-constrained fixture were rejected.
+
+Three sequential local replays passed with assignment p95 of 23.277s, 9.047s and 9.047s, no unfinished rides and
+all eight invariants clean. The first used a fresh database; the next two reused the completed state. A scenario
+guard protects the new supply, existing latency/fault gates and identical generated demand. The extra drivers
+also increase idle connections and total injected faults; this is an explicitly changed functional CI workload,
+not a before/after performance improvement or a capacity certificate. Final exact-commit CI remains the release
+gate. The original failure capture and database are retained, and the historical Java race remains separate.

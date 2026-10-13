@@ -192,6 +192,18 @@ databases are retained.
 The earlier CI scenario on `1bf057f` separately missed its unchanged 60s assignment-p95 threshold (72.119s).
 The corrected revision passed at 23.728s with clean invariants, but its generated trace changed (16 rather than
 17 bookings); this does not establish the original latency miss's cause or prove all variability is eliminated.
+The final candidate `696b864` later reproduced a 140.130s CI miss. A retained local replay of that same 40-driver
+scenario identified category supply starvation: one XL ride waited 139.393s, with 26 no-candidate attempts,
+three of four XL drivers occupied and the fourth declining a nearly 6km pickup. The ride was assigned about
+three seconds after another XL trip completed, with no stuck worker or slow HTTP call.
+
+The owner approved raising **only CI supply to 100 drivers**, preserving 40 riders, the same 16 trips, the 60s
+bound and all fault/timing settings. Three local replays passed at assignment p95 23.277s, 9.047s and 9.047s,
+with zero unfinished rides and clean invariants. This changes the functional CI fixture, not either benchmark
+scenario, and is not a dispatch-performance improvement claim. See the [simulator ADR](decisions/ADR-021-simulator.md#amendment-2026-10-13-sufficient-category-supply-in-ci)
+for evidence and trade-offs. The passing portfolio measurement above remains tied to its original recorded
+runtime, 200-driver scenario and unchanged thresholds.
+
 The historical missing-offer test remains under the separate [accepted P3 limitation](portfolio-completion.md#accepted-reliability-limitation-p3).
 Neither passing run certifies 2,000 drivers, browser painting, sustained Kafka throughput or cloud capacity.
 

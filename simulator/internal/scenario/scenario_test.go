@@ -174,6 +174,48 @@ func drawTrips(t *testing.T, model *Model, seed uint64) []Trip {
 	return trips
 }
 
+func TestCISupplyCorrectionPreservesDemandLatencyAndFaultGates(t *testing.T) {
+	configured, err := Load("../../scenarios/ci.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.Drivers.Count != 100 || configured.Riders.Count != 40 || configured.Seed != 42 ||
+		configured.Duration != 4*time.Minute || configured.Drain != 7*time.Minute ||
+		configured.Demand.BasePerHour != 300 || configured.Drivers.SpeedFactor != 4 {
+		t.Fatalf("CI workload changed: %+v", configured)
+	}
+	assignment := configured.Expect["wait_to_assign_s.p95"]
+	if assignment.Max == nil || *assignment.Max != 60 {
+		t.Fatalf("assignment latency gate changed: %+v", assignment)
+	}
+	faults := configured.Faults
+	if faults.Disconnect.RatePerHour != 2 || faults.Restart.RatePerHour != 1 ||
+		faults.OfflineReplay.RatePerHour != 0.5 || faults.DelayedUpdates.Share != 0.02 ||
+		faults.DuplicateUpdates != 0.02 || faults.ReorderUpdates != 0.02 || faults.ClockSkew.Share != 0.1 {
+		t.Fatalf("CI fault coverage changed: %+v", faults)
+	}
+	model, err := NewModel(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trips := drawTrips(t, model, configured.Seed)
+	originalSupply := *configured
+	originalSupply.Drivers.Count = 40
+	originalModel, err := NewModel(&originalSupply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalTrips := drawTrips(t, originalModel, configured.Seed)
+	if len(trips) != 16 || len(trips) != len(originalTrips) {
+		t.Fatalf("CI trip count changed: %d versus %d", len(trips), len(originalTrips))
+	}
+	for number, trip := range trips {
+		if trip != originalTrips[number] {
+			t.Fatalf("CI demand changed at trip %d", number)
+		}
+	}
+}
+
 func TestPortfolioTripsRespectConfiguredDistanceBounds(t *testing.T) {
 	configured, err := Load("../../scenarios/portfolio-baseline.yaml")
 	if err != nil {
