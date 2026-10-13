@@ -4,9 +4,9 @@ A Java 25 / Spring Boot ride-hailing platform focused on real-time location, geo
 ride transitions. A rider can quote and book a trip, a driver can accept and complete it, and operations can
 follow the live map and inspect why each dispatch decision happened.
 
-**Portfolio release: final verification.** The end-to-end application and a measured 200-driver characterization
-are documented; release work is tracked separately from the original 23-phase roadmap. Payments are mocked,
-notifications are log-only, and the original sustained-capacity and cloud-readiness claims remain unverified.
+**Portfolio release: [1.0.0](docs/releases/portfolio-v1.0.0.md).** The separately approved portfolio checklist is
+complete for the published tag, with a documented unresolved test limitation. Payments are mocked, notifications
+are log-only, and the original 23-phase roadmap, sustained-capacity and cloud-readiness gates remain open.
 
 ![Live operations map and ride decision timeline](docs/images/portfolio/operations-desktop.png)
 
@@ -14,6 +14,7 @@ notifications are log-only, and the original sustained-capacity and cloud-readin
 
 | Review path | What to inspect |
 |---|---|
+| [Release notes](docs/releases/portfolio-v1.0.0.md) | Verified scope, exact evidence revisions, known limitations and reproduction paths |
 | [Demo walkthrough](docs/demo.md) | Real rider, driver and operations screenshots; redacted recording commands; desktop/mobile checks |
 | [Isolated local setup](docs/portfolio-completion.md#isolated-local-setup-p4) | Fresh seeded data, alternate ports, compact offline maps and project-scoped cleanup |
 | [Architecture](docs/architecture.md#1-at-a-glance) and [dispatch design](docs/dispatch-design.md) | Runtime roles, data ownership, reservation protocol and failure trade-offs |
