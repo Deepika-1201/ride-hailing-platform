@@ -124,6 +124,10 @@ func runScenario(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		recorder = router.NewRecorder(road)
 		road = recorder
 	}
+	trips, err := model.Trips(s.Seed)
+	if err != nil {
+		return cantRun(err)
+	}
 	cache, err := api.LoadTokenCache(*tokens)
 	if err != nil {
 		return cantRun(err)
@@ -150,7 +154,6 @@ func runScenario(ctx context.Context, args []string, stdout, stderr io.Writer) i
 
 	started := time.Now()
 	w.Start = started
-	trips := model.Trips(s.Seed)
 	fmt.Fprintf(stdout, "Signed in; %d trips over %s\n", len(trips), s.Duration)
 	hard, cancel := context.WithDeadline(ctx, started.Add(s.Duration+s.Drain+3*time.Minute))
 	defer cancel()

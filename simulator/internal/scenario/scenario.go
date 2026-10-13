@@ -234,6 +234,13 @@ func (s *Scenario) check() error {
 	if s.Demand.BasePerHour <= 0 {
 		fail("demand.base_per_hour must be positive")
 	}
+	if math.IsNaN(s.Demand.MinTripM) || math.IsInf(s.Demand.MinTripM, 0) || s.Demand.MinTripM < 0 {
+		fail("demand.min_trip_m must be finite and nonnegative")
+	}
+	if math.IsNaN(s.Demand.MaxTripM) || math.IsInf(s.Demand.MaxTripM, 0) || s.Demand.MaxTripM < 0 ||
+		(s.Demand.MaxTripM > 0 && s.Demand.MaxTripM <= s.Demand.MinTripM) {
+		fail("demand.max_trip_m must be zero (unbounded) or finite and greater than min_trip_m")
+	}
 	if s.Demand.StartHour < 0 || s.Demand.StartHour > 23 {
 		fail("demand.start_hour must be 0–23")
 	}

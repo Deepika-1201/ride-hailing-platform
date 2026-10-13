@@ -115,10 +115,10 @@ func (rd *Rider) take(ctx context.Context, trip scenario.Trip, wrapUp <-chan str
 			return
 		case <-wrapUp:
 			// The run is over: leave the system clean for the invariant check and the next run.
+			wrapUp = nil
 			if rd.ride.Status != "IN_TRIP" {
 				rd.cancel(ctx, false)
 			}
-			return
 		case m := <-rd.pushes:
 			rd.push(ctx, m, time.Now())
 		case <-rd.resyncs:

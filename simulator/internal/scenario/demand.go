@@ -23,6 +23,8 @@ const zoneRadiusM = 1100
 
 const slot = 15 * time.Minute
 
+const destinationAttempts = 1000
+
 // Trip is one rider's request: when, from where to where, and in which category.
 type Trip struct {
 	At       time.Duration
@@ -132,15 +134,19 @@ func (m *Model) place(zone string) (geo.Point, float64, error) {
 }
 
 // Trips draws the run's requests in time order. The same seed draws the same trips.
-func (m *Model) Trips(seed uint64) []Trip {
+func (m *Model) Trips(seed uint64) ([]Trip, error) {
 	r := rand.New(rand.NewPCG(seed, 0x7269646573))
 	var trips []Trip
+	var err error
 	for start := time.Duration(0); start < m.s.Duration; start += slot {
 		end := min(start+slot, m.s.Duration)
 		hour := m.hourAt(start)
 		for _, z := range m.hours[hour] {
 			perHour := m.s.Demand.BasePerHour * z.weight / m.totals[hour]
-			trips = m.arrivals(r, trips, start, end, perHour, z.key)
+			trips, err = m.arrivals(r, trips, start, end, perHour, z.key)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, e := range m.s.Demand.Events {
@@ -155,45 +161,51 @@ func (m *Model) Trips(seed uint64) []Trip {
 					normal = max(normal, m.s.Demand.BasePerHour*z.weight/m.totals[hour])
 				}
 			}
-			trips = m.arrivals(r, trips, at, min(at+slot, end), (e.Multiplier-1)*normal, e.Zone)
+			trips, err = m.arrivals(r, trips, at, min(at+slot, end), (e.Multiplier-1)*normal, e.Zone)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	sort.SliceStable(trips, func(i, j int) bool { return trips[i].At < trips[j].At })
-	return trips
+	return trips, nil
 }
 
 // arrivals adds a Poisson process's arrivals between start and end, by exponential gaps.
 func (m *Model) arrivals(r *rand.Rand, trips []Trip, start, end time.Duration, perHour float64,
-	source string) []Trip {
+	source string) ([]Trip, error) {
 	if perHour <= 0 {
-		return trips
+		return trips, nil
 	}
 	mean := float64(time.Hour) / perHour
 	for at := start + time.Duration(r.ExpFloat64()*mean); at < end; at += time.Duration(r.ExpFloat64() * mean) {
 		center, radius, _ := m.place(source)
 		pickup := Around(r, center, radius)
-		trips = append(trips, Trip{At: at, Pickup: pickup, Dropoff: m.destination(r, source, pickup, at),
+		dropoff, err := m.destination(r, source, pickup, at)
+		if err != nil {
+			return nil, err
+		}
+		trips = append(trips, Trip{At: at, Pickup: pickup, Dropoff: dropoff,
 			Category: m.category(r), Source: source})
 	}
-	return trips
+	return trips, nil
 }
 
 // destination picks a drop-off by the origin's destination weights, or by the hour's demand, at least the minimum
 // trip length away.
-func (m *Model) destination(r *rand.Rand, source string, pickup geo.Point, at time.Duration) geo.Point {
+func (m *Model) destination(r *rand.Rand, source string, pickup geo.Point, at time.Duration) (geo.Point, error) {
 	choices := m.od[source]
 	if len(choices) == 0 {
 		choices = m.hours[m.hourAt(at)]
 	}
-	var point geo.Point
-	for range 20 {
-		point = Around(r, m.centers[pick(r, choices)], zoneRadiusM)
+	for range destinationAttempts {
+		point := Around(r, m.centers[pick(r, choices)], zoneRadiusM)
 		d := geo.DistanceM(pickup, point)
 		if d >= m.s.Demand.MinTripM && (m.s.Demand.MaxTripM == 0 || d <= m.s.Demand.MaxTripM) {
-			break
+			return point, nil
 		}
 	}
-	return point
+	return geo.Point{}, fmt.Errorf("no destination within configured trip bounds for %s after %d samples", source, destinationAttempts)
 }
 
 func (m *Model) category(r *rand.Rand) string {

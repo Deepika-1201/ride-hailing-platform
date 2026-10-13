@@ -117,7 +117,7 @@ func TestTheSameSeedDrawsTheSameTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, b, c := m.Trips(1), m.Trips(1), m.Trips(2)
+	a, b, c := drawTrips(t, m, 1), drawTrips(t, m, 1), drawTrips(t, m, 2)
 	if len(a) == 0 || len(a) != len(b) {
 		t.Fatalf("%d and %d trips", len(a), len(b))
 	}
@@ -136,7 +136,7 @@ func TestArrivalsFollowTheZonesShareOfTheHoursDemand(t *testing.T) {
 	m, _ := NewModel(s)
 	fromKoramangala, total := 0, 0
 	for seed := range uint64(50) {
-		for _, trip := range m.Trips(seed) {
+		for _, trip := range drawTrips(t, m, seed) {
 			if trip.At >= s.Duration || (seed == 0 && trip.Source != koramangala && trip.Source != mgRoad) {
 				t.Fatalf("trip %+v", trip)
 			}
@@ -155,12 +155,63 @@ func TestArrivalsFollowTheZonesShareOfTheHoursDemand(t *testing.T) {
 func TestTripsStartInTheirZoneAndRunAtLeastTheMinimumLength(t *testing.T) {
 	s, _ := Load(scenarioFile(t, ""))
 	m, _ := NewModel(s)
-	for _, trip := range m.Trips(3) {
+	for _, trip := range drawTrips(t, m, 3) {
 		if d := geo.DistanceM(trip.Pickup, m.centers[trip.Source]); d > zoneRadiusM+1 {
 			t.Fatalf("pickup %.0f m from its zone's centre", d)
 		}
 		if geo.DistanceM(trip.Pickup, trip.Dropoff) < s.Demand.MinTripM {
 			t.Fatalf("trip %+v is too short", trip)
+		}
+	}
+}
+
+func drawTrips(t *testing.T, model *Model, seed uint64) []Trip {
+	t.Helper()
+	trips, err := model.Trips(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trips
+}
+
+func TestPortfolioTripsRespectConfiguredDistanceBounds(t *testing.T) {
+	configured, err := Load("../../scenarios/portfolio-baseline.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := NewModel(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for number, trip := range drawTrips(t, model, configured.Seed) {
+		distance := geo.DistanceM(trip.Pickup, trip.Dropoff)
+		if distance < configured.Demand.MinTripM || distance > configured.Demand.MaxTripM {
+			t.Fatalf("trip %d has %.1fm straight-line distance outside [%.1f, %.1f]", number, distance,
+				configured.Demand.MinTripM, configured.Demand.MaxTripM)
+		}
+	}
+}
+
+func TestImpossibleTripBoundsFailInsteadOfReturningAnOutOfRangeWorkload(t *testing.T) {
+	configured, err := Load(scenarioFile(t, "  min_trip_m: 100000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := NewModel(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trips, err := model.Trips(42)
+	if err == nil || !strings.Contains(err.Error(), "no destination within configured trip bounds") || trips != nil {
+		t.Fatalf("got partial or out-of-bounds workload: %d trips, %v", len(trips), err)
+	}
+}
+
+func TestInvalidTripBoundsAreRejectedDuringScenarioLoading(t *testing.T) {
+	for _, extra := range []string{"  min_trip_m: -1\n", "  min_trip_m: .nan\n", "  max_trip_m: -1\n",
+		"  max_trip_m: .inf\n", "  max_trip_m: 1000\n", "  max_trip_m: 1500\n"} {
+		if _, err := Load(scenarioFile(t, extra)); err == nil {
+			t.Fatalf("accepted invalid trip bounds %q", extra)
 		}
 	}
 }
@@ -181,7 +232,7 @@ func TestAnEventMultipliesItsAreasDemandForItsWindow(t *testing.T) {
 	stadium := geo.Point{Lat: 12.9788, Lon: 77.5996}
 	count := 0
 	for seed := range uint64(40) {
-		for _, trip := range m.Trips(seed) {
+		for _, trip := range drawTrips(t, m, seed) {
 			if trip.Source != "area:STADIUM" {
 				continue
 			}
@@ -205,7 +256,7 @@ func TestDestinationsFollowTheOriginsWeights(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, trip := range m.Trips(5) {
+	for _, trip := range drawTrips(t, m, 5) {
 		if trip.Source == koramangala && geo.DistanceM(trip.Dropoff, m.centers[mgRoad]) > zoneRadiusM+1 {
 			t.Fatalf("a Koramangala trip goes to %v", trip.Dropoff)
 		}

@@ -53,8 +53,8 @@ Tests exercise normal completion, an unavailable endpoint, recovery between fail
 ## Portfolio characterization workload
 
 The separate [portfolio scenario](../simulator/scenarios/portfolio-baseline.yaml) is prepared for checklist P6.
-It has **not been executed or certified**. It is a modest single-city characterization run, not a substitute for
-the original laptop baseline or a maximum-capacity test.
+Its first measured attempt on 2026-10-13 **failed acceptance**, as recorded below. It is a modest single-city
+characterization run, not a substitute for the original laptop baseline or a maximum-capacity test.
 
 | Setting | Fixed before execution |
 |---|---|
@@ -63,7 +63,7 @@ the original laptop baseline or a maximum-capacity test.
 | Demand window | 11 minutes total: one-minute driver ramp and ten further minutes of demand |
 | Drain budget | Up to ten additional minutes |
 | Offered demand | 360 requests/hour with the existing central-zone weights, scenario hour 18 |
-| Trip lengths | 1,200-2,500 metres |
+| Trip lengths | 1,200-2,500 metres straight-line; actual road distance and duration can be longer |
 | Driver behavior | Normal speed, 90% base acceptance with distance penalty, 3s median/6s p95 response distribution |
 | Faults and cancellations | No injected faults, no configured post-assignment cancellation or no-show |
 | Acceptance checks | At least 40 bookings and 30 completions, zero unfinished rides, match rate at least 85%, position-receipt p95 at most 1,000ms, zero reported errors |
@@ -92,8 +92,43 @@ population and request counts, rates, p50/p95/p99 where available, errors, resou
 result. Include failed attempts and routing fallbacks. This still measures driver-send-to-rider-WebSocket receipt,
 not browser paint; functional screenshots are not latency evidence.
 
-On 2026-10-13 preparation was verified with scenario parser/guard tests while the development Mac was on battery.
-No long run was started. The original 2,000-driver, 35-minute demand baseline and its phase-16 criteria are unchanged.
+Preparation was verified on 2026-10-13 with scenario parser/guard tests while the Mac was on battery; no load ran
+at that point. The later measured attempt began only after AC power and the open lid were verified. The original
+2,000-driver, 35-minute demand baseline and its phase-16 criteria are unchanged.
+
+### First portfolio attempt: failed
+
+| Field | Observed value |
+|---|---|
+| Application/simulator revision | `1bf057f032d3d009176d1ddfe7b53f0534e3f59b` |
+| Capture | `build/capacity/portfolio-20261013T125811Z` (private raw evidence retained) |
+| Environment | AC power, open lid; isolated fresh PostgreSQL/Valkey/OSRM/app stack; Kafka disabled; real OSRM data; app OSRM enabled for Bengaluru |
+| Memory limits | App 1 GiB, PostgreSQL 512 MiB, Valkey 256 MiB, OSRM 768 MiB |
+| Workload | 200 configured drivers and 200 configured riders; seed 42; 61 generated trips |
+| Elapsed | 24 minutes, including the existing hard cleanup allowance after demand and drain |
+| Ride report | 61 booked, 61 assigned, 56 completed, 5 unfinished; no reported cancellations or not-found outcomes |
+| Position receipt latency | p50 3.812ms, p95 11.7ms, p99 26.86ms, maximum 665.123ms; 7,875 samples |
+| Other checks | Zero reported errors, network errors, retries, route misses or WebSocket reconnects; all eight invariants checked with zero violations |
+| Collection | 286 usable five-second metric samples, maximum observed gap 7s; failed-summary status retained |
+| Failed criterion | `rides.unfinished <= 0`, observed 5; collector exit 1 |
+
+The run is not a successful baseline. Investigation found two simulator defects, each reproduced by a focused
+test. Destination sampling returned its twentieth rejected point even when outside the configured bounds; the
+unchanged portfolio scenario/seed reproduced a 9,491m straight-line trip against the 2,500m maximum. One retained
+unfinished ride had a 14,342m OSRM route. Sampling now returns only valid points or an explicit bounded-generation
+error before agents start; the scenario settings and thresholds have not been loosened.
+
+Riders also stopped observing immediately when drain cleanup began, without recording a successful cancellation
+or a subsequent completion in the already-existing hard cleanup window. The retained database showed 59 completed
+and two in-trip rides when the app was stopped, compared with the report's 56 and five. The corrected rider keeps
+observing until a terminal state or the original hard deadline. Tests prove cancellation/completion accounting and
+that hard cancellation still stops observation; no extra time or faster driving was added.
+
+The failed capture and database are retained. A corrected generator produces a different deterministic trace
+(60 planned trips for seed 42), so the next run must identify its new code revision and must not be presented as
+a like-for-like performance improvement. A read-only preflight of that corrected trace found all straight-line
+distances within 2,500m, while road routes still reached about 6.4km and 651s. These are planning observations,
+not a passing workload result. Rerun acceptance and final CI remain required.
 
 ## Offline capture summary
 
