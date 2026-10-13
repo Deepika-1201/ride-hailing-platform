@@ -4,6 +4,10 @@
 
 Phase 16 is **not certified**. The first sustained laptop attempt on 2026-10-12 was interrupted by loss of host-to-VM forwarding. No valid latency percentile or sustained population result is available from that attempt. Cloud-tier measurements have not run.
 
+A separate [200-driver portfolio characterization](#corrected-portfolio-attempt-passed) passed on 2026-10-13.
+Its measured load, recovered connection failures and single-run limits are reported below; it does not replace
+the original phase-16 workload or browser-render requirement.
+
 ## Laptop baseline
 
 The unchanged [scenario](../simulator/scenarios/laptop-baseline.yaml) specifies:
@@ -53,8 +57,9 @@ Tests exercise normal completion, an unavailable endpoint, recovery between fail
 ## Portfolio characterization workload
 
 The separate [portfolio scenario](../simulator/scenarios/portfolio-baseline.yaml) is prepared for checklist P6.
-Its first measured attempt on 2026-10-13 **failed acceptance**, as recorded below. It is a modest single-city
-characterization run, not a substitute for the original laptop baseline or a maximum-capacity test.
+Its first measured attempt on 2026-10-13 **failed acceptance**. After two simulator corrections, a fresh run
+**passed the unchanged scenario criteria**. Both attempts are recorded below. This is a modest single-city
+characterization, not a substitute for the original laptop baseline or a maximum-capacity test.
 
 | Setting | Fixed before execution |
 |---|---|
@@ -124,11 +129,71 @@ and two in-trip rides when the app was stopped, compared with the report's 56 an
 observing until a terminal state or the original hard deadline. Tests prove cancellation/completion accounting and
 that hard cancellation still stops observation; no extra time or faster driving was added.
 
-The failed capture and database are retained. A corrected generator produces a different deterministic trace
-(60 planned trips for seed 42), so the next run must identify its new code revision and must not be presented as
+The failed capture and database are retained. The corrected generator produces a different deterministic trace
+(60 planned trips for seed 42), so the new run identifies its code revision and is not presented as
 a like-for-like performance improvement. A read-only preflight of that corrected trace found all straight-line
 distances within 2,500m, while road routes still reached about 6.4km and 651s. These are planning observations,
-not a passing workload result. Rerun acceptance and final CI remain required.
+not workload measurements. The actual corrected run follows.
+
+### Corrected portfolio attempt: passed
+
+The [sanitized result](../spikes/results/portfolio-20261013.json) was reconciled against the retained simulator
+report, deployment metadata, Prometheus samples and Docker resource samples. The raw capture is private at
+`build/capacity/portfolio-r2-20261013T135223Z`; neither its tokens nor session/ride identifiers are published.
+
+| Field | Observed value |
+|---|---|
+| Runtime revision | `9ee418c9a03869be803cef15dd37ad718ea0343d`; [all five CI jobs passed](https://github.com/Deepika-1201/ride-hailing-platform/actions/runs/38407873690), including the recorded simulator and browser workflow |
+| Worktree at measurement | One additional hard-deadline regression test was uncommitted; hashes of all non-test simulator files match the recorded revision. Application image identity and scenario/report hashes are in the sanitized result |
+| Environment | Apple Silicon, macOS 13.4, 8 GiB host RAM; Colima 4 vCPUs, 4 GiB configured VM memory (4,095,578,112 bytes reported); AC power and open lid verified |
+| Runtime | Fresh isolated PostgreSQL/Valkey/app/real-OSRM stack; all four roles, Kafka disabled, default nearest ranking and rule-based surge; original phase-15 PostgreSQL remained running separately |
+| Timing | 13:52:29.006483-14:12:26.298186 UTC; 1,197.292s total, including drain; original 11-minute demand and ten-minute drain budget unchanged |
+| Population | 200 configured drivers and riders; 200 distinct driver sessions in PostgreSQL; all 119 post-ramp demand samples show 200 non-offline drivers |
+| Ride outcomes | 60 generated, booked, assigned and completed; zero cancellations, not-found or unfinished rides; match and completion 100%; 69 offers, 1.15 per ride |
+| Realized bookings | 60 over 11 minutes, approximately 5.45/minute; the configured 360/hour is an arrival-model setting, not an achieved-throughput claim |
+| Applied location updates | 58,397 total, approximately 48.77/s over the full run; 29,816 across 597s of post-ramp demand, approximately 49.94/s |
+| Position receipt latency | 7,431 observations; p50 3.973ms, p95 9.925ms, p99 15.983ms, maximum 143.108ms |
+| Assignment wait | 60 observations; p50 3.728s, p95 8.293s, p99/maximum 12.025s |
+| Pickup wait and distance | Wait p50 162.743s, p95 312.060s, p99 457.277s; distance p50 659m, p95 1,731m, p99 2,206m |
+| Final checks | All six unchanged scenario checks passed; all eight invariants checked, zero violations; independent database query found 60 completed rides |
+| Collection | 239 metric samples, nominal interval 5s, maximum gap 6s; 170 Docker snapshots per benchmark container; collector exit 0; offline summary `CHECKS_PASSED` |
+
+| Container | Limit | Peak sampled memory | Peak sampled CPU |
+|---|---:|---:|---:|
+| Application | 1,024 MiB | 486 MiB | 133.96% |
+| PostgreSQL | 512 MiB | 214 MiB | 25.56% |
+| Valkey | 256 MiB | 5.172 MiB | 4.27% |
+| OSRM | 768 MiB | 252.4 MiB | 3.20% |
+
+Docker CPU uses 100% per logical CPU, so 133.96% is about 1.34 CPUs, not a percentage of the entire four-CPU VM.
+These are per-container sampled peaks over the whole capture, not continuous maxima or necessarily simultaneous
+peaks. Docker's displayed memory is not JVM heap usage. The sampler waits five seconds after each snapshot,
+so its 170 observations have a different cadence from the 239 Prometheus scrapes.
+
+**Errors and recovery:** the simulator reported zero errors, network errors and transport retries; the server
+recorded zero HTTP 5xx responses. There were five WebSocket reconnects. All five corresponding subscription
+warnings occurred in the first second of the workload: Valkey did not answer within the configured approximately
+100ms deadline, the sessions were closed and clients reconnected. The subscription-error counter increased by
+five, not zero. There were also 46 HTTP 409 responses on the rating endpoint. These are disclosed even though the
+scenario's error and completion checks passed; this is not an error-free-startup claim.
+
+Application routing recorded 955 successful OSRM calls, one no-route outcome, zero fallback calls and zero cache
+errors, with 1,129 cache hits and 956 misses. The simulator recorded zero route misses. The application and
+simulator use separate routing paths, so their counters are not interchangeable.
+
+For population, `live_drivers` sums non-offline database lifecycle states across categories for Bengaluru; it does
+not prove every driver is fresh or immediately matchable. Values were 200 in 225 samples from 13:53:32 through
+14:12:24 UTC, including all post-ramp demand samples. Location rates are counter deltas divided by the stated
+elapsed window. Analysis used `parse-prometheus-text-format@1.1.1`, omitting only empty `HELP` comments; process
+start time stayed constant and applied-update counters never reset. The private capture retains the analysis
+program, input hashes and computed resource summary. The application was stopped after collection; both attempt
+databases are retained.
+
+The earlier CI scenario on `1bf057f` separately missed its unchanged 60s assignment-p95 threshold (72.119s).
+The corrected revision passed at 23.728s with clean invariants, but its generated trace changed (16 rather than
+17 bookings); this does not establish the original latency miss's cause or prove all variability is eliminated.
+The historical missing-offer test remains under the separate [accepted P3 limitation](portfolio-completion.md#accepted-reliability-limitation-p3).
+Neither passing run certifies 2,000 drivers, browser painting, sustained Kafka throughput or cloud capacity.
 
 ## Offline capture summary
 

@@ -112,3 +112,38 @@ func TestDrainKeepsObservingATripThatStartedBeforeCancellation(t *testing.T) {
 		t.Fatalf("completed cleanup trip was not recorded: %+v", result.Metrics)
 	}
 }
+
+func TestDrainStillStopsAtTheExistingHardDeadline(t *testing.T) {
+	refreshed := make(chan struct{})
+	rider, world := drainRider(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusConflict)
+		fmt.Fprint(writer, `{"status":409,"code":"INVALID_RIDE_STATE"}`)
+	}, func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"id":"ride","status":"IN_TRIP","version":2}`)
+		close(refreshed)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wrapUp := make(chan struct{})
+	close(wrapUp)
+	done := make(chan struct{})
+	go func() {
+		rider.take(ctx, scenario.Trip{Category: "MINI"}, wrapUp)
+		close(done)
+	}()
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rider did not reach cleanup")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rider outlived its hard cancellation")
+	}
+	result := world.Report.Build(world.Scenario, world.Start, time.Now(), world.Client.Stats, &api.InvariantReport{}, nil)
+	if result.Metrics["rides.completed"] != 0 || result.Metrics["rides.unfinished"] != 1 {
+		t.Fatalf("hard deadline fabricated a completed outcome: %+v", result.Metrics)
+	}
+}

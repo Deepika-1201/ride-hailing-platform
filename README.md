@@ -4,9 +4,9 @@ A Java 25 / Spring Boot ride-hailing platform focused on real-time location, geo
 ride transitions. A rider can quote and book a trip, a driver can accept and complete it, and operations can
 follow the live map and inspect why each dispatch decision happened.
 
-**Portfolio release: in progress.** The end-to-end application works locally; the remaining portfolio work is
-tracked separately from the original 23-phase roadmap. Payments are mocked, notifications are log-only, and
-sustained capacity and cloud-readiness claims remain unverified.
+**Portfolio release: final verification.** The end-to-end application and a measured 200-driver characterization
+are documented; release work is tracked separately from the original 23-phase roadmap. Payments are mocked,
+notifications are log-only, and the original sustained-capacity and cloud-readiness claims remain unverified.
 
 ![Live operations map and ride decision timeline](docs/images/portfolio/operations-desktop.png)
 
@@ -19,7 +19,7 @@ sustained capacity and cloud-readiness claims remain unverified.
 | [Architecture](docs/architecture.md#1-at-a-glance) and [dispatch design](docs/dispatch-design.md) | Runtime roles, data ownership, reservation protocol and failure trade-offs |
 | [Failure demonstrations](docs/failure-demonstrations.md) | Reproducible broker, replay, worker-restart, Valkey-loss and node-drain tests with stated limits |
 | [Operations runbook](docs/runbooks.md) | Health and metrics, stuck-ride diagnosis, audited redrive/replay and safe local recovery |
-| [Capacity report](docs/capacity-report.md) | The interrupted laptop attempt and the evidence still needed, without replacing it with a successful-run claim |
+| [Capacity report](docs/capacity-report.md) | A passing 200-driver characterization, recovered errors and retained failed attempts; the original 2,000-driver target remains uncertified |
 
 ## Engineering decisions
 
@@ -53,6 +53,10 @@ claims are tied to tests; architecture sizing estimates are not production measu
 
 The recorded full Java build has 1,269 passing tests; the web suite has 26, plus the end-to-end browser workflow.
 The [portfolio evidence log](docs/portfolio-completion.md#evidence-log) links verified revisions and CI results.
+A [local 200-driver run](docs/capacity-report.md#corrected-portfolio-attempt-passed) completed all 60 rides with
+eight clean invariants and 9.925ms p95 driver-send-to-rider-WebSocket receipt latency. Five initial subscription
+timeouts recovered through reconnects; the report discloses these and the failed first attempt. This is one
+modest workload, not a maximum-capacity or browser-render result.
 The earlier intermittent missing-offer race remains an unresolved, [owner-accepted portfolio limitation](docs/portfolio-completion.md#accepted-reliability-limitation-p3)
 despite passing repeated runs; it is not represented as fixed, and recurrence reopens the release gate.
 The 2,000-driver sustained target and browser-render latency target remain uncertified.

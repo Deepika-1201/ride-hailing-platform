@@ -1,0 +1,102 @@
+{
+  "scope": "Single-city portfolio characterization; not phase-16 or production certification",
+  "revision": "9ee418c9a03869be803cef15dd37ad718ea0343d",
+  "application_image_id": "sha256:578731c7743866ee65e3dc59630098992474652a6d5f46c10a2ee311af40339c",
+  "scenario_sha256": "be048a1071e94fedb2c24afa0d199d71cce1b6d0e8332be898b3187609c5ace9",
+  "report_sha256": "e40806d14ed73116ff9b97696931576b5e6c4ace1f1f7d948fc2a95aedc4f7ca",
+  "runtime_sources_clean": true,
+  "worktree_clean": false,
+  "worktree_note": "An additional hard-deadline regression test was uncommitted; all non-test simulator sources matched the recorded revision.",
+  "environment": {
+    "host": "Apple Silicon, macOS 13.4, 8 GiB RAM, AC power, open lid",
+    "vm_cpus": 4,
+    "vm_reported_memory_bytes": 4095578112,
+    "roles": ["api", "realtime", "dispatch", "worker"],
+    "location_store": "valkey",
+    "kafka_enabled": false,
+    "osrm_enabled": true,
+    "other_services": "The existing phase-15 PostgreSQL remained running; it was not part of the workload."
+  },
+  "scenario": "portfolio-baseline",
+  "seed": 42,
+  "configured_drivers": 200,
+  "configured_riders": 200,
+  "started_at": "2026-10-13T13:52:29.006483Z",
+  "ended_at": "2026-10-13T14:12:26.298186Z",
+  "run_seconds": 1197.291703,
+  "demand_seconds": 660,
+  "drain_budget_seconds": 600,
+  "capture_status": "CHECKS_PASSED",
+  "invariant_checks": 8,
+  "invariant_violations": 0,
+  "metric_samples": 239,
+  "maximum_metric_gap_seconds": 6,
+  "observed_population": {
+    "peak_non_offline_drivers": 200,
+    "samples_at_peak": 225,
+    "first_at_peak": "2026-10-13T13:53:32Z",
+    "last_at_peak": "2026-10-13T14:12:24Z",
+    "post_ramp_demand_samples": 119,
+    "post_ramp_demand_min": 200,
+    "post_ramp_demand_max": 200
+  },
+  "database_checks": {"completed_rides": 60, "distinct_driver_sessions": 200},
+  "observed_metrics": {
+    "errors": 0,
+    "http.network_error": 0,
+    "offers": 69,
+    "offers_per_ride": 1.15,
+    "rates.completion": 1,
+    "rates.match": 1,
+    "rides.assigned": 60,
+    "rides.booked": 60,
+    "rides.completed": 60,
+    "rides.unfinished": 0,
+    "route_misses": 0,
+    "ws.reconnects": 5
+  },
+  "observed_distributions": {
+    "pickup_distance_m": {"count": 60, "mean": 825.4166666666666, "p50": 659, "p90": 1480, "p95": 1731, "p99": 2206, "max": 2206},
+    "position_latency_ms": {"count": 7431, "mean": 4.842233346790471, "p50": 3.973, "p90": 7.822, "p95": 9.925, "p99": 15.983, "max": 143.108},
+    "wait_to_assign_s": {"count": 60, "mean": 4.1578788, "p50": 3.727696, "p90": 7.024379, "p95": 8.292583, "p99": 12.024758, "max": 12.024758},
+    "wait_to_pickup_s": {"count": 60, "mean": 168.09667875000005, "p50": 162.742848, "p90": 277.205997, "p95": 312.06034, "p99": 457.277436, "max": 457.277436}
+  },
+  "location": {
+    "applied_updates": 58397,
+    "whole_run_updates_per_second": 48.77424595332721,
+    "post_ramp_start": "2026-10-13T13:53:32Z",
+    "post_ramp_end": "2026-10-13T14:03:29Z",
+    "post_ramp_applied_updates": 29816,
+    "post_ramp_seconds": 597,
+    "post_ramp_updates_per_second": 49.94304857621441
+  },
+  "containers": [
+    {"service": "app", "samples": 170, "limit_mib": 1024, "peak_sampled_memory_mib": 486, "peak_sampled_cpu_percent": 133.96},
+    {"service": "postgres", "samples": 170, "limit_mib": 512, "peak_sampled_memory_mib": 214, "peak_sampled_cpu_percent": 25.56},
+    {"service": "valkey", "samples": 170, "limit_mib": 256, "peak_sampled_memory_mib": 5.172, "peak_sampled_cpu_percent": 4.27},
+    {"service": "osrm", "samples": 170, "limit_mib": 768, "peak_sampled_memory_mib": 252.4, "peak_sampled_cpu_percent": 3.2}
+  ],
+  "counters": {
+    "valkey_errors": [{"labels": {"operation": "subscribe"}, "count": 5}],
+    "routing_requests": [
+      {"labels": {"outcome": "fallback", "provider": "osrm"}, "count": 0},
+      {"labels": {"outcome": "no_route", "provider": "osrm"}, "count": 1},
+      {"labels": {"outcome": "success", "provider": "osrm"}, "count": 955}
+    ],
+    "routing_cache": [
+      {"labels": {"outcome": "error"}, "count": 0},
+      {"labels": {"outcome": "hit"}, "count": 1129},
+      {"labels": {"outcome": "miss"}, "count": 956}
+    ],
+    "location_results": [{"labels": {"result": "applied"}, "count": 58397}],
+    "http_5xx": 0
+  },
+  "limitations": [
+    "One local run, not maximum capacity or a like-for-like performance comparison with the failed generator revision.",
+    "The driver gauge counts non-offline database lifecycle states, not fresh matchable positions.",
+    "Position latency ends at rider WebSocket receipt, not browser rendering.",
+    "Five initial Valkey subscription timeouts recovered through client reconnects; zero simulator errors does not mean zero backend warnings.",
+    "Docker CPU uses 100 percent per logical CPU. Resource values are sampled peaks, not continuous maxima or sums of simultaneous peaks.",
+    "Raw captures, identifiers and tokens remain private; hashes identify artifacts but do not authenticate them."
+  ]
+}
