@@ -42,7 +42,7 @@ func main() {
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: sim run|verify [flags]; sim run -h for the flags")
+		fmt.Fprintln(stderr, "usage: sim run|verify|summarize [flags]; use a command's -h for its flags")
 		return exitCantRun
 	}
 	switch args[0] {
@@ -50,8 +50,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runScenario(ctx, args[1:], stdout, stderr)
 	case "verify":
 		return verify(ctx, args[1:], stdout, stderr)
+	case "summarize":
+		return summarize(args[1:], stdout, stderr)
 	}
-	fmt.Fprintf(stderr, "unknown command %q: use run or verify\n", args[0])
+	fmt.Fprintf(stderr, "unknown command %q: use run, verify or summarize\n", args[0])
 	return exitCantRun
 }
 

@@ -94,3 +94,37 @@ not browser paint; functional screenshots are not latency evidence.
 
 On 2026-10-13 preparation was verified with scenario parser/guard tests while the development Mac was on battery.
 No long run was started. The original 2,000-driver, 35-minute demand baseline and its phase-16 criteria are unchanged.
+
+## Offline capture summary
+
+The simulator can inspect an existing collector directory without running load, contacting the platform, or
+reading its token file. From the repository root:
+
+```bash
+cd simulator
+go build -o ../build/sim ./cmd/sim
+../build/sim summarize -capture /path/to/existing-capture -out /path/to/new-summary.json
+```
+
+Omit `-out` to emit JSON to standard output. Output files must be new; existing evidence is never overwritten.
+The binary exits 0 when the implemented capture checks pass, 1 when the summary reports incomplete or failed
+evidence, and 2 for command/output errors. A non-passing capture still produces its diagnostic summary.
+
+The summary records scenario/report SHA-256 digests, explicitly configured populations, selected observed
+metrics/distributions, recomputed scenario checks, invariant counts and sample timing. It does not trust stored
+`checks.met` flags or infer achieved population from the scenario. It requires all eight unique invariants with no
+violations, a successful collector exit, the required before/after metrics and resource files, and samples that
+cover the run with the collector's interval tolerance. Known percentile checks require matching distribution
+data. Invalid or linked input files and oversized reports are rejected.
+
+Raw problem strings, violation identities, endpoint details, run logs and token files are not copied into the
+summary. Review configured scenario names and check labels before publishing, since they are user-supplied
+metadata. Prometheus contents and resource rows are not semantically parsed by this command: actual concurrent
+population, resource peaks, deployed-binary identity and broader performance claims still need independent
+review. `CHECKS_PASSED` is not capacity certification and does not complete the original phase-16 criteria.
+
+The helper was verified on 2026-10-13 with the simulator's full race tests and vet checks. It also inspected the
+retained interrupted laptop capture above and returned `CHECKS_FAILED`: the final report and successful exit
+were absent, collection errors were recorded, and only one usable metric sample existed. This did not execute
+a new workload. File hashes identify the supplied artifacts; they do not authenticate them or prove that copied
+scenario thresholds were never edited. Compare the scenario hash and deployment evidence before publishing results.

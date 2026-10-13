@@ -140,6 +140,10 @@ func Load(path string) (*Scenario, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(data, path)
+}
+
+func Parse(data []byte, path string) (*Scenario, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	s := &Scenario{dir: filepath.Dir(path)}
