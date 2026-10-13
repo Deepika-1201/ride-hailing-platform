@@ -264,6 +264,50 @@ func TestLaptopBaselineKeepsThirtyMinutesAfterTheDriverRamp(t *testing.T) {
 	}
 }
 
+func TestPortfolioBaselineIsSeparateBoundedAndUsesNormalDriving(test *testing.T) {
+	portfolio, err := Load("../../scenarios/portfolio-baseline.yaml")
+	if err != nil {
+		test.Fatal(err)
+	}
+	if portfolio.Name != "portfolio-baseline" || portfolio.City != "blr" || portfolio.Seed != 42 {
+		test.Fatalf("unexpected portfolio identity: name=%s city=%s seed=%d", portfolio.Name, portfolio.City, portfolio.Seed)
+	}
+	if portfolio.Drivers.First != 101 || portfolio.Drivers.Count != 200 || portfolio.Riders.First != 101 || portfolio.Riders.Count != 200 {
+		test.Fatalf("unexpected portfolio population: drivers=%+v riders=%+v", portfolio.Drivers, portfolio.Riders)
+	}
+	if portfolio.Drivers.Shift.StartSpread != time.Minute || portfolio.Duration-portfolio.Drivers.Shift.StartSpread != 10*time.Minute || portfolio.Drain != 10*time.Minute {
+		test.Fatalf("unexpected portfolio timing: duration=%s ramp=%s drain=%s", portfolio.Duration, portfolio.Drivers.Shift.StartSpread, portfolio.Drain)
+	}
+	if portfolio.Drivers.SpeedFactor != 1 || portfolio.Faults != (Faults{}) || portfolio.Drivers.CancelAfterAccept != 0 || portfolio.Riders.CancelAfterAssign != 0 || portfolio.Riders.NoShow != 0 {
+		test.Fatal("portfolio baseline must use normal speed without injected faults or cancellations")
+	}
+	if portfolio.Demand.BasePerHour != 360 || portfolio.Demand.StartHour != 18 || portfolio.Demand.MinTripM != 1200 || portfolio.Demand.MaxTripM != 2500 {
+		test.Fatalf("unexpected portfolio demand: %+v", portfolio.Demand)
+	}
+	for metric, minimum := range map[string]float64{"rides.booked": 40, "rides.completed": 30, "rates.match": 0.85} {
+		bound, exists := portfolio.Expect[metric]
+		if !exists || bound.Min == nil || *bound.Min != minimum {
+			test.Fatalf("portfolio %s must retain minimum %v", metric, minimum)
+		}
+	}
+	for metric, maximum := range map[string]float64{"rides.unfinished": 0, "position_latency_ms.p95": 1000, "errors": 0} {
+		bound, exists := portfolio.Expect[metric]
+		if !exists || bound.Max == nil || *bound.Max != maximum {
+			test.Fatalf("portfolio %s must retain maximum %v", metric, maximum)
+		}
+	}
+	if _, err := NewModel(portfolio); err != nil {
+		test.Fatal(err)
+	}
+	baseline, err := Load("../../scenarios/laptop-baseline.yaml")
+	if err != nil {
+		test.Fatal(err)
+	}
+	if baseline.Name == portfolio.Name || baseline.Drivers.Count != 2000 || baseline.Riders.Count != 1200 || baseline.Duration != 35*time.Minute {
+		test.Fatal("the portfolio workload must not replace or weaken the original laptop baseline")
+	}
+}
+
 func TestLaptopCollectorChecksCaptureCompleteness(t *testing.T) {
 	script, err := filepath.Abs("../../../scripts/laptop-tier.sh")
 	if err != nil {

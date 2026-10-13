@@ -49,3 +49,48 @@ Tests exercise normal completion, an unavailable endpoint, recovery between fail
 2. Verify sustained driver population, location rate, latency distribution and all final invariants, not just the scenario's requested population.
 3. Measure rider-screen rendering under load before declaring NFR-5 complete.
 4. Record any tuning with a before/after comparison; do not weaken the scenario's thresholds to obtain a pass.
+
+## Portfolio characterization workload
+
+The separate [portfolio scenario](../simulator/scenarios/portfolio-baseline.yaml) is prepared for checklist P6.
+It has **not been executed or certified**. It is a modest single-city characterization run, not a substitute for
+the original laptop baseline or a maximum-capacity test.
+
+| Setting | Fixed before execution |
+|---|---|
+| City and seed | Bengaluru, seed 42 |
+| Population | 200 drivers and 200 riders, starting at seeded account 101 |
+| Demand window | 11 minutes total: one-minute driver ramp and ten further minutes of demand |
+| Drain budget | Up to ten additional minutes |
+| Offered demand | 360 requests/hour with the existing central-zone weights, scenario hour 18 |
+| Trip lengths | 1,200-2,500 metres |
+| Driver behavior | Normal speed, 90% base acceptance with distance penalty, 3s median/6s p95 response distribution |
+| Faults and cancellations | No injected faults, no configured post-assignment cancellation or no-show |
+| Acceptance checks | At least 40 bookings and 30 completions, zero unfinished rides, match rate at least 85%, position-receipt p95 at most 1,000ms, zero reported errors |
+
+These are workload and acceptance settings, not observed values. Model-generated arrivals and actual bookings,
+online population and throughput must be reported from the run, not inferred from this table. The same scenario
+must be used for comparisons; a changed workload or threshold is a new experiment, not a successful rerun.
+
+Use an isolated, healthy API/Valkey/PostgreSQL stack and the real OSRM dataset, on AC power with the lid open.
+The compact PMTiles browser fixture is not an OSRM dataset. Record the application image/revision, runtime roles,
+Kafka and routing settings, host/VM resources, container limits and any local networking workaround before load.
+The collector's Git revision identifies the checkout, not independently the deployed binary, so verify both.
+
+From the repository root, with endpoints set to that isolated stack:
+
+```bash
+export API_URL=http://127.0.0.1:18080 MANAGEMENT_URL=http://127.0.0.1:18081
+export OSRM_URL=http://127.0.0.1:15000 WS_URL=ws://127.0.0.1:18080/ws
+SCENARIO="$PWD/simulator/scenarios/portfolio-baseline.yaml" SAMPLE_INTERVAL=5 \
+	bash scripts/laptop-tier.sh "$PWD/build/capacity/portfolio-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The existing collector keeps its power guard, scrape-failure fail-fast behavior and sampling-completeness checks.
+Keep raw tokens and captures private. Publish a sanitized report with scenario/revision identifiers, actual
+population and request counts, rates, p50/p95/p99 where available, errors, resources and the end-of-run invariant
+result. Include failed attempts and routing fallbacks. This still measures driver-send-to-rider-WebSocket receipt,
+not browser paint; functional screenshots are not latency evidence.
+
+On 2026-10-13 preparation was verified with scenario parser/guard tests while the development Mac was on battery.
+No long run was started. The original 2,000-driver, 35-minute demand baseline and its phase-16 criteria are unchanged.

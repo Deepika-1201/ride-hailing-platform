@@ -1,0 +1,32 @@
+name: portfolio-baseline
+seed: 42
+city: blr
+duration: 11m
+drain: 10m
+drivers:
+  first: 101
+  count: 200
+  shift: {start_spread: 1m}
+  acceptance: {base: 0.9, per_km_penalty: 0.05}
+  response_time: {median: 3s, p95: 6s}
+  cancel_after_accept: 0
+  speed_factor: 1
+riders:
+  first: 101
+  count: 200
+  patience: {median: 4m, p95: 8m}
+  cancel_after_assign: 0
+  no_show: 0
+demand:
+  base_per_hour: 360
+  start_hour: 18
+  zone_weights: zones/blr-central.csv
+  min_trip_m: 1200
+  max_trip_m: 2500
+expect:
+  rides.booked: {min: 40}
+  rides.completed: {min: 30}
+  rides.unfinished: {max: 0}
+  rates.match: {min: 0.85}
+  position_latency_ms.p95: {max: 1000}
+  errors: {max: 0}
