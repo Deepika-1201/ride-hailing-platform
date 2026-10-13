@@ -93,6 +93,7 @@ func SummariseCapture(directory string) CaptureSummary {
 				break
 			}
 		}
+		summary.checkMetricConsistency(recorded.Metrics)
 		for _, name := range []string{"rides.booked", "rides.assigned", "rides.completed", "rides.unfinished",
 			"rates.match", "rates.completion", "offers", "offers_per_ride", "errors", "http.network_error", "ws.reconnects", "route_misses"} {
 			if value, found := recorded.Metrics[name]; found && !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 {
@@ -186,6 +187,69 @@ func SummariseCapture(directory string) CaptureSummary {
 		summary.Status = "CHECKS_PASSED"
 	}
 	return summary
+}
+
+func (summary *CaptureSummary) checkMetricConsistency(metrics map[string]float64) {
+	count := func(name string) (float64, bool) {
+		value, found := metrics[name]
+		return value, found && !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value == math.Trunc(value)
+	}
+	for _, name := range []string{"rides.booked", "rides.assigned", "rides.completed", "rides.unfinished",
+		"rides.rider_cancelled_searching", "rides.rider_cancelled_assigned", "rides.no_show", "rides.driver_not_found",
+		"rides.cancelled_by_system", "offers", "errors", "http.network_error", "ws.reconnects", "route_misses"} {
+		if _, present := metrics[name]; present {
+			if _, valid := count(name); !valid {
+				summary.Issues = append(summary.Issues, "A reported ride, offer or error count is not a nonnegative integer.")
+				break
+			}
+		}
+	}
+	booked, hasBookings := count("rides.booked")
+	if hasBookings {
+		for _, name := range []string{"rides.assigned", "rides.completed", "rides.unfinished",
+			"rides.rider_cancelled_searching", "rides.rider_cancelled_assigned", "rides.no_show", "rides.driver_not_found", "rides.cancelled_by_system"} {
+			if value, valid := count(name); valid && value > booked {
+				summary.Issues = append(summary.Issues, "A ride count exceeds the number of booked rides.")
+				break
+			}
+		}
+		outcomes, complete := 0.0, true
+		for _, outcome := range []string{Completed, CancelledSearch, CancelledAssigned, NoShow, NotFound, CancelledSystem, Unfinished} {
+			value, valid := count("rides." + outcome)
+			complete = complete && valid
+			if valid {
+				outcomes += value
+			}
+		}
+		if outcomes > booked || (complete && outcomes != booked) {
+			summary.Issues = append(summary.Issues, "Reported ride outcomes do not reconcile with booked rides.")
+		}
+	}
+	for _, rate := range []struct {
+		name       string
+		numerators []string
+	}{
+		{"rates.match", []string{"rides.assigned"}},
+		{"rates.completion", []string{"rides.completed"}},
+		{"rates.cancel", []string{"rides.rider_cancelled_searching", "rides.rider_cancelled_assigned", "rides.no_show"}},
+		{"rates.not_found", []string{"rides.driver_not_found"}},
+		{"offers_per_ride", []string{"offers"}},
+	} {
+		observed, present := metrics[rate.name]
+		if !present {
+			continue
+		}
+		valid := hasBookings && booked > 0
+		total := 0.0
+		for _, name := range rate.numerators {
+			value, found := count(name)
+			valid = valid && found
+			total += value
+		}
+		if !valid || observed != total/booked || (rate.name != "offers_per_ride" && total > booked) {
+			summary.Issues = append(summary.Issues, "A reported rate or offer average is missing its counts or contradicts them.")
+		}
+	}
 }
 
 func (summary *CaptureSummary) checkSamples(directory string, started, ended time.Time) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Deepika-1201/ride-hailing-platform/simulator/internal/api"
+	"github.com/Deepika-1201/ride-hailing-platform/simulator/internal/scenario"
 )
 
 const captureScenario = `name: fixture
@@ -158,6 +159,145 @@ func TestCaptureSummaryRejectsUnbackedPercentilesAndInvalidBounds(t *testing.T) 
 	putCapture(t, directory, "report.json", string(data))
 	if summary := SummariseCapture(directory); summary.Status != "CHECKS_PASSED" {
 		t.Fatalf("consistent percentile rejected: %+v", summary)
+	}
+}
+
+func TestCaptureSummaryRejectsRatesAndCountsThatContradictEachOther(t *testing.T) {
+	cases := map[string]map[string]float64{
+		"inflated match rate":      {"rides.booked": 2, "rides.assigned": 1, "rates.match": 1},
+		"inflated completion rate": {"rides.booked": 2, "rates.completion": 1},
+		"wrong offers per ride":    {"offers": 2, "offers_per_ride": 1},
+		"fractional bookings":      {"rides.booked": 1.5},
+		"too many completed rides": {"rides.completed": 2},
+		"outcomes exceed bookings": {"rides.unfinished": 1},
+	}
+	for name, changes := range cases {
+		t.Run(name, func(t *testing.T) {
+			directory := captureFixture(t)
+			data, err := os.ReadFile(filepath.Join(directory, "report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded Report
+			if err := json.Unmarshal(data, &recorded); err != nil {
+				t.Fatal(err)
+			}
+			for metric, value := range changes {
+				recorded.Metrics[metric] = value
+			}
+			data, err = json.Marshal(recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			putCapture(t, directory, "report.json", string(data))
+			if summary := SummariseCapture(directory); summary.Status != "CHECKS_FAILED" {
+				t.Fatalf("accepted inconsistent report: %+v", summary)
+			}
+		})
+	}
+}
+
+func TestCaptureSummaryChecksDerivedRatesAgainstRealRecorderOutput(t *testing.T) {
+	directory := captureFixture(t)
+	configured, err := scenario.Parse([]byte(captureScenario), filepath.Join(directory, "scenario.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	recorder := NewRecorder()
+	for _, ride := range []string{"completed", "cancelled", "not-found"} {
+		recorder.Booked(ride)
+	}
+	recorder.Ended("completed", Completed)
+	recorder.Ended("cancelled", CancelledSearch)
+	recorder.Ended("not-found", NotFound)
+	recorder.Count("rides.assigned", 1)
+	recorder.Offered("completed")
+	recorder.Offered("completed")
+	recorded := recorder.Build(configured, started, started.Add(time.Minute), &api.Stats{},
+		&api.InvariantReport{Checks: []string{"I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"}}, nil)
+	writeReport := func() {
+		t.Helper()
+		data, marshalErr := json.Marshal(recorded)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		putCapture(t, directory, "report.json", string(data))
+	}
+	writeReport()
+	if summary := SummariseCapture(directory); summary.Status != "CHECKS_PASSED" || summary.Metrics["rates.match"] != 1.0/3 {
+		t.Fatalf("rejected real recorder arithmetic: %+v", summary)
+	}
+	for _, rate := range []string{"rates.match", "rates.completion", "rates.cancel", "rates.not_found", "offers_per_ride"} {
+		original := recorded.Metrics[rate]
+		recorded.Metrics[rate] = original + 0.1
+		writeReport()
+		if summary := SummariseCapture(directory); summary.Status != "CHECKS_FAILED" {
+			t.Fatalf("accepted changed %s", rate)
+		}
+		recorded.Metrics[rate] = original
+	}
+	recorded.Metrics["rides.booked"] = 4
+	recorded.Metrics["rates.match"] = 0.25
+	recorded.Metrics["rates.completion"] = 0.25
+	recorded.Metrics["rates.cancel"] = 0.25
+	recorded.Metrics["rates.not_found"] = 0.25
+	recorded.Metrics["offers_per_ride"] = 0.5
+	writeReport()
+	if summary := SummariseCapture(directory); summary.Status != "CHECKS_FAILED" {
+		t.Fatal("accepted complete outcomes missing one booked ride")
+	}
+}
+
+func TestCaptureSummaryRejectsRatesWithoutTheirInputsAndAcceptsAbsentRatesForZeroBookings(t *testing.T) {
+	for _, missing := range []string{"rides.booked", "rides.assigned"} {
+		t.Run(missing, func(t *testing.T) {
+			directory := captureFixture(t)
+			data, err := os.ReadFile(filepath.Join(directory, "report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded Report
+			if err := json.Unmarshal(data, &recorded); err != nil {
+				t.Fatal(err)
+			}
+			recorded.Metrics["rides.assigned"], recorded.Metrics["rates.match"] = 1, 1
+			delete(recorded.Metrics, missing)
+			data, err = json.Marshal(recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			putCapture(t, directory, "report.json", string(data))
+			if summary := SummariseCapture(directory); summary.Status != "CHECKS_FAILED" {
+				t.Fatalf("accepted rate without %s", missing)
+			}
+		})
+	}
+	directory := captureFixture(t)
+	putCapture(t, directory, "scenario.yaml", strings.Replace(captureScenario, "min: 1", "min: 0", 1))
+	configured, err := scenario.Parse([]byte(strings.Replace(captureScenario, "min: 1", "min: 0", 1)), filepath.Join(directory, "scenario.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	recorded := NewRecorder().Build(configured, started, started.Add(time.Minute), &api.Stats{},
+		&api.InvariantReport{Checks: []string{"I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"}}, nil)
+	data, err := json.Marshal(recorded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putCapture(t, directory, "report.json", string(data))
+	if summary := SummariseCapture(directory); summary.Status != "CHECKS_PASSED" {
+		t.Fatalf("zero-booking report with no derived rates rejected: %+v", summary)
+	}
+	recorded.Metrics["rates.match"] = 0
+	data, err = json.Marshal(recorded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putCapture(t, directory, "report.json", string(data))
+	if summary := SummariseCapture(directory); summary.Status != "CHECKS_FAILED" {
+		t.Fatal("accepted a rate with zero denominator")
 	}
 }
 
