@@ -50,6 +50,25 @@ started or that a log line was printed. A timeout or skipped case is not a succe
 The runtime case also rejects unsafe topic settings and demonstrates dead-letter mirroring while the test
 database temporarily rejects mirror writes. The source assertions, not this summary, define the precise guarantees.
 
+## Failed offer-expiry investigation
+
+The additional P3 regression deliberately holds the pending offer's driver-availability row locked while one
+timer attempt runs. The normal database statement timeout makes that attempt fail after it has tried to update
+the offer, search task and outbox. The test checks that the transaction rolls all of those changes back: the
+offer remains pending, the driver remains reserved, no expiry event is committed, and the timer records its
+error and retry schedule. Once the lock is released, a retry commits one expiry event, restores matching and
+allows another ride to receive an offer from that driver.
+
+```bash
+./gradlew test --console=plain \
+  --tests '*OfferTests.aFailedExpiryLeavesTheDriverReservedUntilItsRetryCommits'
+```
+
+This is a deterministic local lock-timeout/recovery test, not a reproduction of the original intermittent
+missing-offer incident. It proves why "the timer helper attempted work" is not equivalent to "expiry completed"
+and validates the rollback and recovery path. The earlier race now checks expiry, availability and matching
+preconditions explicitly; a passing run does not establish what happened in the original failure.
+
 ## Safe operation
 
 - Let the fixtures create and clean up their test containers. Do not replace their endpoints with a shared demo,

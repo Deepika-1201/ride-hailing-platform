@@ -94,6 +94,9 @@ Interpret the timeline before deciding a recovery action:
   contention and subsequent attempts, not just the first decision.
 - Pending offer: verify its expiry and the dispatch role's timer loop. An expiry can fail and be retried; the
   timer's due time alone does not prove the offer ended or the driver became available again.
+  The [deterministic expiry-recovery regression](failure-demonstrations.md#failed-offer-expiry-investigation)
+  demonstrates the pending/reserved state after rollback and the later successful retry. Do not manually free
+  the driver or change the offer status to bypass that recovery path.
 - Assigned/in-trip but stale location: distinguish driver connectivity from ride state. Reconnection and status
   reads are expected; repeated command submissions require the same idempotency key and identical body.
 - Completed ride awaiting payment/rating: inspect the worker role and its event/notification/replay progress.

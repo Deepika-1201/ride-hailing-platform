@@ -4,6 +4,7 @@ import static com.ridehailing.support.EventContract.outboxEvents;
 import static com.ridehailing.support.OpenApiContract.assertAnswered;
 import static com.ridehailing.support.OpenApiContract.assertProblem;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.ridehailing.location.LiveIndex;
 import com.ridehailing.location.LiveIndex.MirrorState;
@@ -14,6 +15,7 @@ import com.ridehailing.shared.GeoPoint;
 import com.ridehailing.shared.Ids;
 import com.ridehailing.support.EventContract;
 import com.ridehailing.support.IntegrationTest;
+import com.ridehailing.support.Postgis;
 import com.ridehailing.support.TestCities;
 import com.ridehailing.support.TestCities.TestCity;
 import com.ridehailing.support.TestDrivers.TestDriver;
@@ -21,8 +23,12 @@ import com.ridehailing.support.TestPrices;
 import com.ridehailing.support.TestRides;
 import com.ridehailing.support.TestUsers.TestUser;
 import java.net.http.HttpResponse;
+import java.sql.Connection;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -237,6 +243,57 @@ class OfferTests extends IntegrationTest {
             EventContract.assertConforms(event);
             assertThat(event.get("payload").get("seen").asBoolean()).isFalse();
         });
+        assertThat(rides.violations(city.id())).isEmpty();
+    }
+
+    @Test
+    void aFailedExpiryLeavesTheDriverReservedUntilItsRetryCommits() throws Exception {
+        jdbc.sql("""
+                UPDATE platform.timers SET due_at = clock_timestamp() + interval '1 hour'
+                WHERE due_at <= clock_timestamp() AND NOT (kind = 'OFFER_EXPIRY' AND aggregate_id = :offer)
+                """).param("offer", offerId).update();
+        assertThat(rides.timers().makeDue("OFFER_EXPIRY", offerId)).isEqualTo(1);
+        try (Connection gate = Postgis.connection(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            gate.setAutoCommit(false);
+            try (var statement = gate.prepareStatement("SELECT driver_id FROM dispatch.driver_availability WHERE driver_id = ? FOR UPDATE")) {
+                statement.setObject(1, driver.id());
+                statement.execute();
+            }
+            var attempted = executor.submit(() -> TestRides.asDispatch(() -> rides.timers().fireNext()));
+            try {
+                await().atMost(Duration.ofSeconds(3)).until(() -> jdbc.sql("""
+                        SELECT count(*) FROM pg_stat_activity
+                        WHERE datname = current_database() AND wait_event_type = 'Lock'
+                          AND query LIKE '%dispatch.driver_availability%'
+                        """).query(Long.class).single() > 0);
+                assertThat(attempted.get(5, TimeUnit.SECONDS)).as("claimed work is not proof of successful expiry").isTrue();
+            } finally {
+                gate.rollback();
+            }
+        }
+
+        assertThat(rides.offerStatus(offerId)).isEqualTo("PENDING");
+        assertThat(availability(driver)).isEqualTo("OFFERED 0");
+        assertThat(index.nearby(city.id(), "MINI", pickup, 2000, 20)).isEmpty();
+        assertThat(outboxEvents(jdbc, "OfferExpired", offerId)).isEmpty();
+        assertThat(jdbc.sql("SELECT due_at IS NULL FROM dispatch.search_tasks WHERE ride_id = :ride")
+                .param("ride", ride.id()).query(Boolean.class).single()).isTrue();
+        assertThat(jdbc.sql("""
+                SELECT attempts = 1 AND parked_at IS NULL AND due_at > clock_timestamp()
+                       AND last_error LIKE '%statement timeout%'
+                FROM platform.timers WHERE kind = 'OFFER_EXPIRY' AND aggregate_id = :offer
+                """).param("offer", offerId).query(Boolean.class).single()).isTrue();
+
+        rides.fire("OFFER_EXPIRY", offerId);
+
+        assertThat(rides.offerStatus(offerId)).isEqualTo("EXPIRED");
+        assertThat(availability(driver)).isEqualTo("AVAILABLE 0");
+        assertThat(rides.timers().exists("OFFER_EXPIRY", offerId)).isFalse();
+        assertThat(index.nearby(city.id(), "MINI", pickup, 2000, 20)).extracting(LiveIndex.Candidate::driverId)
+                .containsExactly(driver.id());
+        assertThat(outboxEvents(jdbc, "OfferExpired", offerId)).singleElement().satisfies(EventContract::assertConforms);
+        RideView next = rides.book(rides.rider("Next rider").id(), city, pickup, "MINI");
+        assertThat(offerTo(next)).isNotNull();
         assertThat(rides.violations(city.id())).isEmpty();
     }
 
