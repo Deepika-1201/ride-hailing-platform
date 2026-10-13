@@ -12,6 +12,9 @@ portfolio release. It does not replace or complete the original 23-phase roadmap
 See the [three-role demo walkthrough](docs/demo.md) for reviewed desktop/mobile screenshots, recording commands,
 and the distinction between functional demo evidence and capacity claims.
 
+The [failure and recovery demonstrations](docs/failure-demonstrations.md) provide executable checks for broker
+outages, duplicate replay, worker restart, Valkey recovery and moving live clients off a draining node.
+
 ## Quick start
 
 JDK 25 and Docker are required (on macOS, Colima works).
